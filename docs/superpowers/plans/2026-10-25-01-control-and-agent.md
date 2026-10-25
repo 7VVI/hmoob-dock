@@ -6,7 +6,7 @@
 
 **Architecture:** 单实例 Go 控制端提供 API、Vue 静态资源和经过认证的 Agent WSS 入口。每个 Linux 节点运行一个 Agent，主动连接控制端，并从本机 Docker 获取清单；SQLite 保存身份与配置，不让浏览器直连 Docker。
 
-**Tech Stack:** Go 1.26.10、标准库 HTTP、modernc.org/sqlite、golang.org/x/crypto、github.com/coder/websocket、Docker 官方 Go SDK、Vue 3、TypeScript、Vite 8、Vitest 4、Playwright；Node.js 25.8.1（现有环境）。
+**Tech Stack:** Go 1.26.10、标准库 HTTP、modernc.org/sqlite、golang.org/x/crypto、github.com/coder/websocket、Docker 官方 Go SDK、Vue 3、TypeScript 6.0.3、Vite 8、Vitest 4、Playwright；Node.js 25.8.1（现有环境）。
 
 **Spec:** [已批准设计](../specs/2026-10-24-hmoob-dock-design.md)。本文为整个实施工作的入口。
 
@@ -51,7 +51,7 @@
 
 规划时实际检查：项目只有设计文档；终端 PATH 找不到 `go`；Docker CLI 为 29.3.0，但 Docker Desktop Linux Engine 管道不存在；PATH 中 Node 为 25.8.1，npm 为 11.11.0。
 
-官方 Go 下载接口当时列出稳定版 1.27.3 和 1.26.10；选择 1.26.10 作为一致工具链。npm 当时返回 Vue 3.5.44、Vite 8.3.5、TypeScript 7.0.2、Vitest 5.0.5。Vitest 5.0.5 的 Node 范围是 `^22.12.0 || ^24.0.0 || >=26.0.0`，不包含现有 Node 25；Vitest 4.x 的范围是 `^20.0.0 || ^22.0.0 || >=24.0.0`，覆盖 Node 25.8.1。因此固定使用 Vitest 4.x 与 Vite 8，不采用 Vitest 5，也不为此单独安装另一个 Node 版本。
+官方 Go 下载接口当时列出稳定版 1.27.3 和 1.26.10；选择 1.26.10 作为一致工具链。npm 当时返回 Vue 3.5.44、Vite 8.3.5、TypeScript 7.0.2、Vitest 5.0.5。Vitest 5.0.5 的 Node 范围是 `^22.12.0 || ^24.0.0 || >=26.0.0`，不包含现有 Node 25；Vitest 4.x 的范围是 `^20.0.0 || ^22.0.0 || >=24.0.0`，覆盖 Node 25.8.1。因此固定使用 Vitest 4.x 与 Vite 8，不采用 Vitest 5，也不为此单独安装另一个 Node 版本。TypeScript 固定 6.0.3 而非 7.0.2：`vue-tsc@3.3.13` 依赖 `typescript/lib/tsc` 子路径，TypeScript 7 已移除该导出，且不存在支持 TypeScript 7 的更新版 vue-tsc，而 `vue-tsc --noEmit` 是固定的构建命令。
 
 执行前需要授权安装 Go 1.26.10、初始化本地 git 仓库（仅本地提交，不推送）并启动 Docker 引擎用于真实环境验证。不得在没有授权的情况下改动系统工具、替换 PATH、切换用户 Docker context 或启动桌面服务。单元测试不要求生产服务器；Swarm 验收另需明确授权的隔离 Linux 节点，若仅能提供本机 Docker Desktop，则三节点 Swarm 与多 Manager quorum 场景记为未验收。
 
