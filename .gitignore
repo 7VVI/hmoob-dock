@@ -1,0 +1,30 @@
+# Build outputs
+/bin/
+/control
+/agent
+/web/dist/
+/web/node_modules/
+/web/test-results/
+/web/playwright-report/
+
+# Local runtime data
+/data/
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# Local secrets and credentials
+*.key
+*.pem
+/agent-credential
+/bootstrap-*
+
+# SDD workspace (plan briefs, reports, review packages, ledger)
+.superpowers/
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
