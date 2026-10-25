@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"hmoob-dock/internal/auth"
 	"hmoob-dock/internal/config"
 	"hmoob-dock/internal/secret"
 	"hmoob-dock/internal/store"
@@ -35,6 +36,10 @@ type Server struct {
 	box   *secret.Box
 	cfg   config.Control
 	mux   *http.ServeMux
+	// auth manages the administrator, the sessions and the CSRF tokens.
+	auth *auth.Service
+	// loginLimiter counts the failed logins of a source.
+	loginLimiter *auth.Limiter
 }
 
 // NewServer assembles the control端 HTTP handler.
@@ -94,10 +99,20 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 		box:   box,
 		cfg:   cfg,
 		mux:   http.NewServeMux(),
+		auth:  auth.New(db, time.Now),
 	}
+	server.loginLimiter = auth.NewLimiter(loginMaxAttempts, loginRateWindow, time.Now)
 	server.mux.HandleFunc("/healthz", server.handleHealth)
 	server.mux.HandleFunc("/readyz", server.handleReady)
+	server.registerAuthRoutes()
 	server.mux.HandleFunc("/", server.handleNotFound)
+
+	// The bootstrap credential of the deployment opens the first
+	// initialization. It is only stored while no administrator exists.
+	if err := server.seedBootstrap(); err != nil {
+		_ = reads.Close()
+		return nil, err
+	}
 	return server, nil
 }
 
@@ -244,4 +259,17 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 		"code":    code,
 		"message": message,
 	})
+}
+
+// writeErrorFields writes the common error document with a message for
+// every field that failed the validation.
+func writeErrorFields(w http.ResponseWriter, status int, code, message string, fields map[string]string) {
+	payload := map[string]any{
+		"code":    code,
+		"message": message,
+	}
+	if len(fields) > 0 {
+		payload["fields"] = fields
+	}
+	writeJSON(w, status, payload)
 }

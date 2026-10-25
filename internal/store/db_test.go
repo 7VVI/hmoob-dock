@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,7 +25,7 @@ func TestOpenAppliesCoreMigration(t *testing.T) {
 	db := openTestDB(t)
 
 	var version int
-	if err := db.QueryRow(`SELECT version FROM schema_migrations ORDER BY version`).Scan(&version); err != nil {
+	if err := db.QueryRow(`SELECT version FROM schema_migrations WHERE version = 1`).Scan(&version); err != nil {
 		t.Fatalf("read schema_migrations: %v", err)
 	}
 	if version != 1 {
@@ -72,6 +73,7 @@ func TestOpenPersistsDataAcrossReopen(t *testing.T) {
 
 func TestOpenDoesNotReapplyAppliedMigrations(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "control.db")
+	wanted := countMigrations(t)
 
 	for attempt := 1; attempt <= 3; attempt++ {
 		db, err := Open(path)
@@ -82,13 +84,24 @@ func TestOpenDoesNotReapplyAppliedMigrations(t *testing.T) {
 		if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&applied); err != nil {
 			t.Fatalf("count schema_migrations: %v", err)
 		}
-		if applied != 1 {
-			t.Fatalf("applied migrations = %d, want 1", applied)
+		if applied != wanted {
+			t.Fatalf("applied migrations = %d, want %d", applied, wanted)
 		}
 		if err := db.Close(); err != nil {
 			t.Fatalf("close attempt %d: %v", attempt, err)
 		}
 	}
+}
+
+// countMigrations returns the number of the migration files of the package.
+func countMigrations(t *testing.T) int {
+	t.Helper()
+
+	entries, err := fs.ReadDir(migrationFS, "migrations")
+	if err != nil {
+		t.Fatalf("read the embedded migrations: %v", err)
+	}
+	return len(entries)
 }
 
 func TestOpenFailsWhenMigrationCannotBeApplied(t *testing.T) {
@@ -129,7 +142,7 @@ func TestMigrationRollsBackOnFailure(t *testing.T) {
 	db := openTestDB(t)
 
 	fsys := fstest.MapFS{
-		"002_broken.sql": &fstest.MapFile{Data: []byte(
+		"900_broken.sql": &fstest.MapFile{Data: []byte(
 			"CREATE TABLE staged (id TEXT PRIMARY KEY);\n" +
 				"INSERT INTO missing_table (id) VALUES ('x');\n",
 		)},
@@ -148,7 +161,7 @@ func TestMigrationRollsBackOnFailure(t *testing.T) {
 	}
 
 	var applied int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version = 2`).Scan(&applied); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version = 900`).Scan(&applied); err != nil {
 		t.Fatalf("count schema_migrations: %v", err)
 	}
 	if applied != 0 {
