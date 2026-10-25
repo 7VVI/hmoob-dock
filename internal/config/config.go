@@ -1,0 +1,175 @@
+// Package config loads and validates the configuration of the control端.
+//
+// The master key is read here and never leaves this package in readable
+// form: callers receive the raw key bytes and hand them to the secret
+// package, which stays independent of the configuration.
+package config
+
+import (
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"hmoob-dock/internal/secret"
+)
+
+// MasterKeySize is the length of the master key file in bytes.
+const MasterKeySize = secret.KeySize
+
+// Control holds the configuration of the control端.
+type Control struct {
+	// DBPath is the SQLite database file.
+	DBPath string
+	// KeyFile is the file holding the master key. It must live outside of
+	// the database directory.
+	KeyFile string
+	// BootstrapFile is the file holding the one time administrator
+	// bootstrap credential. It is empty when no credential is provided.
+	BootstrapFile string
+	// PublicURL is the externally reachable base URL of the control端.
+	PublicURL string
+	// TLSCert and TLSKey point at the server certificate and its key.
+	TLSCert string
+	TLSKey  string
+	// WebDir is the directory holding the frontend build output.
+	WebDir string
+}
+
+// Load reads the control端 configuration from the environment and validates
+// it.
+func Load() (Control, error) {
+	cfg := Control{
+		DBPath:        envOrDefault("HMOOB_DB_PATH", filepath.Join("data", "hmoob.db")),
+		KeyFile:       envOrDefault("HMOOB_KEY_FILE", filepath.Join("secrets", "master.key")),
+		BootstrapFile: os.Getenv("HMOOB_BOOTSTRAP_FILE"),
+		PublicURL:     os.Getenv("HMOOB_PUBLIC_URL"),
+		TLSCert:       os.Getenv("HMOOB_TLS_CERT"),
+		TLSKey:        os.Getenv("HMOOB_TLS_KEY"),
+		WebDir:        envOrDefault("HMOOB_WEB_DIR", filepath.Join("web", "dist")),
+	}
+	if err := cfg.Validate(); err != nil {
+		return Control{}, err
+	}
+	return cfg, nil
+}
+
+// Validate reports whether the configuration can be started with.
+func (c Control) Validate() error {
+	if strings.TrimSpace(c.DBPath) == "" {
+		return errors.New("config: a database path is required")
+	}
+	if strings.TrimSpace(c.KeyFile) == "" {
+		return errors.New("config: a master key file is required")
+	}
+	if (c.TLSCert == "") != (c.TLSKey == "") {
+		return errors.New("config: the TLS certificate and the TLS key must be configured together")
+	}
+	return c.checkKeyOutsideDatabaseDirectory()
+}
+
+// checkKeyOutsideDatabaseDirectory makes sure the master key is not stored
+// next to the database it protects, because losing the database must not
+// mean losing the key as well.
+func (c Control) checkKeyOutsideDatabaseDirectory() error {
+	keyPath, err := filepath.Abs(c.KeyFile)
+	if err != nil {
+		return fmt.Errorf("config: resolve master key file %s: %w", c.KeyFile, err)
+	}
+	if resolved, err := filepath.EvalSymlinks(keyPath); err == nil {
+		keyPath = resolved
+	}
+	dbDir, err := filepath.Abs(filepath.Dir(c.DBPath))
+	if err != nil {
+		return fmt.Errorf("config: resolve database directory of %s: %w", c.DBPath, err)
+	}
+	if resolved, err := filepath.EvalSymlinks(dbDir); err == nil {
+		dbDir = resolved
+	}
+
+	if keyPath == dbDir || strings.HasPrefix(keyPath, dbDir+string(os.PathSeparator)) {
+		return fmt.Errorf(
+			"config: the master key file %s must not be stored inside the database directory %s",
+			c.KeyFile, dbDir,
+		)
+	}
+	return nil
+}
+
+// LoadMasterKey reads the master key from path. The file must hold exactly
+// MasterKeySize bytes; a missing or malformed file is an error instead of a
+// silently replaced key.
+func LoadMasterKey(path string) ([]byte, error) {
+	key, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("config: the master key file %s does not exist", path)
+		}
+		return nil, fmt.Errorf("config: read the master key file %s: %w", path, err)
+	}
+	if len(key) != MasterKeySize {
+		return nil, fmt.Errorf(
+			"config: the master key file %s must hold exactly %d bytes, got %d",
+			path, MasterKeySize, len(key),
+		)
+	}
+	return key, nil
+}
+
+// GenerateMasterKey writes a new random master key to path. An existing key
+// is never replaced: replacing it would make the stored configuration
+// unreadable.
+func GenerateMasterKey(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("config: the master key file %s already exists", path)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("config: inspect the master key file %s: %w", path, err)
+	}
+
+	key := make([]byte, MasterKeySize)
+	if _, err := rand.Read(key); err != nil {
+		return fmt.Errorf("config: generate the master key: %w", err)
+	}
+	if dir := filepath.Dir(path); dir != "" {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("config: create the master key directory %s: %w", dir, err)
+		}
+	}
+	if err := os.WriteFile(path, key, 0o600); err != nil {
+		return fmt.Errorf("config: write the master key file %s: %w", path, err)
+	}
+	return nil
+}
+
+// LoadBootstrapToken reads the one time administrator bootstrap credential
+// from path. The credential is only returned to the caller, it is never
+// logged.
+func LoadBootstrapToken(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("config: the bootstrap file %s does not exist", path)
+		}
+		return "", fmt.Errorf("config: read the bootstrap file %s: %w", path, err)
+	}
+	token := strings.TrimSpace(string(data))
+	if token == "" {
+		return "", fmt.Errorf("config: the bootstrap file %s is empty", path)
+	}
+	return token, nil
+}
+
+// envOrDefault returns the value of the environment variable or the given
+// fallback when it is unset or empty.
+func envOrDefault(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
+}
