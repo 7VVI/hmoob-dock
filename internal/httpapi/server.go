@@ -8,6 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -16,14 +19,16 @@ import (
 	"hmoob-dock/internal/store"
 )
 
-// healthTimeout bounds the database check of the health endpoint.
-const healthTimeout = 2 * time.Second
+// readinessTimeout bounds the database read of the readiness endpoint.
+const readinessTimeout = 2 * time.Second
 
 // Server serves the control端 HTTP API.
 //
 // Queries run on a read-only pool that is opened next to the write pool, so
-// a slow query cannot block a write. Later tasks extend the routing without
-// changing the constructor.
+// a slow query cannot block a write. The constructor proves that both pools
+// address the same database, because a silent mismatch would let the server
+// answer from a database other than the one it writes to. Later tasks extend
+// the routing without changing the constructor.
 type Server struct {
 	db    *sql.DB
 	reads *sql.DB
@@ -33,6 +38,12 @@ type Server struct {
 }
 
 // NewServer assembles the control端 HTTP handler.
+//
+// The write pool and the read pool must address the same database. A
+// database handle does not expose its data source, so the identity is proven
+// with a real query on both pools instead of being assumed. A mismatch is
+// reported as an error, so a misconfigured control端 stops instead of
+// serving data from an unexpected database.
 func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, error) {
 	if db == nil {
 		return nil, errors.New("httpapi: a database handle is required")
@@ -44,9 +55,37 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 		return nil, errors.New("httpapi: a database path is required")
 	}
 
+	writeFile, writeMigrations, err := probeDatabase(db)
+	if err != nil {
+		return nil, fmt.Errorf("httpapi: inspect the write pool: %w", err)
+	}
+
+	// The read pool must not create a database that nobody uses, so the
+	// file has to exist before the pool is opened.
+	if _, err := os.Stat(cfg.DBPath); err != nil {
+		return nil, fmt.Errorf("httpapi: the database %s is not accessible: %w", cfg.DBPath, err)
+	}
+
 	reads, err := store.OpenReader(cfg.DBPath)
 	if err != nil {
 		return nil, fmt.Errorf("httpapi: open the read pool: %w", err)
+	}
+
+	readFile, readMigrations, err := probeDatabase(reads)
+	if err != nil {
+		_ = reads.Close()
+		return nil, fmt.Errorf("httpapi: inspect the read pool: %w", err)
+	}
+	if !samePath(writeFile, readFile) {
+		_ = reads.Close()
+		return nil, fmt.Errorf(
+			"httpapi: the read pool addresses %s while the write pool addresses %s",
+			readFile, writeFile,
+		)
+	}
+	if writeMigrations != readMigrations {
+		_ = reads.Close()
+		return nil, errors.New("httpapi: the read pool and the write pool disagree about the applied migrations")
 	}
 
 	server := &Server{
@@ -57,6 +96,7 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 		mux:   http.NewServeMux(),
 	}
 	server.mux.HandleFunc("/healthz", server.handleHealth)
+	server.mux.HandleFunc("/readyz", server.handleReady)
 	server.mux.HandleFunc("/", server.handleNotFound)
 	return server, nil
 }
@@ -71,26 +111,122 @@ func (s *Server) Close() error {
 	return s.reads.Close()
 }
 
-// handleHealth reports that the control端 is alive. It exposes neither the
-// configuration nor the database location.
+// handleHealth reports that the control端 is alive. It answers without
+// touching the database, so a locked or busy database never marks the
+// process as unhealthy. It exposes neither the configuration nor the
+// database location.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "该端点只接受 GET 请求")
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), healthTimeout)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleReady reports whether the control端 can serve requests. It performs
+// a real read instead of a ping, so a database that lost its schema is
+// reported as not ready.
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "该端点只接受 GET 请求")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), readinessTimeout)
 	defer cancel()
-	if err := s.reads.PingContext(ctx); err != nil {
+	if _, err := readMigrationCount(ctx, s.reads); err != nil {
 		writeError(w, http.StatusServiceUnavailable, "database_unavailable", "数据库当前不可用")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 // handleNotFound answers unknown routes with the common error format.
 func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusNotFound, "not_found", "未找到请求的资源")
+}
+
+// probeDatabase returns the file of the main database and the number of
+// applied migrations. The migration count comes from a real read, so a
+// database without the expected schema is detected instead of accepted.
+func probeDatabase(db *sql.DB) (string, int, error) {
+	file, err := databaseFile(db)
+	if err != nil {
+		return "", 0, err
+	}
+	migrations, err := readMigrationCount(context.Background(), db)
+	if err != nil {
+		return "", 0, fmt.Errorf("read schema_migrations: %w", err)
+	}
+	return file, migrations, nil
+}
+
+// databaseFile returns the file of the main database of db.
+func databaseFile(db *sql.DB) (string, error) {
+	rows, err := db.Query(`PRAGMA database_list`)
+	if err != nil {
+		return "", fmt.Errorf("read the database list: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var seq int
+		var name, file string
+		if err := rows.Scan(&seq, &name, &file); err != nil {
+			return "", fmt.Errorf("scan the database list: %w", err)
+		}
+		if name == "main" {
+			if file == "" {
+				return "", errors.New("the main database is not backed by a file")
+			}
+			return file, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("read the database list: %w", err)
+	}
+	return "", errors.New("the database list does not contain the main database")
+}
+
+// readMigrationCount reads the number of applied migrations. It is a real
+// read of the schema table and not a ping of the connection.
+func readMigrationCount(ctx context.Context, db *sql.DB) (int, error) {
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// samePath reports whether two paths address the same location.
+func samePath(a, b string) bool {
+	left, err := canonicalPath(a)
+	if err != nil {
+		return false
+	}
+	right, err := canonicalPath(b)
+	if err != nil {
+		return false
+	}
+	return left == right
+}
+
+// canonicalPath turns a path into a comparable form: absolute, free of
+// symbolic links and, on the platforms that ignore the letter case, lower
+// case.
+func canonicalPath(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", path, err)
+	}
+	if resolved, err := filepath.EvalSymlinks(absolute); err == nil {
+		absolute = resolved
+	}
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		absolute = strings.ToLower(absolute)
+	}
+	return absolute, nil
 }
 
 // writeJSON writes a JSON document with the given status code. The status

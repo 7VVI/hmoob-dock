@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"hmoob-dock/internal/config"
@@ -51,6 +52,33 @@ func TestLoadKeepsKeyFileOutsideDatabaseDirectory(t *testing.T) {
 	if _, err := config.Load(); err == nil {
 		t.Fatal("Load accepted a master key stored inside the database directory")
 	}
+}
+
+func TestValidateRejectsKeyFileInsideDatabaseDirectoryWithMixedCase(t *testing.T) {
+	dir := t.TempDir()
+
+	// The configuration is validated before the database directory and the
+	// master key file are created, so neither path exists yet.
+	cfg := config.Control{
+		DBPath:  filepath.Join(dir, "Data", "control.db"),
+		KeyFile: filepath.Join(dir, "dAtA", "master.key"),
+	}
+	err := cfg.Validate()
+	if caseInsensitiveFilesystem() {
+		if err == nil {
+			t.Fatal("Validate accepted a master key stored inside the database directory")
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+// caseInsensitiveFilesystem reports whether the platform compares path names
+// with letter case.
+func caseInsensitiveFilesystem() bool {
+	return runtime.GOOS == "windows" || runtime.GOOS == "darwin"
 }
 
 func TestValidateRejectsIncompleteTLSConfiguration(t *testing.T) {

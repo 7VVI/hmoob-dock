@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"hmoob-dock/internal/secret"
@@ -90,13 +91,29 @@ func (c Control) checkKeyOutsideDatabaseDirectory() error {
 		dbDir = resolved
 	}
 
-	if keyPath == dbDir || strings.HasPrefix(keyPath, dbDir+string(os.PathSeparator)) {
+	// Windows and macOS ignore the letter case of a path, so the
+	// comparison has to ignore it as well. The symbolic link resolution
+	// above only works for paths that exist already, and the
+	// configuration is validated before the database directory and the
+	// master key file are created.
+	foldedKey := foldPathCase(keyPath)
+	foldedDir := foldPathCase(dbDir)
+	if foldedKey == foldedDir || strings.HasPrefix(foldedKey, foldedDir+string(os.PathSeparator)) {
 		return fmt.Errorf(
 			"config: the master key file %s must not be stored inside the database directory %s",
 			c.KeyFile, dbDir,
 		)
 	}
 	return nil
+}
+
+// foldPathCase returns the path in the form used to compare it. Platforms
+// that ignore the letter case of a path compare the lower case form.
+func foldPathCase(path string) string {
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		return strings.ToLower(path)
+	}
+	return path
 }
 
 // LoadMasterKey reads the master key from path. The file must hold exactly
