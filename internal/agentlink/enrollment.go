@@ -34,6 +34,11 @@ const EnrollmentTTL = 15 * time.Minute
 // the limit of the authentication, so the whole audit log has one capacity.
 const auditLimit = 10000
 
+// auditWarningInterval is the time between two reports of a problem of the
+// audit log. It keeps a control端 under a flood of refused enrollments from
+// writing one log line per attempt.
+const auditWarningInterval = time.Minute
+
 // The actions of the audit events of the agent access.
 const (
 	// AuditActionEnroll marks the enrollment of a node.
@@ -68,6 +73,9 @@ var (
 	ErrUnknownNode = errors.New("agentlink: the node is unknown")
 	// ErrInvalidIdentity reports an identity that cannot name a node.
 	ErrInvalidIdentity = errors.New("agentlink: the identity of the node is incomplete")
+	// errAuditFull reports that the audit table reached its capacity, so
+	// the event was not stored.
+	errAuditFull = errors.New("agentlink: the audit table is full")
 )
 
 // Credential is the credential of a node.
@@ -111,6 +119,14 @@ type Enrollment struct {
 	revokeMu sync.RWMutex
 	// revokeHooks are called when the credential of a node is revoked.
 	revokeHooks []func(nodeID string)
+	// auditMu guards the state of the reports about the audit log.
+	auditMu sync.Mutex
+	// auditFullReported remembers that a full audit table was reported, so
+	// the report does not repeat itself with every attempt.
+	auditFullReported bool
+	// auditLastReport is the moment of the last report of a problem of the
+	// audit log.
+	auditLastReport time.Time
 }
 
 // New builds the enrollment service on top of the given database. The clock
@@ -164,6 +180,10 @@ func (e *Enrollment) Issue(ctx context.Context) (string, error) {
 // token. The engine ID of the identity anchors the node: an engine ID that
 // is enrolled already is a conflict and does not replace the node that
 // exists already.
+//
+// A node that was revoked is the exception: the administrator hands out a
+// new enrollment token for it, so the machine may enter again. The token is
+// the proof of that decision, so the redemption is not possible without it.
 func (e *Enrollment) Redeem(ctx context.Context, token string, identity protocol.NodeIdentity) (Credential, error) {
 	if strings.TrimSpace(token) == "" {
 		return Credential{}, ErrInvalidToken
@@ -189,12 +209,13 @@ func (e *Enrollment) Redeem(ctx context.Context, token string, identity protocol
 		return Credential{}, ErrInvalidToken
 	}
 
-	var known int
-	if err := tx.QueryRowContext(ctx,
-		`SELECT count(*) FROM nodes WHERE engine_id = ?`, identity.EngineID).Scan(&known); err != nil {
-		return Credential{}, fmt.Errorf("agentlink: read the nodes: %w", err)
+	existing, err := e.findNodeByEngine(ctx, tx, identity.EngineID)
+	if err != nil {
+		return Credential{}, err
 	}
-	if known > 0 {
+	if existing != nil && existing.RevokedAt == nil {
+		// The node is active, so the control端 does not replace it on its
+		// own: the administrator has to handle the conflict.
 		if err := e.failEnrollment(ctx, tx, identity.EngineID); err != nil {
 			return Credential{}, err
 		}
@@ -205,17 +226,10 @@ func (e *Enrollment) Redeem(ctx context.Context, token string, identity protocol
 	if err != nil {
 		return Credential{}, err
 	}
-	nodeID, err := randomID()
+	now := e.now()
+	nodeID, err := e.storeNode(ctx, tx, existing, identity, credential, now)
 	if err != nil {
 		return Credential{}, err
-	}
-	now := e.now()
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO nodes (id, engine_id, swarm_id, swarm_node_id, role, hostname, credential_hash, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		nodeID, identity.EngineID, identity.SwarmID, identity.SwarmNodeID, identity.Role, identity.Hostname,
-		digestOf(credential), store.TimeToMillis(now)); err != nil {
-		return Credential{}, fmt.Errorf("agentlink: store the node: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE agent_tokens SET consumed_at = ? WHERE id = ?`,
@@ -227,6 +241,69 @@ func (e *Enrollment) Redeem(ctx context.Context, token string, identity protocol
 		return Credential{}, fmt.Errorf("agentlink: commit the enrollment: %w", err)
 	}
 	return Credential{NodeID: nodeID, Token: credential}, nil
+}
+
+// storeNode writes the node of an enrollment and returns its identifier.
+//
+// A node that does not exist yet is created. A node that was revoked keeps
+// its identifier and gets the new credential: the row of the node stays,
+// only the revocation and the credential change.
+func (e *Enrollment) storeNode(
+	ctx context.Context,
+	tx *sql.Tx,
+	existing *Node,
+	identity protocol.NodeIdentity,
+	credential string,
+	now time.Time,
+) (string, error) {
+	if existing == nil {
+		nodeID, err := randomID()
+		if err != nil {
+			return "", err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO nodes (id, engine_id, swarm_id, swarm_node_id, role, hostname, credential_hash, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			nodeID, identity.EngineID, identity.SwarmID, identity.SwarmNodeID, identity.Role, identity.Hostname,
+			digestOf(credential), store.TimeToMillis(now)); err != nil {
+			return "", fmt.Errorf("agentlink: store the node: %w", err)
+		}
+		return nodeID, nil
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE nodes SET swarm_id = ?, swarm_node_id = ?, role = ?, hostname = ?, credential_hash = ?, revoked_at = NULL
+		 WHERE id = ?`,
+		identity.SwarmID, identity.SwarmNodeID, identity.Role, identity.Hostname,
+		digestOf(credential), existing.ID); err != nil {
+		return "", fmt.Errorf("agentlink: store the node: %w", err)
+	}
+	return existing.ID, nil
+}
+
+// findNodeByEngine returns the enrolled node of the given engine ID. It
+// returns nil when no node uses the engine.
+func (e *Enrollment) findNodeByEngine(ctx context.Context, tx *sql.Tx, engineID string) (*Node, error) {
+	var node Node
+	var createdAt int64
+	var revokedAt sql.NullInt64
+	err := tx.QueryRowContext(ctx,
+		`SELECT id, engine_id, swarm_id, swarm_node_id, role, hostname, created_at, revoked_at
+		 FROM nodes WHERE engine_id = ?`, engineID).
+		Scan(&node.ID, &node.EngineID, &node.SwarmID, &node.SwarmNodeID, &node.Role, &node.Hostname,
+			&createdAt, &revokedAt)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("agentlink: read the node: %w", err)
+	}
+	node.CreatedAt = store.TimeFromMillis(createdAt)
+	if revokedAt.Valid {
+		revoked := store.TimeFromMillis(revokedAt.Int64)
+		node.RevokedAt = &revoked
+	}
+	return &node, nil
 }
 
 // Revoke withdraws the credential of a node. The node cannot authenticate
@@ -423,8 +500,38 @@ type sqlExecutor interface {
 // its result.
 func (e *Enrollment) recordAudit(ctx context.Context, executor sqlExecutor, action, result, target string) {
 	if err := e.insertAudit(ctx, executor, action, result, target); err != nil {
-		log.Printf("control: the audit event could not be stored: %v", err)
+		e.reportAuditProblem(err)
 	}
+}
+
+// reportAuditProblem reports a problem of the audit log.
+//
+// The report of a full table happens once, the report of the other problems
+// is throttled, so a flood of refused enrollments does not fill the log of
+// the control端 with one line per attempt. The report holds neither a
+// credential nor a digest.
+func (e *Enrollment) reportAuditProblem(err error) {
+	e.auditMu.Lock()
+	defer e.auditMu.Unlock()
+
+	if errors.Is(err, errAuditFull) {
+		if e.auditFullReported {
+			return
+		}
+		e.auditFullReported = true
+		log.Printf(
+			"control: the audit table is full (%d events); the further audit events are not stored",
+			auditLimit,
+		)
+		return
+	}
+
+	now := e.now()
+	if !e.auditLastReport.IsZero() && now.Sub(e.auditLastReport) < auditWarningInterval {
+		return
+	}
+	e.auditLastReport = now
+	log.Printf("control: the audit event could not be stored: %v", err)
 }
 
 // insertAudit stores an audit event of the agent access.
@@ -446,7 +553,7 @@ func (e *Enrollment) insertAudit(ctx context.Context, executor sqlExecutor, acti
 	}
 	if affected == 0 {
 		// The table reached its capacity, so the event was not stored.
-		return errors.New("agentlink: the audit table is full")
+		return errAuditFull
 	}
 	return nil
 }

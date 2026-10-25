@@ -17,7 +17,9 @@ import (
 // inventory.
 func TestTheInventoryOfANodeGrowsOld(t *testing.T) {
 	hub := NewHub(nil)
-	node := newConnection(hub, "node-1", nil, protocol.NodeIdentity{EngineID: "engine-a"})
+	node := newConnection(hub, "node-1", nil,
+		protocol.NodeIdentity{EngineID: "engine-a"},
+		Node{ID: "node-1", EngineID: "engine-a"})
 
 	now := time.Now()
 	node.inventory = &protocol.Inventory{
@@ -42,7 +44,9 @@ func TestTheInventoryOfANodeGrowsOld(t *testing.T) {
 // inventory has none.
 func TestANodeWithoutAnInventoryHasNone(t *testing.T) {
 	hub := NewHub(nil)
-	node := newConnection(hub, "node-1", nil, protocol.NodeIdentity{EngineID: "engine-a"})
+	node := newConnection(hub, "node-1", nil,
+		protocol.NodeIdentity{EngineID: "engine-a"},
+		Node{ID: "node-1", EngineID: "engine-a"})
 
 	if _, err := node.currentInventory(time.Now()); !errors.Is(err, ErrNoInventory) {
 		t.Fatalf("read the inventory: %v, want %v", err, ErrNoInventory)
@@ -54,7 +58,9 @@ func TestANodeWithoutAnInventoryHasNone(t *testing.T) {
 // connection is still open.
 func TestTheHeartbeatWindowDecidesAboutALostNode(t *testing.T) {
 	hub := NewHub(nil)
-	node := newConnection(hub, "node-1", nil, protocol.NodeIdentity{EngineID: "engine-a"})
+	node := newConnection(hub, "node-1", nil,
+		protocol.NodeIdentity{EngineID: "engine-a"},
+		Node{ID: "node-1", EngineID: "engine-a"})
 
 	now := time.Now()
 	node.lastSeen = now.Add(-2 * HeartbeatTimeout)
@@ -65,6 +71,37 @@ func TestTheHeartbeatWindowDecidesAboutALostNode(t *testing.T) {
 	node.lastSeen = now
 	if !node.status(now).Connected {
 		t.Fatal("the node does not count as connected although its agent is alive")
+	}
+}
+
+// TestTheManagerOfAClusterIsDecidedByTheEnrolledRecord reports that the
+// manager of a cluster is decided by the enrolled record of a node and not
+// by the role that the agent claims in its hello.
+//
+// An agent that claims the role of a manager must not answer for the
+// cluster, because only the enrollment of the node proves the role.
+func TestTheManagerOfAClusterIsDecidedByTheEnrolledRecord(t *testing.T) {
+	hub := NewHub(nil)
+
+	// The agent of the node claims the role of a manager, while the
+	// enrolled record of the node says that it is a worker.
+	node := newConnection(hub, "node-1", nil,
+		protocol.NodeIdentity{
+			EngineID: "engine-a",
+			SwarmID:  "cluster-1",
+			Role:     protocol.RoleManager,
+		},
+		Node{
+			ID:       "node-1",
+			EngineID: "engine-a",
+			SwarmID:  "cluster-1",
+			Role:     protocol.RoleWorker,
+		})
+	node.lastSeen = time.Now()
+	hub.connections["node-1"] = node
+
+	if _, ok := hub.swarmManager("cluster-1"); ok {
+		t.Fatal("the control端 chose a node that only claims the role of a manager")
 	}
 }
 

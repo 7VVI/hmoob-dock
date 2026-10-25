@@ -176,6 +176,86 @@ func TestTheEnrollmentRefusesAKnownEngine(t *testing.T) {
 	}
 }
 
+func TestTheEnrollmentRefusesTooManyFailedAttempts(t *testing.T) {
+	server := newAuthServer(t)
+	server.initialize()
+
+	// The source spends its budget with failed enrollments.
+	for attempt := 0; attempt < 5; attempt++ {
+		response := server.do(http.MethodPost, "/api/v1/agent/enroll", map[string]any{
+			"token":    "not-an-enrollment-token",
+			"identity": nodeIdentity,
+		})
+		response.Body.Close()
+		if response.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("attempt %d returned %d, want %d", attempt, response.StatusCode, http.StatusUnauthorized)
+		}
+	}
+
+	// The next attempt of the source is refused.
+	response := server.do(http.MethodPost, "/api/v1/agent/enroll", map[string]any{
+		"token":    "not-an-enrollment-token",
+		"identity": nodeIdentity,
+	})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusTooManyRequests)
+	}
+	payload := server.decode(response)
+	if payload["code"] != "rate_limited" {
+		t.Fatalf("the error payload = %v, want the code rate_limited", payload)
+	}
+}
+
+func TestTheLimitOfTheEnrollmentDoesNotTouchTheBudgetOfTheLogin(t *testing.T) {
+	server := newAuthServer(t)
+	server.initialize()
+
+	// The source spends its budget of the enrollment.
+	for attempt := 0; attempt < 5; attempt++ {
+		response := server.do(http.MethodPost, "/api/v1/agent/enroll", map[string]any{
+			"token":    "not-an-enrollment-token",
+			"identity": nodeIdentity,
+		})
+		response.Body.Close()
+	}
+
+	// The budget of the login is a budget of its own, so the administrator
+	// can still log in.
+	csrf := server.login()
+	if csrf == "" {
+		t.Fatal("the login answered without a CSRF token")
+	}
+}
+
+func TestTheLimitOfTheLoginDoesNotTouchTheBudgetOfTheEnrollment(t *testing.T) {
+	server := newAuthServer(t)
+	server.initialize()
+	csrf := server.login()
+
+	// The source spends its budget of the login.
+	for attempt := 0; attempt < 5; attempt++ {
+		response := server.post("/api/v1/auth/login", map[string]string{"password": "not-the-password"})
+		response.Body.Close()
+		if response.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("attempt %d returned %d, want %d", attempt, response.StatusCode, http.StatusUnauthorized)
+		}
+	}
+	blocked := server.post("/api/v1/auth/login", map[string]string{"password": "not-the-password"})
+	blocked.Body.Close()
+	if blocked.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", blocked.StatusCode, http.StatusTooManyRequests)
+	}
+
+	// The budget of the enrollment is a budget of its own, so the agent can
+	// still register itself.
+	token := server.createAgentToken(t, csrf)
+	payload := server.enroll(t, token, nodeIdentity)
+	if payload["node_id"] == "" || payload["credential"] == "" {
+		t.Fatalf("the enrollment answered %v, want a node and a credential", payload)
+	}
+}
+
 func TestTheNodeListNeedsTheSessionOfTheAdministrator(t *testing.T) {
 	server := newAuthServer(t)
 	server.initialize()
@@ -269,6 +349,36 @@ func TestRevokingANodeClosesItsConnection(t *testing.T) {
 	defer revoked.Body.Close()
 	if revoked.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", revoked.StatusCode, http.StatusUnauthorized)
+	}
+}
+
+func TestARevokedNodeIsEnrolledAgainWithANewToken(t *testing.T) {
+	server := newAuthServer(t)
+	server.initialize()
+	csrf := server.login()
+
+	token := server.createAgentToken(t, csrf)
+	payload := server.enroll(t, token, nodeIdentity)
+	nodeID, _ := payload["node_id"].(string)
+
+	// The administrator revokes the node.
+	response := server.post("/api/v1/nodes/"+nodeID+"/revoke", nil,
+		withHeader("X-CSRF-Token", csrf))
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("the revocation returned %d, want %d", response.StatusCode, http.StatusNoContent)
+	}
+
+	// The administrator hands out a new token, so the machine may enter
+	// again.
+	second := server.createAgentToken(t, csrf)
+	again := server.enroll(t, second, nodeIdentity)
+	if again["node_id"] != nodeID {
+		t.Fatalf("node ID = %v, want %q", again["node_id"], nodeID)
+	}
+	credential, _ := again["credential"].(string)
+	if credential == "" {
+		t.Fatalf("the enrollment answered %v, want a credential", again)
 	}
 }
 

@@ -193,6 +193,135 @@ func TestEnrollmentKeepsTheEngineIDOfAnExistingNode(t *testing.T) {
 	}
 }
 
+func TestEnrollmentRefusesASecondEnrollmentOfAnActiveNode(t *testing.T) {
+	clock, _ := fixedClock()
+	svc, _ := openEnrollment(t, clock)
+	ctx := context.Background()
+
+	first, err := svc.Issue(ctx)
+	if err != nil {
+		t.Fatalf("issue the token: %v", err)
+	}
+	if _, err := svc.Redeem(ctx, first, protocol.NodeIdentity{EngineID: "engine-a"}); err != nil {
+		t.Fatalf("the first enrollment: %v", err)
+	}
+
+	// The node is active, so the control端 does not replace it on its own.
+	second, err := svc.Issue(ctx)
+	if err != nil {
+		t.Fatalf("issue the token: %v", err)
+	}
+	if _, err := svc.Redeem(ctx, second, protocol.NodeIdentity{EngineID: "engine-a"}); !errors.Is(err, agentlink.ErrEngineIDConflict) {
+		t.Fatalf("redeem a known engine ID: %v, want %v", err, agentlink.ErrEngineIDConflict)
+	}
+}
+
+func TestEnrollmentRegistersARevokedNodeAgain(t *testing.T) {
+	clock, _ := fixedClock()
+	svc, _ := openEnrollment(t, clock)
+	ctx := context.Background()
+
+	first, err := svc.Issue(ctx)
+	if err != nil {
+		t.Fatalf("issue the token: %v", err)
+	}
+	enrolled, err := svc.Redeem(ctx, first, protocol.NodeIdentity{EngineID: "engine-a", Hostname: "worker-1"})
+	if err != nil {
+		t.Fatalf("the first enrollment: %v", err)
+	}
+	if err := svc.Revoke(ctx, enrolled.NodeID); err != nil {
+		t.Fatalf("revoke the node: %v", err)
+	}
+
+	// The administrator hands out a new token for the machine, so the node
+	// may enter again.
+	second, err := svc.Issue(ctx)
+	if err != nil {
+		t.Fatalf("issue the token: %v", err)
+	}
+	again, err := svc.Redeem(ctx, second, protocol.NodeIdentity{EngineID: "engine-a", Hostname: "worker-1"})
+	if err != nil {
+		t.Fatalf("redeem the token of the revoked node: %v", err)
+	}
+	if again.Token == enrolled.Token {
+		t.Fatal("the node received the credential of the revoked enrollment")
+	}
+	if again.NodeID != enrolled.NodeID {
+		t.Fatalf("node ID = %q, want %q", again.NodeID, enrolled.NodeID)
+	}
+
+	// The new credential works and the old one does not.
+	authenticated, err := svc.Authenticate(ctx, again.Token)
+	if err != nil {
+		t.Fatalf("authenticate the new credential: %v", err)
+	}
+	if authenticated.NodeID != again.NodeID {
+		t.Fatalf("node ID = %q, want %q", authenticated.NodeID, again.NodeID)
+	}
+	if _, err := svc.Authenticate(ctx, enrolled.Token); !errors.Is(err, agentlink.ErrInvalidCredential) {
+		t.Fatalf("authenticate the credential of the revoked node: %v, want %v", err, agentlink.ErrInvalidCredential)
+	}
+
+	// The node is not revoked any more.
+	record, err := svc.NodeRecord(ctx, again.NodeID)
+	if err != nil {
+		t.Fatalf("read the node: %v", err)
+	}
+	if record.RevokedAt != nil {
+		t.Fatalf("the node is revoked at %v, want no revocation", record.RevokedAt)
+	}
+	if record.EngineID != "engine-a" {
+		t.Fatalf("engine ID = %q, want engine-a", record.EngineID)
+	}
+}
+
+func TestEnrollmentUpdatesTheIdentityOfARevokedNode(t *testing.T) {
+	clock, _ := fixedClock()
+	svc, _ := openEnrollment(t, clock)
+	ctx := context.Background()
+
+	first, err := svc.Issue(ctx)
+	if err != nil {
+		t.Fatalf("issue the token: %v", err)
+	}
+	enrolled, err := svc.Redeem(ctx, first, protocol.NodeIdentity{
+		EngineID: "engine-a",
+		Role:     protocol.RoleStandalone,
+	})
+	if err != nil {
+		t.Fatalf("the first enrollment: %v", err)
+	}
+
+	// The node joins a Swarm cluster, so its role changes. The
+	// administrator revokes the node and registers it again, so the record
+	// holds the new role of the node.
+	if err := svc.Revoke(ctx, enrolled.NodeID); err != nil {
+		t.Fatalf("revoke the node: %v", err)
+	}
+	second, err := svc.Issue(ctx)
+	if err != nil {
+		t.Fatalf("issue the token: %v", err)
+	}
+	if _, err := svc.Redeem(ctx, second, protocol.NodeIdentity{
+		EngineID: "engine-a",
+		SwarmID:  "cluster-1",
+		Role:     protocol.RoleManager,
+	}); err != nil {
+		t.Fatalf("redeem the token of the revoked node: %v", err)
+	}
+
+	record, err := svc.NodeRecord(ctx, enrolled.NodeID)
+	if err != nil {
+		t.Fatalf("read the node: %v", err)
+	}
+	if record.Role != protocol.RoleManager {
+		t.Fatalf("role = %q, want %q", record.Role, protocol.RoleManager)
+	}
+	if record.SwarmID != "cluster-1" {
+		t.Fatalf("cluster = %q, want cluster-1", record.SwarmID)
+	}
+}
+
 func TestEnrollmentRejectsAnEmptyEngineID(t *testing.T) {
 	clock, _ := fixedClock()
 	svc, _ := openEnrollment(t, clock)

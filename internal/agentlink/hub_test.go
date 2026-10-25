@@ -488,6 +488,38 @@ func TestHubReadsTheInventoryOfAManagerOfACluster(t *testing.T) {
 	}
 }
 
+func TestHubRefusesAnAgentThatClaimsTheManagerRole(t *testing.T) {
+	h := newTestHub(t)
+	workerIdentity := protocol.NodeIdentity{
+		EngineID:    "engine-worker",
+		SwarmID:     "cluster-1",
+		SwarmNodeID: "node-worker",
+		Role:        protocol.RoleWorker,
+	}
+	worker := h.enroll(t, workerIdentity)
+
+	// The agent claims the role of a manager in its hello, although its
+	// enrollment says that it is a worker.
+	claimed := workerIdentity
+	claimed.Role = protocol.RoleManager
+
+	conn := h.connect(t, worker)
+	send(t, conn, hello(t, claimed))
+
+	// The control端 refuses the connection, because the role of the hello
+	// and the role of the enrollment disagree.
+	expectClosed(t, conn)
+	if h.hub.Connected(worker.NodeID) {
+		t.Fatal("the node is connected although its hello claims another role")
+	}
+
+	// The node never reports an inventory, so the cluster has no manager
+	// and the control端 cannot answer with the containers of the node.
+	if _, err := h.hub.ReadInventory(context.Background(), "swarm", "cluster-1"); err == nil {
+		t.Fatal("the control端 answered with the cluster inventory of a node that claims the manager role")
+	}
+}
+
 func TestHubRefusesTheInventoryOfAClusterWithoutAManager(t *testing.T) {
 	h := newTestHub(t)
 	workerIdentity := protocol.NodeIdentity{

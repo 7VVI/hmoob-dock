@@ -19,6 +19,15 @@ import (
 // accepts. The body holds an identity and a token, nothing more.
 const maxAgentRequestBody = 8 * 1024
 
+const (
+	// enrollMaxAttempts is the number of failed enrollments that a source
+	// may make within enrollRateWindow.
+	enrollMaxAttempts = 5
+	// enrollRateWindow is the time the failed enrollments of a source are
+	// counted.
+	enrollRateWindow = 15 * time.Minute
+)
+
 // nodeSummary is the summary of a node in the API.
 type nodeSummary struct {
 	// ID identifies the node.
@@ -174,10 +183,21 @@ func (s *Server) handleNodeRevoke(w http.ResponseWriter, r *http.Request) {
 // The endpoint belongs to the machine, not to the administrator: it does
 // not use the session of the administrator, it verifies the enrollment
 // token instead.
+//
+// The endpoint counts the failed attempts of a source in a budget of its
+// own. The budget is not the budget of the login, so a flood of anonymous
+// requests neither uses up the budget of the administrator nor keeps the
+// writes of the control端 waiting.
 func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "该端点只接受 POST 请求")
+		return
+	}
+
+	source := s.clientKey(r)
+	if !s.enrollLimiter.Allow(source) {
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "尝试次数过多，请稍后再试")
 		return
 	}
 
@@ -194,16 +214,23 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, agentlink.ErrInvalidToken):
+			// A refused token spends the budget of the source, because it
+			// opens a transaction and writes an audit event.
+			s.enrollLimiter.Fail(source)
 			writeError(w, http.StatusUnauthorized, "invalid_token", "接入令牌无效或已过期")
 		case errors.Is(err, agentlink.ErrEngineIDConflict):
+			s.enrollLimiter.Fail(source)
 			writeError(w, http.StatusConflict, "engine_conflict", "该 Docker 引擎已经接入")
 		case errors.Is(err, agentlink.ErrInvalidIdentity):
+			// An incomplete identity never reaches the database, so it does
+			// not spend the budget of the source.
 			writeError(w, http.StatusBadRequest, "validation_failed", "节点身份不完整")
 		default:
 			writeError(w, http.StatusInternalServerError, "internal_error", "节点注册失败")
 		}
 		return
 	}
+	s.enrollLimiter.Reset(source)
 
 	writeJSON(w, http.StatusCreated, map[string]string{
 		"node_id":    credential.NodeID,

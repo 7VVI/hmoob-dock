@@ -216,15 +216,19 @@ func (h *Hub) ReadInventory(ctx context.Context, mode, targetID string) (protoco
 }
 
 // swarmManager returns the connection of a manager of the given cluster.
+//
+// The manager is decided by the enrolled record of a node, not by the hello
+// of its agent: only a node that was enrolled with the role of a manager
+// can answer for a cluster.
 func (h *Hub) swarmManager(clusterID string) (*connection, bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
 	for _, node := range h.connections {
-		if node.identity.SwarmID != clusterID {
+		if node.record.SwarmID != clusterID {
 			continue
 		}
-		if node.identity.Role != protocol.RoleManager {
+		if node.record.Role != protocol.RoleManager {
 			continue
 		}
 		if !node.status(h.now()).Connected {
@@ -250,6 +254,10 @@ func (h *Hub) connection(nodeID string) (*connection, bool) {
 // The control端 compares the identity with the enrolled node: an agent
 // that claims another engine is refused, so the source of a report is
 // always the credential that authenticated the connection.
+//
+// The role and the cluster of a node belong to its enrollment. An agent
+// that names another role or another cluster is refused as well, because a
+// self reported role proves nothing: only the enrollment of the node does.
 func (h *Hub) Serve(ctx context.Context, nodeID string, conn *websocket.Conn) error {
 	conn.SetReadLimit(int64(protocol.MaxMessageSize))
 
@@ -268,8 +276,20 @@ func (h *Hub) Serve(ctx context.Context, nodeID string, conn *websocket.Conn) er
 		_ = conn.Close(websocket.StatusPolicyViolation, "the identity does not match the node")
 		return fmt.Errorf("%w: the node %s belongs to another engine", ErrIdentityMismatch, nodeID)
 	}
+	// The role and the cluster of the record are the values the control端
+	// compares and stores, so a stray space cannot make two values differ.
+	record.SwarmID = strings.TrimSpace(record.SwarmID)
+	record.Role = strings.TrimSpace(record.Role)
+	if !sameRoleAndCluster(identity, record) {
+		_ = conn.Close(websocket.StatusPolicyViolation, "the role of the agent does not match the node")
+		return fmt.Errorf("%w: the node %s does not hold the claimed role", ErrIdentityMismatch, nodeID)
+	}
+	// The role and the cluster of the connection are the ones of the
+	// enrollment. The hello does not get to change them.
+	identity.SwarmID = record.SwarmID
+	identity.Role = record.Role
 
-	node := newConnection(h, nodeID, conn, identity)
+	node := newConnection(h, nodeID, conn, identity, record)
 	// The hello proves that the agent is alive.
 	node.markSeen()
 	h.register(node)
@@ -281,6 +301,17 @@ func (h *Hub) Serve(ctx context.Context, nodeID string, conn *websocket.Conn) er
 	go node.dispatchLoop(ctx)
 
 	return node.readLoop(ctx)
+}
+
+// sameRoleAndCluster reports whether the agent and the enrolled record of
+// its node agree about the role of the node and about the cluster it
+// belongs to.
+//
+// The two values decide who may answer for a cluster, so a difference
+// between them is a violation of the policy and not a detail.
+func sameRoleAndCluster(identity protocol.NodeIdentity, record Node) bool {
+	return strings.TrimSpace(identity.Role) == record.Role &&
+		strings.TrimSpace(identity.SwarmID) == record.SwarmID
 }
 
 // readHello reads the hello of the agent and returns the identity it
@@ -399,7 +430,12 @@ type connection struct {
 
 	// mu guards the state of the node.
 	mu sync.RWMutex
-	// identity is the identity the agent named in its hello.
+	// record is the enrolled record of the node. It holds the role and the
+	// cluster of the node, so the control端 never trusts the self reported
+	// role of an agent.
+	record Node
+	// identity is the identity the agent named in its hello. Its role and
+	// its cluster are the ones of the enrolled record.
 	identity protocol.NodeIdentity
 	// lastSeen is the time the control端 received the last sign of life
 	// of the agent.
@@ -424,7 +460,11 @@ type pendingSnapshot struct {
 }
 
 // newConnection builds the connection of the agent of a node.
-func newConnection(hub *Hub, nodeID string, conn *websocket.Conn, identity protocol.NodeIdentity) *connection {
+//
+// The record is the enrolled record of the node. It decides about the role
+// and the cluster of the node, so the identity of the connection carries
+// the values of the record and not the ones of the hello.
+func newConnection(hub *Hub, nodeID string, conn *websocket.Conn, identity protocol.NodeIdentity, record Node) *connection {
 	return &connection{
 		hub:      hub,
 		nodeID:   nodeID,
@@ -433,6 +473,7 @@ func newConnection(hub *Hub, nodeID string, conn *websocket.Conn, identity proto
 		monitor:  make(chan []byte, monitorBuffer),
 		inbound:  make(chan protocol.Envelope, inboundBuffer),
 		done:     make(chan struct{}),
+		record:   record,
 		identity: identity,
 		pending:  make(map[string]*pendingSnapshot),
 	}
@@ -530,6 +571,10 @@ func (c *connection) acceptInventory(envelope protocol.Envelope) error {
 	if batch.Identity.EngineID != c.identity.EngineID {
 		return fmt.Errorf("%w: the inventory names another engine", ErrIdentityMismatch)
 	}
+	// The role and the cluster of an inventory are the ones of the
+	// enrollment, not the ones that the agent reports.
+	batch.Identity.SwarmID = c.identity.SwarmID
+	batch.Identity.Role = c.identity.Role
 
 	now := c.hub.now()
 	c.mu.Lock()
