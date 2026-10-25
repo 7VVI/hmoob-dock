@@ -99,28 +99,24 @@ func (s *Service) Initialized(ctx context.Context) (bool, error) {
 // SeedBootstrap stores the one time bootstrap credential. The credential is
 // only stored as a digest and stays valid until the given time.
 //
+// A credential that is on record keeps the window it was given: a restart of
+// the control端 must not extend the lifetime of a credential that was
+// handed out already. A new credential is only stored while the table holds
+// no record at all, so a deployment has at most one bootstrap credential.
+//
 // Seeding a credential that was consumed already does nothing, so a restart
-// of the control端 cannot make a used credential valid again. Seeding an
-// unused credential again moves its expiry to the given time.
+// of the control端 cannot make a used credential valid again.
 func (s *Service) SeedBootstrap(ctx context.Context, token string, expires time.Time) error {
 	if strings.TrimSpace(token) == "" {
 		return errors.New("auth: the bootstrap credential is empty")
 	}
 	digest := digestOf(token)
 
-	consumed, err := s.readBootstrap(ctx, digest)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM bootstrap_tokens`).Scan(&count); err != nil {
+		return fmt.Errorf("auth: count the bootstrap credentials: %w", err)
 	}
-	if err == nil {
-		if consumed {
-			return nil
-		}
-		if _, err := s.db.ExecContext(ctx,
-			`UPDATE bootstrap_tokens SET expires_at = ? WHERE token_hash = ?`,
-			store.TimeToMillis(expires), digest); err != nil {
-			return fmt.Errorf("auth: refresh the bootstrap credential: %w", err)
-		}
+	if count > 0 {
 		return nil
 	}
 
@@ -152,16 +148,25 @@ func (s *Service) Initialize(ctx context.Context, token, password string) error 
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	credential, err := s.findBootstrap(ctx, tx, token)
+	credential, known, err := s.findBootstrap(ctx, tx, token)
 	if err != nil {
 		return err
-	}
-	if credential == "" {
-		return ErrInvalidBootstrap
 	}
 	initialized, err := s.initializedIn(ctx, tx)
 	if err != nil {
 		return err
+	}
+	if credential == "" {
+		if known {
+			// The credential was consumed or it expired.
+			return ErrInvalidBootstrap
+		}
+		// A credential that the deployment never issued cannot open a
+		// second administrator.
+		if initialized {
+			return ErrAlreadyInitialized
+		}
+		return ErrInvalidBootstrap
 	}
 	if initialized {
 		return ErrAlreadyInitialized
@@ -189,6 +194,9 @@ func (s *Service) Initialize(ctx context.Context, token, password string) error 
 		`UPDATE bootstrap_tokens SET consumed_at = ? WHERE id = ?`, now, credential); err != nil {
 		return fmt.Errorf("auth: consume the bootstrap credential: %w", err)
 	}
+	if err := s.recordAudit(ctx, tx, AuditActionInitialize, AuditResultSuccess); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("auth: commit the initialization: %w", err)
 	}
@@ -196,17 +204,27 @@ func (s *Service) Initialize(ctx context.Context, token, password string) error 
 }
 
 // Login checks the password of the administrator and starts a session.
+//
+// Every attempt is recorded in the audit events: a failed one without the
+// reason of the failure, so the record tells that an attempt happened
+// without telling a credential to the reader of the table.
 func (s *Service) Login(ctx context.Context, password string) (Session, error) {
 	var encoded string
 	err := s.db.QueryRowContext(ctx,
 		`SELECT password_hash FROM administrator WHERE id = ?`, administratorID).Scan(&encoded)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
+		if auditErr := s.recordAudit(ctx, s.db, AuditActionLogin, AuditResultFailure); auditErr != nil {
+			return Session{}, auditErr
+		}
 		return Session{}, ErrNotInitialized
 	case err != nil:
 		return Session{}, fmt.Errorf("auth: read the administrator: %w", err)
 	}
 	if err := VerifyPassword(encoded, password); err != nil {
+		if auditErr := s.recordAudit(ctx, s.db, AuditActionLogin, AuditResultFailure); auditErr != nil {
+			return Session{}, auditErr
+		}
 		return Session{}, err
 	}
 	return s.startSession(ctx)
@@ -289,6 +307,9 @@ func (s *Service) ChangePassword(ctx context.Context, token, current, next strin
 		`UPDATE sessions SET revoked_at = ? WHERE revoked_at IS NULL`, now); err != nil {
 		return fmt.Errorf("auth: revoke the sessions: %w", err)
 	}
+	if err := s.recordAudit(ctx, tx, AuditActionPasswordChange, AuditResultSuccess); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("auth: commit the password change: %w", err)
 	}
@@ -316,7 +337,9 @@ func (s *Service) Logout(ctx context.Context, token string) error {
 	return nil
 }
 
-// startSession creates a session with a fresh random token.
+// startSession creates a session with a fresh random token. The session and
+// the audit event of the login are written in one transaction, so a
+// successful login is never recorded without a session.
 func (s *Service) startSession(ctx context.Context) (Session, error) {
 	token, err := randomToken()
 	if err != nil {
@@ -329,51 +352,57 @@ func (s *Service) startSession(ctx context.Context) (Session, error) {
 	csrf := deriveCSRF(token)
 	now := s.now()
 	expires := now.Add(SessionTTL)
-	if _, err := s.db.ExecContext(ctx,
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Session{}, fmt.Errorf("auth: start the session: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO sessions (id, token_hash, csrf_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`,
 		id, digestOf(token), digestOf(csrf),
 		store.TimeToMillis(now), store.TimeToMillis(expires)); err != nil {
 		return Session{}, fmt.Errorf("auth: store the session: %w", err)
 	}
-	return Session{ID: id, Token: token, CSRF: csrf, ExpiresAt: expires}, nil
-}
-
-// readBootstrap reads the consumption state of the bootstrap credential with
-// the given digest. An unknown credential is reported as sql.ErrNoRows.
-func (s *Service) readBootstrap(ctx context.Context, digest string) (bool, error) {
-	var consumedAt sql.NullInt64
-	err := s.db.QueryRowContext(ctx,
-		`SELECT consumed_at FROM bootstrap_tokens WHERE token_hash = ?`, digest).Scan(&consumedAt)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return false, err
-		}
-		return false, fmt.Errorf("auth: read the bootstrap credential: %w", err)
+	if err := s.recordAudit(ctx, tx, AuditActionLogin, AuditResultSuccess); err != nil {
+		return Session{}, err
 	}
-	return consumedAt.Valid, nil
+	if err := tx.Commit(); err != nil {
+		return Session{}, fmt.Errorf("auth: commit the session: %w", err)
+	}
+	return Session{ID: id, Token: token, CSRF: csrf, ExpiresAt: expires}, nil
 }
 
 // findBootstrap returns the identifier of the bootstrap credential that
 // matches the given token and is still usable. The digests are compared in
-// constant time.
-func (s *Service) findBootstrap(ctx context.Context, tx *sql.Tx, token string) (string, error) {
+// constant time. The second return value reports whether a credential with
+// this digest is on record at all, so a consumed or expired credential can
+// be told apart from an unknown one.
+func (s *Service) findBootstrap(ctx context.Context, tx *sql.Tx, token string) (string, bool, error) {
 	rows, err := tx.QueryContext(ctx,
-		`SELECT id, token_hash, expires_at FROM bootstrap_tokens WHERE consumed_at IS NULL`)
+		`SELECT id, token_hash, expires_at, consumed_at FROM bootstrap_tokens`)
 	if err != nil {
-		return "", fmt.Errorf("auth: read the bootstrap credentials: %w", err)
+		return "", false, fmt.Errorf("auth: read the bootstrap credentials: %w", err)
 	}
 	defer rows.Close()
 
 	digest := digestOf(token)
 	now := s.now()
 	matched := ""
+	known := false
 	for rows.Next() {
 		var id, stored string
 		var expiresAt int64
-		if err := rows.Scan(&id, &stored, &expiresAt); err != nil {
-			return "", fmt.Errorf("auth: scan the bootstrap credential: %w", err)
+		var consumedAt sql.NullInt64
+		if err := rows.Scan(&id, &stored, &expiresAt, &consumedAt); err != nil {
+			return "", false, fmt.Errorf("auth: scan the bootstrap credential: %w", err)
 		}
 		if subtle.ConstantTimeCompare([]byte(digest), []byte(stored)) != 1 {
+			continue
+		}
+		known = true
+		if consumedAt.Valid {
 			continue
 		}
 		if !store.TimeFromMillis(expiresAt).After(now) {
@@ -382,9 +411,9 @@ func (s *Service) findBootstrap(ctx context.Context, tx *sql.Tx, token string) (
 		matched = id
 	}
 	if err := rows.Err(); err != nil {
-		return "", fmt.Errorf("auth: read the bootstrap credentials: %w", err)
+		return "", false, fmt.Errorf("auth: read the bootstrap credentials: %w", err)
 	}
-	return matched, nil
+	return matched, known, nil
 }
 
 // initializedIn reports whether the administrator exists, using the given

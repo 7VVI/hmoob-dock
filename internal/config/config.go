@@ -33,6 +33,10 @@ type Control struct {
 	BootstrapFile string
 	// PublicURL is the externally reachable base URL of the control端.
 	PublicURL string
+	// TrustedProxyCIDRs are the networks of the reverse proxies whose
+	// forwarding headers the control端 believes. The list is empty by
+	// default, so no forwarding header of a peer is trusted.
+	TrustedProxyCIDRs []string
 	// TLSCert and TLSKey point at the server certificate and its key.
 	TLSCert string
 	TLSKey  string
@@ -44,13 +48,14 @@ type Control struct {
 // it.
 func Load() (Control, error) {
 	cfg := Control{
-		DBPath:        envOrDefault("HMOOB_DB_PATH", filepath.Join("data", "hmoob.db")),
-		KeyFile:       envOrDefault("HMOOB_KEY_FILE", filepath.Join("secrets", "master.key")),
-		BootstrapFile: os.Getenv("HMOOB_BOOTSTRAP_FILE"),
-		PublicURL:     os.Getenv("HMOOB_PUBLIC_URL"),
-		TLSCert:       os.Getenv("HMOOB_TLS_CERT"),
-		TLSKey:        os.Getenv("HMOOB_TLS_KEY"),
-		WebDir:        envOrDefault("HMOOB_WEB_DIR", filepath.Join("web", "dist")),
+		DBPath:            envOrDefault("HMOOB_DB_PATH", filepath.Join("data", "hmoob.db")),
+		KeyFile:           envOrDefault("HMOOB_KEY_FILE", filepath.Join("secrets", "master.key")),
+		BootstrapFile:     os.Getenv("HMOOB_BOOTSTRAP_FILE"),
+		PublicURL:         os.Getenv("HMOOB_PUBLIC_URL"),
+		TrustedProxyCIDRs: envList("HMOOB_TRUSTED_PROXY_CIDRS"),
+		TLSCert:           os.Getenv("HMOOB_TLS_CERT"),
+		TLSKey:            os.Getenv("HMOOB_TLS_KEY"),
+		WebDir:            envOrDefault("HMOOB_WEB_DIR", filepath.Join("web", "dist")),
 	}
 	if err := cfg.Validate(); err != nil {
 		return Control{}, err
@@ -189,4 +194,25 @@ func envOrDefault(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// envList returns the comma separated values of the environment variable.
+// Empty values are skipped, so a trailing comma does not add an empty
+// entry.
+func envList(name string) []string {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			values = append(values, trimmed)
+		}
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	return values
 }

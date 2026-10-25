@@ -35,7 +35,15 @@ const (
 	// readHeaderTimeout bounds how long a client may take to send the
 	// request headers.
 	readHeaderTimeout = 10 * time.Second
+	// stateTimeout bounds the read of the state of the administrator.
+	stateTimeout = 5 * time.Second
 )
+
+// initializationState is implemented by the handler of the control端. It
+// reports whether the administrator exists already.
+type initializationState interface {
+	Initialized(context.Context) (bool, error)
+}
 
 func main() {
 	genKey := flag.String("gen-key", "", "write a new master key file to the given path and exit")
@@ -96,16 +104,21 @@ func run(addr string) error {
 		}()
 	}
 
-	if cfg.BootstrapFile != "" {
-		// The bootstrap credential is only read here. It is consumed by the
-		// administrator initialization, and its content never reaches the
-		// log.
-		token, err := config.LoadBootstrapToken(cfg.BootstrapFile)
+	// The state of the administrator is read from the service of the
+	// control端. The bootstrap credential was already read and stored by
+	// the server, so it is not read a second time here and its content
+	// never reaches the log.
+	if state, ok := handler.(initializationState); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), stateTimeout)
+		defer cancel()
+		initialized, err := state.Initialized(ctx)
 		if err != nil {
-			return err
+			return fmt.Errorf("read the state of the administrator: %w", err)
 		}
-		if token != "" {
-			log.Printf("control: the bootstrap credential from %s is loaded and not consumed yet", cfg.BootstrapFile)
+		if initialized {
+			log.Printf("control: the administrator is initialized")
+		} else {
+			log.Printf("control: the administrator is not initialized yet")
 		}
 	}
 

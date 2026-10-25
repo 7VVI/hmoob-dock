@@ -44,6 +44,42 @@ func TestLoadReadsEnvironment(t *testing.T) {
 	}
 }
 
+func TestLoadReadsTheTrustedProxyNetworks(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HMOOB_DB_PATH", filepath.Join(dir, "data", "control.db"))
+	t.Setenv("HMOOB_KEY_FILE", filepath.Join(dir, "secrets", "master.key"))
+	t.Setenv("HMOOB_TRUSTED_PROXY_CIDRS", "10.0.0.0/8, 2001:db8::/32")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []string{"10.0.0.0/8", "2001:db8::/32"}
+	if len(cfg.TrustedProxyCIDRs) != len(want) {
+		t.Fatalf("TrustedProxyCIDRs = %v, want %v", cfg.TrustedProxyCIDRs, want)
+	}
+	for index, network := range want {
+		if cfg.TrustedProxyCIDRs[index] != network {
+			t.Fatalf("TrustedProxyCIDRs = %v, want %v", cfg.TrustedProxyCIDRs, want)
+		}
+	}
+}
+
+func TestLoadTrustsNoProxyByDefault(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HMOOB_DB_PATH", filepath.Join(dir, "data", "control.db"))
+	t.Setenv("HMOOB_KEY_FILE", filepath.Join(dir, "secrets", "master.key"))
+	t.Setenv("HMOOB_TRUSTED_PROXY_CIDRS", "")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.TrustedProxyCIDRs) != 0 {
+		t.Fatalf("TrustedProxyCIDRs = %v, want no trusted proxy", cfg.TrustedProxyCIDRs)
+	}
+}
+
 func TestLoadKeepsKeyFileOutsideDatabaseDirectory(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HMOOB_DB_PATH", filepath.Join(dir, "data", "control.db"))

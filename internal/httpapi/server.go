@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"hmoob-dock/internal/auth"
@@ -40,6 +41,13 @@ type Server struct {
 	auth *auth.Service
 	// loginLimiter counts the failed logins of a source.
 	loginLimiter *auth.Limiter
+	// trustedProxies are the networks of the reverse proxies whose
+	// forwarding headers the control端 believes. The list is empty by
+	// default, so no forwarding header of a peer is believed.
+	trustedProxies trustedProxyNetworks
+	// hostWarning makes sure that a request host that differs from the
+	// configured public address is reported only once.
+	hostWarning sync.Once
 }
 
 // NewServer assembles the control端 HTTP handler.
@@ -93,13 +101,23 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 		return nil, errors.New("httpapi: the read pool and the write pool disagree about the applied migrations")
 	}
 
+	// The networks of the reverse proxies are parsed before the server
+	// serves anything, so a malformed network stops the control端
+	// instead of silently changing the trust.
+	trusted, err := parseTrustedProxies(cfg.TrustedProxyCIDRs)
+	if err != nil {
+		_ = reads.Close()
+		return nil, err
+	}
+
 	server := &Server{
-		db:    db,
-		reads: reads,
-		box:   box,
-		cfg:   cfg,
-		mux:   http.NewServeMux(),
-		auth:  auth.New(db, time.Now),
+		db:             db,
+		reads:          reads,
+		box:            box,
+		cfg:            cfg,
+		mux:            http.NewServeMux(),
+		auth:           auth.New(db, time.Now),
+		trustedProxies: trustedProxyNetworks(trusted),
 	}
 	server.loginLimiter = auth.NewLimiter(loginMaxAttempts, loginRateWindow, time.Now)
 	server.mux.HandleFunc("/healthz", server.handleHealth)
@@ -119,6 +137,13 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 // ServeHTTP dispatches a request to the registered handlers.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
+}
+
+// Initialized reports whether the administrator of the control端 exists
+// already. The command uses it to report the state of the deployment
+// without reading the bootstrap credential a second time.
+func (s *Server) Initialized(ctx context.Context) (bool, error) {
+	return s.auth.Initialized(ctx)
 }
 
 // Close releases the read pool of the server.

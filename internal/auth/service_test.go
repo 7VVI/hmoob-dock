@@ -3,6 +3,7 @@ package auth_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -406,6 +407,134 @@ func TestInitializedReportsTheStateOfTheAdministrator(t *testing.T) {
 	}
 	if !initialized {
 		t.Fatal("the administrator is not initialized after the bootstrap credential was used")
+	}
+}
+
+func TestSeedBootstrapKeepsTheWindowOfTheCredential(t *testing.T) {
+	service, db, tick := newService(t)
+	ctx := context.Background()
+
+	if err := service.SeedBootstrap(ctx, "deployment-secret", tick.Now().Add(15*time.Minute)); err != nil {
+		t.Fatalf("SeedBootstrap: %v", err)
+	}
+	var first int64
+	if err := db.QueryRow(`SELECT expires_at FROM bootstrap_tokens`).Scan(&first); err != nil {
+		t.Fatalf("read the expiry of the credential: %v", err)
+	}
+
+	// A restart of the control端 seeds the credential again, but the
+	// window of the credential that is on record stays the same.
+	tick.Advance(time.Minute)
+	if err := service.SeedBootstrap(ctx, "deployment-secret", tick.Now().Add(15*time.Minute)); err != nil {
+		t.Fatalf("second SeedBootstrap: %v", err)
+	}
+
+	var second int64
+	if err := db.QueryRow(`SELECT expires_at FROM bootstrap_tokens`).Scan(&second); err != nil {
+		t.Fatalf("read the expiry of the credential: %v", err)
+	}
+	if second != first {
+		t.Fatalf("the expiry of the credential = %d, want %d", second, first)
+	}
+
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM bootstrap_tokens`).Scan(&count); err != nil {
+		t.Fatalf("count the bootstrap credentials: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("bootstrap credentials = %d, want 1", count)
+	}
+}
+
+func TestTheAuthenticationWritesAuditEvents(t *testing.T) {
+	service, db, tick := newService(t)
+	ctx := context.Background()
+
+	initializeAdmin(t, service, tick)
+
+	if _, err := service.Login(ctx, "a-wrong-test-password"); !errors.Is(err, auth.ErrInvalidPassword) {
+		t.Fatalf("Login error = %v, want %v", err, auth.ErrInvalidPassword)
+	}
+	session, err := service.Login(ctx, "a-strong-test-password")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if err := service.ChangePassword(ctx, session.Token, "a-strong-test-password", "a-new-strong-password"); err != nil {
+		t.Fatalf("ChangePassword: %v", err)
+	}
+
+	type event struct {
+		id         string
+		occurredAt int64
+		action     string
+		targetID   string
+		result     string
+	}
+	rows, err := db.Query(`SELECT id, occurred_at, action, target_id, result FROM audit_events`)
+	if err != nil {
+		t.Fatalf("read the audit events: %v", err)
+	}
+	var events []event
+	for rows.Next() {
+		var entry event
+		if err := rows.Scan(&entry.id, &entry.occurredAt, &entry.action, &entry.targetID, &entry.result); err != nil {
+			rows.Close()
+			t.Fatalf("scan the audit event: %v", err)
+		}
+		events = append(events, entry)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatalf("read the audit events: %v", err)
+	}
+	rows.Close()
+
+	want := map[string]int{
+		"initialize/success":      1,
+		"login/failure":           1,
+		"login/success":           1,
+		"password_change/success": 1,
+	}
+	if len(events) != len(want) {
+		t.Fatalf("audit events = %d, want %d", len(events), len(want))
+	}
+	for _, entry := range events {
+		if entry.id == "" {
+			t.Fatal("an audit event has no identifier")
+		}
+		if entry.occurredAt != store.TimeToMillis(tick.Now()) {
+			t.Fatalf("the audit event happened at %d, want %d", entry.occurredAt, store.TimeToMillis(tick.Now()))
+		}
+		if entry.targetID != "admin" {
+			t.Fatalf("the target of the audit event = %q, want admin", entry.targetID)
+		}
+		key := entry.action + "/" + entry.result
+		if want[key] == 0 {
+			t.Fatalf("the audit event %q is not expected", key)
+		}
+		want[key]--
+	}
+	for key, count := range want {
+		if count != 0 {
+			t.Fatalf("the audit event %q is missing", key)
+		}
+	}
+
+	// The events hold no password, no token and no digest.
+	encoded, err := json.Marshal(events)
+	if err != nil {
+		t.Fatalf("encode the audit events: %v", err)
+	}
+	for _, secret := range []string{
+		"a-strong-test-password",
+		"a-new-strong-password",
+		"a-wrong-test-password",
+		session.Token,
+		session.CSRF,
+	} {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatalf("the audit events hold %q: %s", secret, encoded)
+		}
 	}
 }
 

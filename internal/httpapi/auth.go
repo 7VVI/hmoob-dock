@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -81,6 +81,7 @@ func (s *Server) seedBootstrap() error {
 // handleAuthInitialize creates the administrator with the bootstrap
 // credential of the deployment.
 func (s *Server) handleAuthInitialize(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "该端点只接受 POST 请求")
 		return
@@ -119,6 +120,7 @@ func (s *Server) handleAuthInitialize(w http.ResponseWriter, r *http.Request) {
 // handleAuthLogin checks the password of the administrator and starts a
 // session.
 func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "该端点只接受 POST 请求")
 		return
@@ -136,7 +138,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	source := clientKey(r)
+	source := s.clientKey(r)
 	if !s.loginLimiter.Allow(source) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "尝试次数过多，请稍后再试")
 		return
@@ -144,7 +146,13 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 
 	session, err := s.auth.Login(r.Context(), body.Password)
 	if err != nil {
-		s.loginLimiter.Fail(source)
+		// Only a wrong password spends the budget of the source. A
+		// control端 that is not initialized yet tells every visitor the
+		// same thing, and that answer must not lock the administrator
+		// out of the login.
+		if errors.Is(err, auth.ErrInvalidPassword) {
+			s.loginLimiter.Fail(source)
+		}
 		// The message is the same for every reason, so it does not tell an
 		// attacker whether the administrator exists at all.
 		if errors.Is(err, auth.ErrInvalidPassword) || errors.Is(err, auth.ErrNotInitialized) {
@@ -166,6 +174,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 // handleAuthSession reports the CSRF token and the expiry of the session of
 // the request. It never returns the session token itself.
 func (s *Server) handleAuthSession(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "该端点只接受 GET 请求")
 		return
@@ -199,8 +208,13 @@ func (s *Server) handleAuthSession(w http.ResponseWriter, r *http.Request) {
 
 // handleAuthLogout revokes the session of the request.
 func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "该端点只接受 POST 请求")
+		return
+	}
+	if !s.sameOrigin(r) {
+		writeError(w, http.StatusForbidden, "cross_origin", "请求来源不被允许")
 		return
 	}
 	session, ok := s.requireSession(w, r)
@@ -228,8 +242,13 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 // handleAuthPassword replaces the password of the administrator and revokes
 // every session.
 func (s *Server) handleAuthPassword(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "该端点只接受 POST 请求")
+		return
+	}
+	if !s.sameOrigin(r) {
+		writeError(w, http.StatusForbidden, "cross_origin", "请求来源不被允许")
 		return
 	}
 	session, ok := s.requireSession(w, r)
@@ -255,7 +274,7 @@ func (s *Server) handleAuthPassword(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, auth.ErrInvalidPassword):
 			writeError(w, http.StatusUnauthorized, "invalid_credentials", "当前密码不正确")
 		case errors.Is(err, auth.ErrPasswordPolicy):
-			writeErrorFields(w, http.StatusBadRequest, "validation_failed", "提交的密码不符合要求", passwordFields())
+			writeErrorFields(w, http.StatusBadRequest, "validation_failed", "提交的密码不符合要求", newPasswordFields())
 		case errors.Is(err, auth.ErrInvalidSession):
 			writeError(w, http.StatusUnauthorized, "unauthenticated", "请先登录")
 		default:
@@ -288,27 +307,43 @@ func (s *Server) requireSession(w http.ResponseWriter, r *http.Request) (auth.Se
 // sameOrigin reports whether the request comes from the control端 itself.
 // The Origin header of a browser request names the site that sent it, so a
 // request of another site is rejected.
+//
+// Only the host of the origin is compared. The scheme is left out on
+// purpose: a deployment behind a proxy that terminates the TLS answers
+// plain HTTP while the browser sends the public HTTPS origin, and a
+// comparison of the scheme would lock every administrator out. The
+// session cookie is bound to its site by the SameSite attribute, so the
+// scheme does not weaken the protection against cross site requests.
 func (s *Server) sameOrigin(r *http.Request) bool {
-	origin := normalizeOrigin(r.Header.Get("Origin"))
+	s.warnAboutMismatchingHost(r)
+
+	origin := originHost(r.Header.Get("Origin"))
 	if origin == "" {
 		return false
 	}
-	if origin == normalizeOrigin(requestOrigin(r)) {
-		return true
+	expected := s.expectedHost(r)
+	if expected == "" {
+		return false
 	}
-	// A deployment behind a reverse proxy reaches the control端 under the
-	// public address of the configuration.
-	if configured := normalizeOrigin(configuredOrigin(s.cfg.PublicURL)); configured != "" && origin == configured {
-		return true
+	return origin == expected
+}
+
+// expectedHost returns the host that the authentication endpoints expect.
+// The configured public address wins, because it names the address that
+// the browser uses. Without it the host of the request is used.
+func (s *Server) expectedHost(r *http.Request) string {
+	if configured := originHost(s.cfg.PublicURL); configured != "" {
+		return configured
 	}
-	return false
+	return originHost(s.requestOrigin(r))
 }
 
 // requestOrigin returns the origin under which the control端 answered the
-// request.
-func requestOrigin(r *http.Request) string {
+// request. The scheme follows the TLS state of the request and of the
+// trusted proxy in front of it.
+func (s *Server) requestOrigin(r *http.Request) string {
 	scheme := "http"
-	if r.TLS != nil {
+	if s.requestIsHTTPS(r) {
 		scheme = "https"
 	}
 	host := r.Host
@@ -321,55 +356,58 @@ func requestOrigin(r *http.Request) string {
 	return scheme + "://" + host
 }
 
-// configuredOrigin returns the origin of the public address of the
-// configuration.
-func configuredOrigin(publicURL string) string {
-	trimmed := strings.TrimSpace(publicURL)
-	if trimmed == "" {
-		return ""
+// warnAboutMismatchingHost reports a request that reaches the control端
+// under another host than the configured public address. Such a request
+// is not rejected, because the origin of the browser decides that, but
+// the mismatch points at the configuration of the deployment. The
+// warning is written once, because the cause is the configuration and
+// not the request.
+func (s *Server) warnAboutMismatchingHost(r *http.Request) {
+	configured := originHost(s.cfg.PublicURL)
+	if configured == "" {
+		return
 	}
-	parsed, err := url.Parse(trimmed)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return ""
+	host := normalizeHost(r.Host)
+	if host == "" || host == configured {
+		return
 	}
-	return parsed.Scheme + "://" + parsed.Host
+	s.hostWarning.Do(func() {
+		log.Printf(
+			"control: the request host %q does not match the configured public host %q; check the public URL of the deployment",
+			r.Host, configured,
+		)
+	})
 }
 
-// normalizeOrigin brings an origin into a comparable form: the scheme and
-// the host in lower case and without the default port. A value that is no
+// originHost returns the host of an origin in a comparable form: lower
+// case and without the default ports of the web. A value that is no
 // origin at all becomes an empty string.
-func normalizeOrigin(raw string) string {
+func originHost(raw string) string {
 	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
+	if trimmed == "" || strings.EqualFold(trimmed, "null") {
 		return ""
 	}
 	parsed, err := url.Parse(trimmed)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+	if err != nil {
 		return ""
 	}
-	if parsed.Path != "" && parsed.Path != "/" {
-		return ""
+	if parsed.Scheme == "" || parsed.Host == "" {
+		// A public address without a scheme names a host as well.
+		parsed, err = url.Parse("https://" + trimmed)
+		if err != nil || parsed.Host == "" {
+			return ""
+		}
 	}
-	scheme := strings.ToLower(parsed.Scheme)
-	host := strings.ToLower(parsed.Host)
-	switch {
-	case scheme == "http" && strings.HasSuffix(host, ":80"):
-		host = strings.TrimSuffix(host, ":80")
-	case scheme == "https" && strings.HasSuffix(host, ":443"):
-		host = strings.TrimSuffix(host, ":443")
-	}
-	return scheme + "://" + host
+	return normalizeHost(parsed.Host)
 }
 
-// clientKey returns the key that counts the attempts of a source. It uses
-// the peer of the connection and never a forwarding header, because those
-// can be forged by anybody.
-func clientKey(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
+// normalizeHost brings a host into a comparable form: lower case and
+// without the default ports of the web.
+func normalizeHost(host string) string {
+	normalized := strings.ToLower(strings.TrimSpace(host))
+	normalized = strings.TrimSuffix(normalized, ":443")
+	normalized = strings.TrimSuffix(normalized, ":80")
+	return normalized
 }
 
 // setSessionCookie writes the cookie that carries the session token. The
@@ -436,4 +474,16 @@ func formatTimestamp(t time.Time) string {
 // not meet the policy.
 func passwordFields() map[string]string {
 	return map[string]string{"password": "密码长度需为 12 到 128 个字符"}
+}
+
+// newPasswordFields is the message of the new password field when the new
+// password does not meet the policy.
+func newPasswordFields() map[string]string {
+	return map[string]string{"new_password": "密码长度需为 12 到 128 个字符"}
+}
+
+// noStore marks the answer of an authentication endpoint as one that no
+// cache may keep. The answers carry the CSRF token of the session.
+func noStore(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
 }

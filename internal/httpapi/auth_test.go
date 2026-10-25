@@ -2,6 +2,7 @@ package httpapi_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,13 +29,31 @@ const adminPassword = "a-strong-test-password"
 
 // authServer is a running control端 with the authentication endpoints.
 type authServer struct {
-	t      *testing.T
-	server *httptest.Server
-	client *http.Client
+	t       *testing.T
+	handler http.Handler
+	server  *httptest.Server
+	client  *http.Client
+}
+
+// authServerConfig changes the configuration of a test control端.
+type authServerConfig struct {
+	// trustedProxies are the networks of the reverse proxies whose
+	// forwarding headers the control端 believes.
+	trustedProxies []string
+	// publicURL is the externally reachable address of the control端.
+	publicURL string
+	// plain serves the control端 without TLS.
+	plain bool
 }
 
 // newAuthServer starts a control端 that knows the bootstrap credential.
 func newAuthServer(t *testing.T) *authServer {
+	t.Helper()
+	return newAuthServerWith(t, authServerConfig{})
+}
+
+// newAuthServerWith starts a control端 with a changed configuration.
+func newAuthServerWith(t *testing.T, options authServerConfig) *authServer {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -57,9 +76,11 @@ func newAuthServer(t *testing.T) *authServer {
 	}
 
 	handler, err := httpapi.NewServer(db, box, config.Control{
-		DBPath:        dbPath,
-		KeyFile:       keyPath,
-		BootstrapFile: bootstrapPath,
+		DBPath:            dbPath,
+		KeyFile:           keyPath,
+		BootstrapFile:     bootstrapPath,
+		PublicURL:         options.publicURL,
+		TrustedProxyCIDRs: options.trustedProxies,
 	})
 	if err != nil {
 		t.Fatalf("httpapi.NewServer: %v", err)
@@ -68,16 +89,30 @@ func newAuthServer(t *testing.T) *authServer {
 		t.Cleanup(func() { closer.Close() })
 	}
 
-	server := httptest.NewTLSServer(handler)
-	t.Cleanup(server.Close)
-
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		t.Fatalf("cookiejar.New: %v", err)
 	}
-	client := server.Client()
-	client.Jar = jar
-	return &authServer{t: t, server: server, client: client}
+
+	var server *httptest.Server
+	var client *http.Client
+	if options.plain {
+		server = httptest.NewServer(handler)
+		client = &http.Client{Jar: jar}
+	} else {
+		server = httptest.NewTLSServer(handler)
+		client = server.Client()
+		client.Jar = jar
+	}
+	t.Cleanup(server.Close)
+
+	return &authServer{t: t, handler: handler, server: server, client: client}
+}
+
+// host returns the host of the control端 without its scheme.
+func (s *authServer) host() string {
+	host := strings.TrimPrefix(s.server.URL, "https://")
+	return strings.TrimPrefix(host, "http://")
 }
 
 // requestOption changes a request before it is sent.
@@ -149,11 +184,18 @@ func (s *authServer) decode(response *http.Response) map[string]any {
 // initialize creates the administrator of the control端.
 func (s *authServer) initialize() {
 	s.t.Helper()
+	s.initializeWithOrigin(s.server.URL)
+}
 
-	response := s.post("/api/v1/auth/initialize", map[string]string{
+// initializeWithOrigin creates the administrator of the control端 with the
+// given origin.
+func (s *authServer) initializeWithOrigin(origin string) {
+	s.t.Helper()
+
+	response := s.do(http.MethodPost, "/api/v1/auth/initialize", map[string]string{
 		"bootstrap_token": bootstrapCredential,
 		"password":        adminPassword,
-	})
+	}, withOrigin(origin))
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		s.t.Fatalf("initialize status = %d, want %d", response.StatusCode, http.StatusOK)
@@ -562,6 +604,34 @@ func TestTheAuthenticationEndpointsRejectOtherMethods(t *testing.T) {
 	}
 }
 
+func TestTheServerReportsTheStateOfTheAdministrator(t *testing.T) {
+	server := newAuthServer(t)
+
+	state, ok := server.handler.(interface {
+		Initialized(context.Context) (bool, error)
+	})
+	if !ok {
+		t.Fatal("the handler of the control端 does not report the state of the administrator")
+	}
+	initialized, err := state.Initialized(context.Background())
+	if err != nil {
+		t.Fatalf("Initialized: %v", err)
+	}
+	if initialized {
+		t.Fatal("the administrator is initialized before the initialization")
+	}
+
+	server.initialize()
+
+	initialized, err = state.Initialized(context.Background())
+	if err != nil {
+		t.Fatalf("Initialized: %v", err)
+	}
+	if !initialized {
+		t.Fatal("the administrator is not initialized after the initialization")
+	}
+}
+
 func TestTheLoginDoesNotWriteThePasswordToTheLog(t *testing.T) {
 	server := newAuthServer(t)
 	server.initialize()
@@ -579,5 +649,225 @@ func TestTheLoginDoesNotWriteThePasswordToTheLog(t *testing.T) {
 
 	if buffer.Len() != 0 {
 		t.Fatalf("the login wrote to the log: %q", buffer.String())
+	}
+}
+
+func TestTheLoginCountsTheAttemptsOfEveryClientBehindATrustedProxy(t *testing.T) {
+	// The peer of the test server is 127.0.0.1, so it belongs to the
+	// trusted network of the deployment.
+	server := newAuthServerWith(t, authServerConfig{trustedProxies: []string{"127.0.0.0/8"}})
+	server.initialize()
+
+	// The first client uses up its budget.
+	for attempt := 0; attempt < 5; attempt++ {
+		response := server.post("/api/v1/auth/login", map[string]string{
+			"password": "a-wrong-test-password",
+		}, withHeader("X-Forwarded-For", "203.0.113.10"))
+		response.Body.Close()
+		if response.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status = %d, want %d", attempt, response.StatusCode, http.StatusUnauthorized)
+		}
+	}
+	response := server.post("/api/v1/auth/login", map[string]string{
+		"password": "a-wrong-test-password",
+	}, withHeader("X-Forwarded-For", "203.0.113.10"))
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusTooManyRequests)
+	}
+
+	// Another client behind the same proxy has its own budget.
+	response = server.post("/api/v1/auth/login", map[string]string{
+		"password": "a-wrong-test-password",
+	}, withHeader("X-Forwarded-For", "203.0.113.11"))
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusUnauthorized)
+	}
+}
+
+func TestTheOriginIsComparedByItsHostOnly(t *testing.T) {
+	// The control端 answers plain HTTP while the browser sends the public
+	// HTTPS origin, which is the case of a proxy that terminates the TLS.
+	server := newAuthServerWith(t, authServerConfig{plain: true})
+	server.initialize()
+
+	response := server.do(http.MethodPost, "/api/v1/auth/login", map[string]string{
+		"password": adminPassword,
+	}, withOrigin("https://"+server.host()))
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+}
+
+func TestTheOriginOfAnotherHostIsRejected(t *testing.T) {
+	server := newAuthServer(t)
+	server.initialize()
+
+	// The host of the origin is the one of the control端, but the port
+	// is another one.
+	response := server.do(http.MethodPost, "/api/v1/auth/login", map[string]string{
+		"password": adminPassword,
+	}, withOrigin("https://"+server.host()+":8443"))
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusForbidden)
+	}
+	payload := server.decode(response)
+	if payload["code"] != "cross_origin" {
+		t.Fatalf("error code = %q, want cross_origin", payload["code"])
+	}
+}
+
+func TestTheModifyingRequestsRejectACrossOriginRequest(t *testing.T) {
+	server := newAuthServer(t)
+	server.initialize()
+	csrf := server.login()
+
+	response := server.do(http.MethodPost, "/api/v1/auth/password", map[string]string{
+		"current_password": adminPassword,
+		"new_password":     "a-new-strong-password",
+	}, withOrigin("https://attacker.example"), withHeader("X-CSRF-Token", csrf))
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("password change status = %d, want %d", response.StatusCode, http.StatusForbidden)
+	}
+	payload := server.decode(response)
+	if payload["code"] != "cross_origin" {
+		t.Fatalf("error code = %q, want cross_origin", payload["code"])
+	}
+
+	response = server.do(http.MethodPost, "/api/v1/auth/logout", nil,
+		withOrigin("https://attacker.example"), withHeader("X-CSRF-Token", csrf))
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("logout status = %d, want %d", response.StatusCode, http.StatusForbidden)
+	}
+	payload = server.decode(response)
+	if payload["code"] != "cross_origin" {
+		t.Fatalf("error code = %q, want cross_origin", payload["code"])
+	}
+
+	// The rejected requests changed nothing.
+	response = server.get("/api/v1/auth/session")
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("session status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+}
+
+func TestThePasswordChangeReportsTheFieldOfTheNewPassword(t *testing.T) {
+	server := newAuthServer(t)
+	server.initialize()
+	csrf := server.login()
+
+	response := server.post("/api/v1/auth/password", map[string]string{
+		"current_password": adminPassword,
+		"new_password":     "short-passw",
+	}, withHeader("X-CSRF-Token", csrf))
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusBadRequest)
+	}
+	payload := server.decode(response)
+	if payload["code"] != "validation_failed" {
+		t.Fatalf("error code = %q, want validation_failed", payload["code"])
+	}
+	fields, ok := payload["fields"].(map[string]any)
+	if !ok {
+		t.Fatalf("error payload = %v, want the fields of the new password", payload)
+	}
+	if fields["new_password"] == nil {
+		t.Fatalf("error payload = %v, want a message for the new password", payload)
+	}
+	if fields["password"] != nil {
+		t.Fatalf("error payload = %v, want no message for the password", payload)
+	}
+}
+
+func TestTheLoginBeforeTheInitializationDoesNotUseTheBudget(t *testing.T) {
+	server := newAuthServer(t)
+
+	// Before the initialization there is no administrator at all, so no
+	// attempt of this kind spends the budget of the source.
+	for attempt := 0; attempt < 7; attempt++ {
+		response := server.post("/api/v1/auth/login", map[string]string{"password": adminPassword})
+		response.Body.Close()
+		if response.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status = %d, want %d", attempt, response.StatusCode, http.StatusUnauthorized)
+		}
+	}
+
+	server.initialize()
+
+	response := server.post("/api/v1/auth/login", map[string]string{"password": adminPassword})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+}
+
+func TestTheAuthenticationResponsesAreNotStored(t *testing.T) {
+	server := newAuthServer(t)
+	server.initialize()
+
+	// The login answer holds the CSRF token.
+	response := server.post("/api/v1/auth/login", map[string]string{"password": adminPassword})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("login status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+	if got := response.Header.Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("cache control = %q, want no-store", got)
+	}
+
+	response = server.get("/api/v1/auth/session")
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("session status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+	if got := response.Header.Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("cache control = %q, want no-store", got)
+	}
+
+	// The error answers are not stored either.
+	response = server.post("/api/v1/auth/login", map[string]string{"password": "a-wrong-test-password"})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("login status = %d, want %d", response.StatusCode, http.StatusUnauthorized)
+	}
+	if got := response.Header.Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("cache control = %q, want no-store", got)
+	}
+}
+
+func TestTheConfiguredPublicHostWarnsAboutAMismatchingRequestHost(t *testing.T) {
+	server := newAuthServerWith(t, authServerConfig{publicURL: "https://public.example.com"})
+
+	var buffer bytes.Buffer
+	writer := log.Writer()
+	log.SetOutput(&buffer)
+	defer log.SetOutput(writer)
+
+	server.initializeWithOrigin("https://public.example.com")
+
+	// The origin of the browser matches the configured public address, so
+	// the request is not rejected although the host of the request is
+	// another one.
+	response := server.do(http.MethodPost, "/api/v1/auth/login", map[string]string{
+		"password": adminPassword,
+	}, withOrigin("https://public.example.com"))
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+
+	warning := buffer.String()
+	if !strings.Contains(warning, "public.example.com") {
+		t.Fatalf("the log = %q, want a warning about the configured public host", warning)
+	}
+	if !strings.Contains(warning, server.host()) {
+		t.Fatalf("the log = %q, want a warning about the host of the request", warning)
 	}
 }
