@@ -1,0 +1,43 @@
+import { createRouter, createWebHistory } from 'vue-router'
+import { api } from './api/client'
+import type { SessionPayload } from './api/types'
+import { restoreSession, sessionState, type SessionStatus } from './auth/session'
+import InitializeView from './views/InitializeView.vue'
+import LoginView from './views/LoginView.vue'
+import OverviewView from './views/OverviewView.vue'
+import SettingsView from './views/SettingsView.vue'
+
+export const router = createRouter({
+  history: createWebHistory(),
+  routes: [
+    { path: '/', name: 'overview', component: OverviewView },
+    { path: '/initialize', name: 'initialize', component: InitializeView },
+    { path: '/login', name: 'login', component: LoginView },
+    { path: '/settings', name: 'settings', component: SettingsView },
+  ],
+})
+
+// currentStatus reads the state of the session.
+//
+// The answer of the API stays in the memory of the page, so the state is
+// asked only once per page.
+async function currentStatus(): Promise<SessionStatus> {
+  if (sessionState.status !== 'unknown') {
+    return sessionState.status
+  }
+  return restoreSession(() => api<SessionPayload>('/api/v1/auth/session'))
+}
+
+// The guard sends the administrator to the page that fits the state of the
+// deployment: the initialization while no administrator exists, the login
+// while the page holds no session and the overview otherwise.
+router.beforeEach(async (to) => {
+  const status = await currentStatus()
+  if (status === 'uninitialized') {
+    return to.path === '/initialize' ? true : { path: '/initialize' }
+  }
+  if (status !== 'authenticated') {
+    return to.path === '/login' ? true : { path: '/login' }
+  }
+  return to.path === '/login' ? { path: '/' } : true
+})
