@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -42,6 +43,75 @@ type Control struct {
 	TLSKey  string
 	// WebDir is the directory holding the frontend build output.
 	WebDir string
+}
+
+// Agent holds the configuration of the agent.
+//
+// The agent connects to the control端 over TLS and verifies the certificate
+// of the control端. It never puts its credential into the address of a
+// request or into the arguments of a command.
+type Agent struct {
+	// ServerURL is the base address of the control端. It has to be an
+	// HTTPS address, because the agent verifies the certificate and the
+	// host name of the control端.
+	ServerURL string
+	// CAFile is the file holding the certificate authority that signed the
+	// certificate of the control端. An empty file means that the
+	// certificates of the system are trusted.
+	CAFile string
+	// CredentialFile is the file holding the credential of the agent. The
+	// file is written with the permissions 0600.
+	CredentialFile string
+	// EnrollmentFile is the file holding the one time enrollment token.
+	// The file is only read when the agent has no credential yet.
+	EnrollmentFile string
+	// DockerSocket is the socket of the local Docker engine.
+	DockerSocket string
+	// WorkRoot is the directory the agent works in.
+	WorkRoot string
+}
+
+// LoadAgent reads the configuration of the agent from the environment and
+// validates it.
+func LoadAgent() (Agent, error) {
+	cfg := Agent{
+		ServerURL:      strings.TrimSpace(os.Getenv("HMOOB_SERVER_URL")),
+		CAFile:         strings.TrimSpace(os.Getenv("HMOOB_CA_FILE")),
+		CredentialFile: envOrDefault("HMOOB_CREDENTIAL_FILE", filepath.Join("data", "agent", "credential.json")),
+		EnrollmentFile: strings.TrimSpace(os.Getenv("HMOOB_ENROLLMENT_FILE")),
+		DockerSocket:   envOrDefault("HMOOB_DOCKER_SOCKET", "/var/run/docker.sock"),
+		WorkRoot:       envOrDefault("HMOOB_WORK_ROOT", filepath.Join("data", "agent")),
+	}
+	if err := cfg.Validate(); err != nil {
+		return Agent{}, err
+	}
+	return cfg, nil
+}
+
+// Validate reports whether the agent can be started with.
+func (a Agent) Validate() error {
+	if strings.TrimSpace(a.ServerURL) == "" {
+		return errors.New("config: the address of the control端 is required")
+	}
+	parsed, err := url.Parse(a.ServerURL)
+	if err != nil {
+		return fmt.Errorf("config: the address of the control端 %s is malformed: %w", a.ServerURL, err)
+	}
+	if parsed.Scheme != "https" {
+		return errors.New("config: the address of the control端 has to use HTTPS")
+	}
+	if parsed.Host == "" {
+		return errors.New("config: the address of the control端 names no host")
+	}
+	if strings.TrimSpace(a.CredentialFile) == "" {
+		return errors.New("config: a credential file is required")
+	}
+	if a.CAFile != "" {
+		if _, err := os.Stat(a.CAFile); err != nil {
+			return fmt.Errorf("config: the certificate authority file %s is not readable: %w", a.CAFile, err)
+		}
+	}
+	return nil
 }
 
 // Load reads the control端 configuration from the environment and validates

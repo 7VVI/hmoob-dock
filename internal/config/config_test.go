@@ -219,3 +219,82 @@ func TestLoadBootstrapToken(t *testing.T) {
 		t.Fatalf("LoadBootstrapToken(\"\") = %q, %v", token, err)
 	}
 }
+
+func TestLoadAgentReadsEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	authority := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(authority, []byte("a certificate"), 0o600); err != nil {
+		t.Fatalf("write the certificate authority: %v", err)
+	}
+	t.Setenv("HMOOB_SERVER_URL", "https://hmoob.example.com")
+	t.Setenv("HMOOB_CA_FILE", authority)
+	t.Setenv("HMOOB_CREDENTIAL_FILE", filepath.Join(dir, "credential.json"))
+	t.Setenv("HMOOB_ENROLLMENT_FILE", filepath.Join(dir, "enrollment.token"))
+	t.Setenv("HMOOB_DOCKER_SOCKET", "/var/run/docker.sock")
+	t.Setenv("HMOOB_WORK_ROOT", filepath.Join(dir, "work"))
+
+	cfg, err := config.LoadAgent()
+	if err != nil {
+		t.Fatalf("LoadAgent: %v", err)
+	}
+	if cfg.ServerURL != "https://hmoob.example.com" {
+		t.Fatalf("ServerURL = %q", cfg.ServerURL)
+	}
+	if cfg.CAFile != authority {
+		t.Fatalf("CAFile = %q", cfg.CAFile)
+	}
+	if cfg.CredentialFile != filepath.Join(dir, "credential.json") {
+		t.Fatalf("CredentialFile = %q", cfg.CredentialFile)
+	}
+	if cfg.EnrollmentFile != filepath.Join(dir, "enrollment.token") {
+		t.Fatalf("EnrollmentFile = %q", cfg.EnrollmentFile)
+	}
+	if cfg.DockerSocket != "/var/run/docker.sock" {
+		t.Fatalf("DockerSocket = %q", cfg.DockerSocket)
+	}
+	if cfg.WorkRoot != filepath.Join(dir, "work") {
+		t.Fatalf("WorkRoot = %q", cfg.WorkRoot)
+	}
+}
+
+func TestLoadAgentRefusesAnAddressWithoutTLS(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HMOOB_SERVER_URL", "http://hmoob.example.com")
+	t.Setenv("HMOOB_CA_FILE", "")
+	t.Setenv("HMOOB_CREDENTIAL_FILE", filepath.Join(dir, "credential.json"))
+	t.Setenv("HMOOB_ENROLLMENT_FILE", "")
+	t.Setenv("HMOOB_DOCKER_SOCKET", "/var/run/docker.sock")
+	t.Setenv("HMOOB_WORK_ROOT", filepath.Join(dir, "work"))
+
+	if _, err := config.LoadAgent(); err == nil {
+		t.Fatal("LoadAgent accepted a control端 without TLS")
+	}
+}
+
+func TestLoadAgentRequiresTheAddressOfTheControl端(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HMOOB_SERVER_URL", "")
+	t.Setenv("HMOOB_CA_FILE", "")
+	t.Setenv("HMOOB_CREDENTIAL_FILE", filepath.Join(dir, "credential.json"))
+	t.Setenv("HMOOB_ENROLLMENT_FILE", "")
+	t.Setenv("HMOOB_DOCKER_SOCKET", "/var/run/docker.sock")
+	t.Setenv("HMOOB_WORK_ROOT", filepath.Join(dir, "work"))
+
+	if _, err := config.LoadAgent(); err == nil {
+		t.Fatal("LoadAgent accepted a configuration without the address of the control端")
+	}
+}
+
+func TestLoadAgentRefusesAMissingCertificateAuthority(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HMOOB_SERVER_URL", "https://hmoob.example.com")
+	t.Setenv("HMOOB_CA_FILE", filepath.Join(dir, "missing-ca.pem"))
+	t.Setenv("HMOOB_CREDENTIAL_FILE", filepath.Join(dir, "credential.json"))
+	t.Setenv("HMOOB_ENROLLMENT_FILE", "")
+	t.Setenv("HMOOB_DOCKER_SOCKET", "/var/run/docker.sock")
+	t.Setenv("HMOOB_WORK_ROOT", filepath.Join(dir, "work"))
+
+	if _, err := config.LoadAgent(); err == nil {
+		t.Fatal("LoadAgent accepted a missing certificate authority")
+	}
+}

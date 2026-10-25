@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"hmoob-dock/internal/agentlink"
 	"hmoob-dock/internal/auth"
 	"hmoob-dock/internal/config"
 	"hmoob-dock/internal/secret"
@@ -52,6 +53,11 @@ type Server struct {
 	// hostWarning makes sure that a request host that differs from the
 	// configured public address is reported only once.
 	hostWarning sync.Once
+	// enrollment manages the enrollment tokens and the credentials of the
+	// nodes.
+	enrollment *agentlink.Enrollment
+	// hub keeps the live connections of the agents.
+	hub *agentlink.Hub
 }
 
 // NewServer assembles the control端 HTTP handler.
@@ -122,13 +128,22 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 		mux:            http.NewServeMux(),
 		auth:           auth.New(db, time.Now),
 		trustedProxies: trustedProxyNetworks(trusted),
+		enrollment:     agentlink.NewEnrollment(db, time.Now),
+		// The hub only reads the records of the nodes, so it uses the read
+		// pool: a slow read never holds back a write.
+		hub: agentlink.NewHub(reads),
 	}
 	server.loginLimiter = auth.NewLimiter(loginMaxAttempts, loginRateWindow, time.Now)
 	server.preInitLimiter = auth.NewLimiter(loginMaxAttempts, loginRateWindow, time.Now)
 	server.mux.HandleFunc("/healthz", server.handleHealth)
 	server.mux.HandleFunc("/readyz", server.handleReady)
 	server.registerAuthRoutes()
+	server.registerAgentRoutes()
 	server.mux.HandleFunc("/", server.handleNotFound)
+
+	// A revoked credential closes the connection of its node, so a revoked
+	// agent cannot keep talking to the control端.
+	server.enrollment.OnRevoke(server.hub.Disconnect)
 
 	// The bootstrap credential of the deployment opens the first
 	// initialization. It is only stored while no administrator exists.
