@@ -41,6 +41,10 @@ type Server struct {
 	auth *auth.Service
 	// loginLimiter counts the failed logins of a source.
 	loginLimiter *auth.Limiter
+	// preInitLimiter counts the login attempts of a source that happen
+	// before the administrator exists. It has its own budget, so a flood of
+	// anonymous requests cannot use up the budget of the administrator.
+	preInitLimiter *auth.Limiter
 	// trustedProxies are the networks of the reverse proxies whose
 	// forwarding headers the control端 believes. The list is empty by
 	// default, so no forwarding header of a peer is believed.
@@ -120,6 +124,7 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 		trustedProxies: trustedProxyNetworks(trusted),
 	}
 	server.loginLimiter = auth.NewLimiter(loginMaxAttempts, loginRateWindow, time.Now)
+	server.preInitLimiter = auth.NewLimiter(loginMaxAttempts, loginRateWindow, time.Now)
 	server.mux.HandleFunc("/healthz", server.handleHealth)
 	server.mux.HandleFunc("/readyz", server.handleReady)
 	server.registerAuthRoutes()

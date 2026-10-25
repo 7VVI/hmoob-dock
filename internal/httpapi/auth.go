@@ -139,30 +139,48 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	source := s.clientKey(r)
-	if !s.loginLimiter.Allow(source) {
+
+	// The budget of the source depends on the phase of the deployment.
+	// Before the initialization there is no administrator, so every attempt
+	// fails and every attempt is counted in the budget of this phase. The
+	// budget is separate from the budget of the failed credentials, so a
+	// flood of anonymous requests cannot use up the budget of the
+	// administrator.
+	initialized, err := s.auth.Initialized(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "登录失败")
+		return
+	}
+	limiter := s.preInitLimiter
+	if initialized {
+		limiter = s.loginLimiter
+	}
+	if !limiter.Allow(source) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "尝试次数过多，请稍后再试")
 		return
 	}
 
 	session, err := s.auth.Login(r.Context(), body.Password)
 	if err != nil {
-		// Only a wrong password spends the budget of the source. A
-		// control端 that is not initialized yet tells every visitor the
-		// same thing, and that answer must not lock the administrator
-		// out of the login.
-		if errors.Is(err, auth.ErrInvalidPassword) {
+		switch {
+		case errors.Is(err, auth.ErrInvalidPassword):
+			// Only a wrong password spends the budget of the credentials.
 			s.loginLimiter.Fail(source)
-		}
-		// The message is the same for every reason, so it does not tell an
-		// attacker whether the administrator exists at all.
-		if errors.Is(err, auth.ErrInvalidPassword) || errors.Is(err, auth.ErrNotInitialized) {
+			// The message is the same for every reason, so it does not tell
+			// an attacker whether the administrator exists at all.
 			writeError(w, http.StatusUnauthorized, "invalid_credentials", "登录凭据无效")
-			return
+		case errors.Is(err, auth.ErrNotInitialized):
+			// The deployment is not initialized yet. The attempt spends the
+			// budget of this phase.
+			s.preInitLimiter.Fail(source)
+			writeError(w, http.StatusUnauthorized, "invalid_credentials", "登录凭据无效")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal_error", "登录失败")
 		}
-		writeError(w, http.StatusInternalServerError, "internal_error", "登录失败")
 		return
 	}
 	s.loginLimiter.Reset(source)
+	s.preInitLimiter.Reset(source)
 
 	setSessionCookie(w, session)
 	writeJSON(w, http.StatusOK, map[string]any{

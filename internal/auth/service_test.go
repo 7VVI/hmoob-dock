@@ -1,10 +1,12 @@
 package auth_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -50,6 +52,34 @@ func newService(t *testing.T) (*auth.Service, *sql.DB, *clock) {
 
 	tick := newClock()
 	return auth.New(db, tick.Now), db, tick
+}
+
+// newServiceWithAuditLimit opens a database in a temporary directory and
+// returns a service that keeps at most limit audit events.
+func newServiceWithAuditLimit(t *testing.T, limit int) (*auth.Service, *sql.DB, *clock) {
+	t.Helper()
+
+	db, err := store.Open(filepath.Join(t.TempDir(), "auth.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	tick := newClock()
+	return auth.NewWithAuditLimit(db, tick.Now, limit), db, tick
+}
+
+// captureLog redirects the log of the standard logger into a buffer for the
+// duration of the test, so the reports of the control端 do not pollute the
+// output of the test run.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+
+	buffer := &bytes.Buffer{}
+	writer := log.Writer()
+	log.SetOutput(buffer)
+	t.Cleanup(func() { log.SetOutput(writer) })
+	return buffer
 }
 
 // initializeAdmin seeds a bootstrap credential and initializes the
@@ -570,5 +600,208 @@ func TestTheStoredCredentialsAreIrreversible(t *testing.T) {
 	}
 	if tokenHash == session.Token || csrfHash == session.CSRF {
 		t.Fatal("the session holds a credential instead of its digest")
+	}
+}
+
+func TestSeedBootstrapStartsTheWindowAgainAfterTheCredentialExpired(t *testing.T) {
+	service, db, tick := newService(t)
+	ctx := context.Background()
+
+	if err := service.SeedBootstrap(ctx, "deployment-secret", tick.Now().Add(15*time.Minute)); err != nil {
+		t.Fatalf("SeedBootstrap: %v", err)
+	}
+
+	// The deployment did not finish its initialization in time, so the
+	// credential on record expired.
+	tick.Advance(16 * time.Minute)
+
+	if err := service.SeedBootstrap(ctx, "deployment-secret", tick.Now().Add(15*time.Minute)); err != nil {
+		t.Fatalf("second SeedBootstrap: %v", err)
+	}
+
+	var expiresAt int64
+	if err := db.QueryRow(`SELECT expires_at FROM bootstrap_tokens`).Scan(&expiresAt); err != nil {
+		t.Fatalf("read the expiry of the credential: %v", err)
+	}
+	if want := store.TimeToMillis(tick.Now().Add(15 * time.Minute)); expiresAt != want {
+		t.Fatalf("the expiry of the credential = %d, want %d", expiresAt, want)
+	}
+
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM bootstrap_tokens`).Scan(&count); err != nil {
+		t.Fatalf("count the bootstrap credentials: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("bootstrap credentials = %d, want 1", count)
+	}
+
+	// The credential of the deployment opens the initialization again.
+	if err := service.Initialize(ctx, "deployment-secret", "a-strong-test-password"); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+}
+
+func TestSeedBootstrapReplacesAnExpiredCredentialWithANewOne(t *testing.T) {
+	service, db, tick := newService(t)
+	ctx := context.Background()
+
+	if err := service.SeedBootstrap(ctx, "the-old-credential", tick.Now().Add(15*time.Minute)); err != nil {
+		t.Fatalf("SeedBootstrap: %v", err)
+	}
+	tick.Advance(16 * time.Minute)
+
+	// The deployment changed the content of its bootstrap file.
+	if err := service.SeedBootstrap(ctx, "the-new-credential", tick.Now().Add(15*time.Minute)); err != nil {
+		t.Fatalf("second SeedBootstrap: %v", err)
+	}
+
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM bootstrap_tokens`).Scan(&count); err != nil {
+		t.Fatalf("count the bootstrap credentials: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("bootstrap credentials = %d, want 1", count)
+	}
+
+	// The old credential does not open the initialization any more.
+	if err := service.Initialize(ctx, "the-old-credential", "another-strong-password"); !errors.Is(err, auth.ErrInvalidBootstrap) {
+		t.Fatalf("Initialize error = %v, want %v", err, auth.ErrInvalidBootstrap)
+	}
+
+	// The new one does.
+	if err := service.Initialize(ctx, "the-new-credential", "a-strong-test-password"); err != nil {
+		t.Fatalf("Initialize with the new credential: %v", err)
+	}
+}
+
+func TestSeedBootstrapKeepsAConsumedCredential(t *testing.T) {
+	service, db, tick := newService(t)
+	ctx := context.Background()
+
+	initializeAdmin(t, service, tick)
+
+	var expiresAt, consumedAt int64
+	if err := db.QueryRow(`SELECT expires_at, consumed_at FROM bootstrap_tokens`).Scan(&expiresAt, &consumedAt); err != nil {
+		t.Fatalf("read the credential: %v", err)
+	}
+
+	// The credential was consumed, so it is not replaced.
+	tick.Advance(time.Minute)
+	if err := service.SeedBootstrap(ctx, "another-credential", tick.Now().Add(15*time.Minute)); err != nil {
+		t.Fatalf("SeedBootstrap: %v", err)
+	}
+
+	var keptExpiresAt, keptConsumedAt int64
+	if err := db.QueryRow(`SELECT expires_at, consumed_at FROM bootstrap_tokens`).Scan(&keptExpiresAt, &keptConsumedAt); err != nil {
+		t.Fatalf("read the credential: %v", err)
+	}
+	if keptExpiresAt != expiresAt {
+		t.Fatalf("the expiry of the credential = %d, want %d", keptExpiresAt, expiresAt)
+	}
+	if keptConsumedAt != consumedAt {
+		t.Fatalf("the consumption of the credential = %d, want %d", keptConsumedAt, consumedAt)
+	}
+
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM bootstrap_tokens`).Scan(&count); err != nil {
+		t.Fatalf("count the bootstrap credentials: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("bootstrap credentials = %d, want 1", count)
+	}
+}
+
+func TestTheAuditTableIsBounded(t *testing.T) {
+	service, db, _ := newServiceWithAuditLimit(t, 3)
+	ctx := context.Background()
+	buffer := captureLog(t)
+
+	// Every attempt before the initialization writes an audit event.
+	for attempt := 0; attempt < 3; attempt++ {
+		if _, err := service.Login(ctx, "a-strong-test-password"); !errors.Is(err, auth.ErrNotInitialized) {
+			t.Fatalf("Login error = %v, want %v", err, auth.ErrNotInitialized)
+		}
+	}
+
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM audit_events`).Scan(&count); err != nil {
+		t.Fatalf("count the audit events: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("audit events = %d, want 3", count)
+	}
+
+	// The table is full now. The attempt is answered with the result of the
+	// authentication and not with an error of the audit log.
+	if _, err := service.Login(ctx, "a-strong-test-password"); !errors.Is(err, auth.ErrNotInitialized) {
+		t.Fatalf("Login error = %v, want %v", err, auth.ErrNotInitialized)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM audit_events`).Scan(&count); err != nil {
+		t.Fatalf("count the audit events: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("audit events = %d, want 3", count)
+	}
+
+	// The problem is reported, so it does not pass unnoticed.
+	if !strings.Contains(buffer.String(), "audit table is full") {
+		t.Fatalf("the log = %q, want a report about the full audit table", buffer.String())
+	}
+}
+
+func TestTheLoginWorksWhenTheAuditTableIsFull(t *testing.T) {
+	service, db, tick := newServiceWithAuditLimit(t, 1)
+	ctx := context.Background()
+	captureLog(t)
+
+	// The initialization writes the first audit event, so the table is full
+	// from now on.
+	initializeAdmin(t, service, tick)
+
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM audit_events`).Scan(&count); err != nil {
+		t.Fatalf("count the audit events: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("audit events = %d, want 1", count)
+	}
+
+	// The login opens a session, although its audit event cannot be
+	// stored.
+	session, err := service.Login(ctx, "a-strong-test-password")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if session.Token == "" {
+		t.Fatal("the session has no token")
+	}
+	if _, err := service.Authenticate(ctx, session.Token); err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+}
+
+func TestTheInitializationWorksWhenTheAuditTableIsFull(t *testing.T) {
+	service, db, tick := newServiceWithAuditLimit(t, 1)
+	ctx := context.Background()
+	captureLog(t)
+
+	// The table of the audit events is full before the initialization.
+	if _, err := db.Exec(
+		`INSERT INTO audit_events (id, occurred_at, action, target_id, result)
+		 VALUES ('fill', 0, 'fill', 'admin', 'success')`,
+	); err != nil {
+		t.Fatalf("fill the audit events: %v", err)
+	}
+
+	// The initialization still creates the administrator and the login
+	// still opens a session.
+	if err := service.SeedBootstrap(ctx, "deployment-secret", tick.Now().Add(15*time.Minute)); err != nil {
+		t.Fatalf("SeedBootstrap: %v", err)
+	}
+	if err := service.Initialize(ctx, "deployment-secret", "a-strong-test-password"); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	if _, err := service.Login(ctx, "a-strong-test-password"); err != nil {
+		t.Fatalf("Login: %v", err)
 	}
 }

@@ -3,6 +3,7 @@ package httpapi_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"hmoob-dock/internal/auth"
 	"hmoob-dock/internal/config"
 	"hmoob-dock/internal/httpapi"
 	"hmoob-dock/internal/secret"
@@ -33,6 +35,9 @@ type authServer struct {
 	handler http.Handler
 	server  *httptest.Server
 	client  *http.Client
+	// db is the database of the control端. The tests use it to prepare a
+	// state that the API cannot reach.
+	db *sql.DB
 }
 
 // authServerConfig changes the configuration of a test control端.
@@ -106,7 +111,24 @@ func newAuthServerWith(t *testing.T, options authServerConfig) *authServer {
 	}
 	t.Cleanup(server.Close)
 
-	return &authServer{t: t, handler: handler, server: server, client: client}
+	return &authServer{t: t, handler: handler, server: server, client: client, db: db}
+}
+
+// fillAuditEvents fills the table of the audit events up with the given
+// number of rows. It prepares the state of a control端 whose audit table
+// reached its capacity.
+func fillAuditEvents(t *testing.T, db *sql.DB, rows int) {
+	t.Helper()
+
+	if _, err := db.Exec(
+		`INSERT INTO audit_events (id, occurred_at, action, target_id, result)
+		 SELECT 'fill-' || value, 0, 'fill', 'admin', 'success'
+		 FROM (WITH RECURSIVE seq(value) AS (SELECT 1 UNION ALL SELECT value + 1 FROM seq WHERE value < ?)
+		       SELECT value FROM seq)`,
+		rows,
+	); err != nil {
+		t.Fatalf("fill the audit events: %v", err)
+	}
 }
 
 // host returns the host of the control端 without its scheme.
@@ -786,12 +808,48 @@ func TestThePasswordChangeReportsTheFieldOfTheNewPassword(t *testing.T) {
 	}
 }
 
-func TestTheLoginBeforeTheInitializationDoesNotUseTheBudget(t *testing.T) {
+func TestTheLoginBeforeTheInitializationIsLimitedByItsOwnBudget(t *testing.T) {
 	server := newAuthServer(t)
 
-	// Before the initialization there is no administrator at all, so no
-	// attempt of this kind spends the budget of the source.
-	for attempt := 0; attempt < 7; attempt++ {
+	// Before the initialization there is no administrator at all, so every
+	// attempt fails. The attempts are counted in the budget of this phase,
+	// because an anonymous client must not write an endless number of audit
+	// events.
+	for attempt := 0; attempt < 5; attempt++ {
+		response := server.post("/api/v1/auth/login", map[string]string{"password": adminPassword})
+		response.Body.Close()
+		if response.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status = %d, want %d", attempt, response.StatusCode, http.StatusUnauthorized)
+		}
+	}
+
+	response := server.post("/api/v1/auth/login", map[string]string{"password": adminPassword})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusTooManyRequests)
+	}
+	payload := server.decode(response)
+	if payload["code"] != "rate_limited" {
+		t.Fatalf("error code = %q, want rate_limited", payload["code"])
+	}
+
+	// The budget of this phase does not keep the administrator out: the
+	// correct password opens a session after the initialization.
+	server.initialize()
+
+	response = server.post("/api/v1/auth/login", map[string]string{"password": adminPassword})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("login status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+}
+
+func TestTheBudgetOfTheCredentialsIsNotSpentBeforeTheInitialization(t *testing.T) {
+	server := newAuthServer(t)
+
+	// The attempts before the initialization are counted in their own
+	// budget.
+	for attempt := 0; attempt < 5; attempt++ {
 		response := server.post("/api/v1/auth/login", map[string]string{"password": adminPassword})
 		response.Body.Close()
 		if response.StatusCode != http.StatusUnauthorized {
@@ -801,10 +859,54 @@ func TestTheLoginBeforeTheInitializationDoesNotUseTheBudget(t *testing.T) {
 
 	server.initialize()
 
-	response := server.post("/api/v1/auth/login", map[string]string{"password": adminPassword})
+	// The budget of the credentials is untouched by those attempts, so the
+	// wrong passwords are counted from the beginning.
+	for attempt := 0; attempt < 5; attempt++ {
+		response := server.post("/api/v1/auth/login", map[string]string{"password": "a-wrong-test-password"})
+		response.Body.Close()
+		if response.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status = %d, want %d", attempt, response.StatusCode, http.StatusUnauthorized)
+		}
+	}
+
+	response := server.post("/api/v1/auth/login", map[string]string{"password": "a-wrong-test-password"})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusTooManyRequests)
+	}
+}
+
+func TestTheLoginAnswersWhenTheAuditTableIsFull(t *testing.T) {
+	server := newAuthServer(t)
+	server.initialize()
+
+	// The audit table reached its capacity, so no further audit event can
+	// be stored.
+	fillAuditEvents(t, server.db, auth.AuditMaxEvents-1)
+
+	var buffer bytes.Buffer
+	writer := log.Writer()
+	log.SetOutput(&buffer)
+	defer log.SetOutput(writer)
+
+	// A wrong password is answered with the result of the authentication
+	// and not with an error of the server.
+	response := server.post("/api/v1/auth/login", map[string]string{"password": "a-wrong-test-password"})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("login status = %d, want %d", response.StatusCode, http.StatusUnauthorized)
+	}
+
+	// The correct password opens a session as well.
+	response = server.post("/api/v1/auth/login", map[string]string{"password": adminPassword})
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
+		t.Fatalf("login status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+
+	// The problem is reported, so it does not pass unnoticed.
+	if !strings.Contains(buffer.String(), "audit table is full") {
+		t.Fatalf("the log = %q, want a report about the full audit table", buffer.String())
 	}
 }
 

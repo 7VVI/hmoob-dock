@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"hmoob-dock/internal/store"
@@ -76,15 +77,35 @@ type Session struct {
 type Service struct {
 	db  *sql.DB
 	now func() time.Time
+	// auditLimit is the number of audit events the control端 keeps.
+	auditLimit int
+	// auditMu guards the state of the reports about the audit log.
+	auditMu sync.Mutex
+	// auditFullReported remembers that a full audit table was reported, so
+	// the report does not repeat itself for every event.
+	auditFullReported bool
+	// auditLastReport is the moment of the last report of a problem of the
+	// audit log.
+	auditLastReport time.Time
 }
 
 // New builds the service on top of the given database. The clock provides
 // every timestamp and expiry; a nil clock falls back to the system clock.
 func New(db *sql.DB, now func() time.Time) *Service {
+	return NewWithAuditLimit(db, now, AuditMaxEvents)
+}
+
+// NewWithAuditLimit builds the service on top of the given database and
+// keeps at most auditLimit audit events. A limit of zero or less falls back
+// to the default capacity.
+func NewWithAuditLimit(db *sql.DB, now func() time.Time, auditLimit int) *Service {
 	if now == nil {
 		now = time.Now
 	}
-	return &Service{db: db, now: now}
+	if auditLimit <= 0 {
+		auditLimit = AuditMaxEvents
+	}
+	return &Service{db: db, now: now, auditLimit: auditLimit}
 }
 
 // Initialized reports whether the administrator exists already.
@@ -99,37 +120,85 @@ func (s *Service) Initialized(ctx context.Context) (bool, error) {
 // SeedBootstrap stores the one time bootstrap credential. The credential is
 // only stored as a digest and stays valid until the given time.
 //
-// A credential that is on record keeps the window it was given: a restart of
-// the control端 must not extend the lifetime of a credential that was
-// handed out already. A new credential is only stored while the table holds
-// no record at all, so a deployment has at most one bootstrap credential.
+// The state of the credential on record decides whether it is replaced:
 //
-// Seeding a credential that was consumed already does nothing, so a restart
-// of the control端 cannot make a used credential valid again.
+//   - A consumed credential is not replaced. The deployment is initialized
+//     already, so a restart of the control端 must not open a second
+//     initialization.
+//   - A credential that is still valid keeps its window. A restart of the
+//     control端 must not extend the lifetime of a credential that was
+//     handed out already.
+//   - A credential that expired without being used is replaced by the new
+//     one. The window starts again with the new credential, so a deployment
+//     that did not finish its initialization in time can start over without
+//     touching the database.
 func (s *Service) SeedBootstrap(ctx context.Context, token string, expires time.Time) error {
 	if strings.TrimSpace(token) == "" {
 		return errors.New("auth: the bootstrap credential is empty")
 	}
 	digest := digestOf(token)
 
-	var count int
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM bootstrap_tokens`).Scan(&count); err != nil {
-		return fmt.Errorf("auth: count the bootstrap credentials: %w", err)
+	records, err := s.bootstrapRecords(ctx)
+	if err != nil {
+		return err
 	}
-	if count > 0 {
-		return nil
+	now := s.now()
+	for _, record := range records {
+		if record.consumedAt.Valid {
+			// The credential was used, so the deployment is initialized.
+			return nil
+		}
+		if store.TimeFromMillis(record.expiresAt).After(now) {
+			// The credential is still valid, so its window stays.
+			return nil
+		}
 	}
 
+	// Every credential on file expired without being used, so the new one
+	// replaces them and the window starts again.
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM bootstrap_tokens WHERE consumed_at IS NULL`); err != nil {
+		return fmt.Errorf("auth: drop the expired bootstrap credentials: %w", err)
+	}
 	id, err := randomID()
 	if err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx,
 		`INSERT INTO bootstrap_tokens (id, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?)`,
-		id, digest, store.TimeToMillis(s.now()), store.TimeToMillis(expires)); err != nil {
+		id, digest, store.TimeToMillis(now), store.TimeToMillis(expires)); err != nil {
 		return fmt.Errorf("auth: store the bootstrap credential: %w", err)
 	}
 	return nil
+}
+
+// bootstrapRecord is a bootstrap credential on record.
+type bootstrapRecord struct {
+	expiresAt  int64
+	consumedAt sql.NullInt64
+}
+
+// bootstrapRecords reads the bootstrap credentials on record.
+func (s *Service) bootstrapRecords(ctx context.Context) ([]bootstrapRecord, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT expires_at, consumed_at FROM bootstrap_tokens`)
+	if err != nil {
+		return nil, fmt.Errorf("auth: read the bootstrap credentials: %w", err)
+	}
+	defer rows.Close()
+
+	var records []bootstrapRecord
+	for rows.Next() {
+		var record bootstrapRecord
+		if err := rows.Scan(&record.expiresAt, &record.consumedAt); err != nil {
+			return nil, fmt.Errorf("auth: scan the bootstrap credential: %w", err)
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("auth: read the bootstrap credentials: %w", err)
+	}
+	return records, nil
 }
 
 // Initialize creates the administrator with the given password. The
@@ -194,9 +263,7 @@ func (s *Service) Initialize(ctx context.Context, token, password string) error 
 		`UPDATE bootstrap_tokens SET consumed_at = ? WHERE id = ?`, now, credential); err != nil {
 		return fmt.Errorf("auth: consume the bootstrap credential: %w", err)
 	}
-	if err := s.recordAudit(ctx, tx, AuditActionInitialize, AuditResultSuccess); err != nil {
-		return err
-	}
+	s.storeAudit(ctx, tx, AuditActionInitialize, AuditResultSuccess)
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("auth: commit the initialization: %w", err)
 	}
@@ -207,24 +274,22 @@ func (s *Service) Initialize(ctx context.Context, token, password string) error 
 //
 // Every attempt is recorded in the audit events: a failed one without the
 // reason of the failure, so the record tells that an attempt happened
-// without telling a credential to the reader of the table.
+// without telling a credential to the reader of the table. A problem of the
+// audit log does not change the result of the attempt, so a full audit table
+// cannot let the attempts bypass the budget of their source.
 func (s *Service) Login(ctx context.Context, password string) (Session, error) {
 	var encoded string
 	err := s.db.QueryRowContext(ctx,
 		`SELECT password_hash FROM administrator WHERE id = ?`, administratorID).Scan(&encoded)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		if auditErr := s.recordAudit(ctx, s.db, AuditActionLogin, AuditResultFailure); auditErr != nil {
-			return Session{}, auditErr
-		}
+		s.storeAudit(ctx, s.db, AuditActionLogin, AuditResultFailure)
 		return Session{}, ErrNotInitialized
 	case err != nil:
 		return Session{}, fmt.Errorf("auth: read the administrator: %w", err)
 	}
 	if err := VerifyPassword(encoded, password); err != nil {
-		if auditErr := s.recordAudit(ctx, s.db, AuditActionLogin, AuditResultFailure); auditErr != nil {
-			return Session{}, auditErr
-		}
+		s.storeAudit(ctx, s.db, AuditActionLogin, AuditResultFailure)
 		return Session{}, err
 	}
 	return s.startSession(ctx)
@@ -307,9 +372,7 @@ func (s *Service) ChangePassword(ctx context.Context, token, current, next strin
 		`UPDATE sessions SET revoked_at = ? WHERE revoked_at IS NULL`, now); err != nil {
 		return fmt.Errorf("auth: revoke the sessions: %w", err)
 	}
-	if err := s.recordAudit(ctx, tx, AuditActionPasswordChange, AuditResultSuccess); err != nil {
-		return err
-	}
+	s.storeAudit(ctx, tx, AuditActionPasswordChange, AuditResultSuccess)
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("auth: commit the password change: %w", err)
 	}
@@ -338,8 +401,10 @@ func (s *Service) Logout(ctx context.Context, token string) error {
 }
 
 // startSession creates a session with a fresh random token. The session and
-// the audit event of the login are written in one transaction, so a
-// successful login is never recorded without a session.
+// the audit event of the login are written in one transaction, so the two of
+// them cannot get out of step. A problem of the audit log does not discard
+// the session, because the result of the authentication must not depend on
+// the audit log.
 func (s *Service) startSession(ctx context.Context) (Session, error) {
 	token, err := randomToken()
 	if err != nil {
@@ -365,9 +430,7 @@ func (s *Service) startSession(ctx context.Context) (Session, error) {
 		store.TimeToMillis(now), store.TimeToMillis(expires)); err != nil {
 		return Session{}, fmt.Errorf("auth: store the session: %w", err)
 	}
-	if err := s.recordAudit(ctx, tx, AuditActionLogin, AuditResultSuccess); err != nil {
-		return Session{}, err
-	}
+	s.storeAudit(ctx, tx, AuditActionLogin, AuditResultSuccess)
 	if err := tx.Commit(); err != nil {
 		return Session{}, fmt.Errorf("auth: commit the session: %w", err)
 	}
