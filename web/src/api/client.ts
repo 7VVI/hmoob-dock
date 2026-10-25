@@ -5,6 +5,13 @@ import { clearSession, sessionState } from '../auth/session'
 // The header that carries the CSRF token of a modifying request.
 const csrfHeader = 'X-CSRF-Token'
 
+// The codes of a refusal that end the session of the administrator.
+//
+// A refusal of the credentials of the administrator is not one of them: the
+// session of the control端 is still good, and the page shows the reason of
+// the refusal next to the input that carries it.
+const sessionEndedCodes = new Set(['unauthenticated', 'not_initialized'])
+
 // The shape of an error document of the API.
 interface ErrorPayload {
   code?: string
@@ -19,8 +26,10 @@ interface ErrorPayload {
 // request carries the CSRF token of the session, because the control端
 // refuses a request without it.
 //
-// An answer with the status 401 clears the session of the page, so a session
-// that expired does not stay behind in the frontend.
+// An answer with the status 401 ends the session of the page only when the
+// control端 says that the session is over, so a session that expired does
+// not stay behind in the frontend and a refusal of the credentials of the
+// administrator does not throw the administrator out of the page.
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const method = (init.method ?? 'GET').toUpperCase()
   const headers = new Headers(init.headers)
@@ -48,13 +57,16 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 
   const payload = await readJSON(response)
   if (!response.ok) {
-    if (response.status === 401) {
+    // The body of the answer is read before the session is touched, because
+    // the code of the error tells whether the session is over at all.
+    const error = payload as ErrorPayload | undefined
+    const code = error?.code ?? 'unknown_error'
+    if (response.status === 401 && sessionEndedCodes.has(code)) {
       clearSession()
     }
-    const error = payload as ErrorPayload | undefined
     throw new ApiError(
       response.status,
-      error?.code ?? 'unknown_error',
+      code,
       error?.message ?? '请求失败，请稍后重试',
       error?.fields ?? {},
     )

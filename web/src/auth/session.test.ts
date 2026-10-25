@@ -150,6 +150,36 @@ test('clears the session when the API refuses the request', async () => {
   expect(sessionState.csrfToken).toBeNull()
 })
 
+test('keeps the session when the credentials of the administrator are wrong', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => answer(401, { code: 'invalid_credentials', message: '当前密码不正确' })),
+  )
+  beginSession(payload)
+
+  const failure = await api('/api/v1/auth/password', { method: 'POST' }).catch(
+    (error: unknown) => error,
+  )
+  expect(failure).toBeInstanceOf(ApiError)
+  expect((failure as ApiError).code).toBe('invalid_credentials')
+  // The session of the administrator is still good, so the page keeps it and
+  // the administrator does not have to log in again.
+  expect(sessionState.status).toBe('authenticated')
+  expect(sessionState.csrfToken).toBe('csrf-token')
+})
+
+test('clears the session when the deployment has no administrator', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => answer(401, { code: 'not_initialized', message: '管理员尚未初始化' })),
+  )
+  beginSession(payload)
+
+  await expect(api('/api/v1/auth/session')).rejects.toBeInstanceOf(ApiError)
+  expect(sessionState.status).toBe('anonymous')
+  expect(sessionState.csrfToken).toBeNull()
+})
+
 test('reports the reason of a failed request', async () => {
   vi.stubGlobal(
     'fetch',

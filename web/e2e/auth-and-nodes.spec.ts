@@ -145,7 +145,15 @@ async function installApi(page: Page, state: Deployment) {
         return answer(500, { code: 'internal_error', message: '撤销节点失败' })
       }
       state.revoked.push(id)
-      state.nodes = state.nodes.filter((node) => node.id !== id)
+      // The control端 keeps a revoked node in its list: the list of the nodes
+      // holds every enrolled node, also the revoked ones. A node that is not
+      // live holds no containers and no moment of the last heartbeat, so the
+      // summary of a revoked node shows a broken connection.
+      state.nodes = state.nodes.map((node) =>
+        node.id === id
+          ? { ...node, connected: false, container_count: 0, last_seen: null }
+          : node,
+      )
       return answer(204)
     }
 
@@ -257,7 +265,10 @@ test('revokes a node only after a confirmation', async ({ page }) => {
   await page.getByRole('button', { name: '撤销' }).first().click()
   await page.getByRole('button', { name: '确认' }).click()
 
-  await expect(page.getByRole('rowheader', { name: 'worker-1' })).toHaveCount(0)
+  // The control端 keeps a revoked node in its list, so the node stays in the
+  // list of the page and shows a broken connection.
+  await expect(page.getByRole('rowheader', { name: 'worker-1' })).toBeVisible()
+  await expect(page.getByRole('row', { name: /worker-1/ })).toContainText('连接中断')
   await expect(page.getByText('已撤销该节点的接入凭据，它不会再连接。')).toBeVisible()
   expect(state.revoked).toEqual(['node-1'])
 })
@@ -276,7 +287,8 @@ test('reports a failed revocation and lets the administrator try again', async (
   await expect(page.getByRole('rowheader', { name: 'worker-1' })).toBeVisible()
 
   await page.getByRole('button', { name: '确认' }).click()
-  await expect(page.getByRole('rowheader', { name: 'worker-1' })).toHaveCount(0)
+  await expect(page.getByText('已撤销该节点的接入凭据，它不会再连接。')).toBeVisible()
+  await expect(page.getByRole('rowheader', { name: 'worker-1' })).toBeVisible()
 })
 
 test('returns to the login after a password change', async ({ page }) => {
@@ -291,6 +303,29 @@ test('returns to the login after a password change', async ({ page }) => {
 
   await expect(page).toHaveURL(/\/login\?notice=password-changed$/)
   await expect(page.getByText('密码已修改，请使用新密码登录。')).toBeVisible()
+})
+
+test('keeps the session and the input when the current password is wrong', async ({ page }) => {
+  await installApi(page, runningDeployment())
+  await logIn(page)
+  await page.goto('/settings')
+
+  await page.getByLabel('当前密码', { exact: true }).fill('wrong-password')
+  await page.getByLabel('新密码', { exact: true }).fill('another-long-admin-password')
+  await page.getByLabel('确认新密码', { exact: true }).fill('another-long-admin-password')
+  await page.getByRole('button', { name: '修改密码' }).click()
+
+  // The session of the administrator is still good, so the page stays where
+  // it is and the reason of the refusal is visible.
+  await expect(page.getByRole('alert')).toContainText('当前密码不正确')
+  await expect(page).toHaveURL(/\/settings$/)
+  await expect(page.getByLabel('当前密码', { exact: true })).toHaveValue('wrong-password')
+  await expect(page.getByLabel('新密码', { exact: true })).toHaveValue('another-long-admin-password')
+  await expect(page.getByLabel('确认新密码', { exact: true })).toHaveValue('another-long-admin-password')
+
+  // The session still works, so the page can still read the nodes.
+  await page.getByRole('button', { name: '刷新' }).click()
+  await expect(page.getByRole('rowheader', { name: 'worker-1' })).toBeVisible()
 })
 
 test('signs the administrator out', async ({ page }) => {
