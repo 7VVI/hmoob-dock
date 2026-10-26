@@ -50,9 +50,13 @@ const (
 	// reconnectMaxDelay is the longest delay between two connection
 	// attempts.
 	reconnectMaxDelay = 30 * time.Second
-	// outboundBuffer is the number of frames that wait for the write loop
+	// controlBuffer is the number of control frames that wait for the
+	// write loop of the connection. A control frame answers the control端,
+	// so it may not wait behind a flood of logs.
+	controlBuffer = 16
+	// logBuffer is the number of log frames that wait for the write loop
 	// of the connection.
-	outboundBuffer = 64
+	logBuffer = 64
 	// dialTimeout bounds the handshake of a connection.
 	dialTimeout = 30 * time.Second
 	// enrollmentTimeout bounds the registration of the node.
@@ -268,13 +272,18 @@ func session(ctx context.Context, cfg config.Agent, client *http.Client, credent
 		return false, err
 	}
 	defer conn.CloseNow()
+	// The limit of a frame is the limit of the protocol. A command of the
+	// control端 carries a document of an application, so it does not fit
+	// into the small default limit of the library.
+	conn.SetReadLimit(int64(protocol.MaxMessageSize))
 
 	done := make(chan struct{})
-	outbound := make(chan []byte, outboundBuffer)
+	control := make(chan []byte, controlBuffer)
+	logs := make(chan []byte, logBuffer)
 	frames := &framer{}
 
-	// The conversation starts with the hello of the agent. The frames wait
-	// in one buffer, so the hello is the first frame the control端 reads.
+	// The conversation starts with the hello of the agent. The hello is a
+	// control frame, so it is the first frame the control端 reads.
 	identity, err := engine.Identity(ctx)
 	if err != nil {
 		return true, err
@@ -283,7 +292,7 @@ func session(ctx context.Context, cfg config.Agent, client *http.Client, credent
 	if err != nil {
 		return true, err
 	}
-	if err := send(ctx, done, outbound, hello); err != nil {
+	if err := send(ctx, done, control, hello); err != nil {
 		return true, err
 	}
 
@@ -291,16 +300,16 @@ func session(ctx context.Context, cfg config.Agent, client *http.Client, credent
 	workers.Add(1)
 	go func() {
 		defer workers.Done()
-		writeFrames(ctx, conn, outbound, done)
+		writeFrames(ctx, conn, control, logs, done)
 	}()
 	workers.Add(2)
 	go func() {
 		defer workers.Done()
-		reportHeartbeats(ctx, frames, outbound, done)
+		reportHeartbeats(ctx, frames, logs, done)
 	}()
 	go func() {
 		defer workers.Done()
-		reportInventory(ctx, frames, outbound, done, engine)
+		reportInventory(ctx, frames, logs, done, engine)
 	}()
 
 	err = readControl(ctx, conn)
@@ -399,20 +408,42 @@ func send(ctx context.Context, done <-chan struct{}, outbound chan<- []byte, env
 	}
 }
 
-// writeFrames writes the frames of the agent to the control端. The
-// connection has exactly one writer, so the frames never interleave.
-func writeFrames(ctx context.Context, conn *websocket.Conn, outbound <-chan []byte, done <-chan struct{}) {
+// writeFrames writes the frames of the agent to the control端.
+//
+// The connection has exactly one writer, so the frames never interleave. A
+// control frame wins over a log frame: the answer of the control端 must not
+// wait behind a flood of logs.
+func writeFrames(ctx context.Context, conn *websocket.Conn, control, logs <-chan []byte, done <-chan struct{}) {
 	for {
-		select {
-		case <-done:
+		frame, ok := nextFrame(ctx, control, logs, done)
+		if !ok {
 			return
-		case <-ctx.Done():
-			return
-		case frame := <-outbound:
-			if err := conn.Write(ctx, websocket.MessageText, frame); err != nil {
-				return
-			}
 		}
+		if err := conn.Write(ctx, websocket.MessageText, frame); err != nil {
+			return
+		}
+	}
+}
+
+// nextFrame waits for the next frame of the agent.
+//
+// The control frames are served first, so a receipt of a task is never
+// delayed by the fragments of a log.
+func nextFrame(ctx context.Context, control, logs <-chan []byte, done <-chan struct{}) ([]byte, bool) {
+	select {
+	case frame := <-control:
+		return frame, true
+	default:
+	}
+	select {
+	case <-done:
+		return nil, false
+	case <-ctx.Done():
+		return nil, false
+	case frame := <-control:
+		return frame, true
+	case frame := <-logs:
+		return frame, true
 	}
 }
 
@@ -519,7 +550,7 @@ func splitInventory(inventory protocol.Inventory) ([]protocol.InventoryBatch, er
 	if err != nil {
 		return nil, fmt.Errorf("agent: encode the inventory batch: %w", err)
 	}
-	budget := protocol.MaxPayloadSize - len(template)
+	budget := protocol.MaxInventoryPayloadSize - len(template)
 
 	var batches []protocol.InventoryBatch
 	current := make([]protocol.Container, 0, 16)
@@ -555,7 +586,7 @@ func splitInventory(inventory protocol.Inventory) ([]protocol.InventoryBatch, er
 		if err != nil {
 			return nil, fmt.Errorf("agent: encode the inventory batch: %w", err)
 		}
-		if len(data) > protocol.MaxPayloadSize {
+		if len(data) > protocol.MaxInventoryPayloadSize {
 			return nil, fmt.Errorf(
 				"agent: the batch %d of the inventory is too large: %d bytes", index, len(data))
 		}

@@ -1,0 +1,138 @@
+package protocol
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"hmoob-dock/internal/model"
+	"hmoob-dock/internal/yamlspec"
+)
+
+// The message types of a deployment.
+const (
+	// TypeDeployCommand carries the instruction of the control端 to
+	// deploy an application.
+	TypeDeployCommand = "deploy.command"
+	// TypeDeployReceipt carries the report of an agent about a task.
+	TypeDeployReceipt = "deploy.receipt"
+	// TypeDeployOutput carries a fragment of the output of a task.
+	TypeDeployOutput = "deploy.output"
+	// TypeDeployQuery asks an agent about a task in its ledger. The query
+	// changes nothing.
+	TypeDeployQuery = "deploy.query"
+	// TypeDeployQueryResult answers a query about the ledger of an agent.
+	TypeDeployQueryResult = "deploy.query_result"
+)
+
+// The limits of the configuration of a command.
+//
+// The limits are the limits of the configuration itself. A frame that fits
+// into the limit of its kind may still carry a configuration that is too
+// large, and the limit of the frame is not a way around the limit of the
+// configuration.
+const (
+	// MaxCommandYAMLSize is the largest document a command may carry.
+	MaxCommandYAMLSize = yamlspec.MaxDocumentSize
+	// MaxCommandVariablesSize is the largest total size of the variables
+	// a command may carry.
+	MaxCommandVariablesSize = yamlspec.MaxVariablesSize
+)
+
+// DeployCommand is the instruction of the control端 to deploy an
+// application.
+type DeployCommand struct {
+	// Command is the command the agent executes.
+	Command model.Command `json:"command"`
+}
+
+// DeployReceipt is the report of an agent about a task.
+//
+// The receipt carries the sequence number of the task, so a receipt that
+// arrives again is recognised as the same report and not as a new one.
+type DeployReceipt struct {
+	// Receipt is the receipt of the task.
+	Receipt model.Receipt `json:"receipt"`
+}
+
+// DeployOutput is a fragment of the output of a task.
+//
+// The fragment names its offset, so a reader skips the fragments it has
+// already seen, and it marks the truncation, so a reader learns that the
+// output of the task is incomplete.
+type DeployOutput struct {
+	// TaskID is the task the fragment belongs to.
+	TaskID string `json:"task_id"`
+	// Offset is the position of the fragment in the output of the task.
+	Offset int64 `json:"offset"`
+	// Data is the fragment itself.
+	Data []byte `json:"data"`
+	// Truncated reports that the output of the task was truncated.
+	Truncated bool `json:"truncated"`
+}
+
+// DeployQuery asks the ledger of an agent about a task.
+//
+// The query only reads the ledger. It never asks the agent to execute
+// anything, so a control端 that lost the state of a task learns what
+// happened without touching the target again.
+type DeployQuery struct {
+	// TaskID is the task the query asks about.
+	TaskID string `json:"task_id"`
+}
+
+// DeployQueryResult is the answer of an agent about a task in its ledger.
+type DeployQueryResult struct {
+	// TaskID is the task the answer belongs to.
+	TaskID string `json:"task_id"`
+	// Found reports whether the ledger of the agent knows the task.
+	Found bool `json:"found"`
+	// Receipt is the last receipt of the task. It is empty when the
+	// ledger does not know the task.
+	Receipt model.Receipt `json:"receipt"`
+}
+
+// DecodeDeployCommand reads the command of a frame.
+//
+// The limits of the configuration hold after the frame was decoded: a frame
+// that fits into the limit of its kind may still carry a document or
+// variables that are too large.
+func DecodeDeployCommand(payload []byte) (model.Command, error) {
+	var message DeployCommand
+	if err := json.Unmarshal(payload, &message); err != nil {
+		return model.Command{}, fmt.Errorf("%w: decode the command: %v", ErrPayloadInvalid, err)
+	}
+	if err := checkCommandLimits(message.Command); err != nil {
+		return model.Command{}, err
+	}
+	return message.Command, nil
+}
+
+// DecodeDeployQuery reads the query of a frame.
+func DecodeDeployQuery(payload []byte) (DeployQuery, error) {
+	var query DeployQuery
+	if err := json.Unmarshal(payload, &query); err != nil {
+		return DeployQuery{}, fmt.Errorf("%w: decode the query: %v", ErrPayloadInvalid, err)
+	}
+	if strings.TrimSpace(query.TaskID) == "" {
+		return DeployQuery{}, fmt.Errorf("%w: the query names no task", ErrPayloadInvalid)
+	}
+	return query, nil
+}
+
+// checkCommandLimits refuses a command whose configuration is too large.
+func checkCommandLimits(command model.Command) error {
+	if len(command.Config.YAML) > MaxCommandYAMLSize {
+		return fmt.Errorf("%w: the document of the command holds %d bytes, the limit is %d bytes",
+			ErrPayloadInvalid, len(command.Config.YAML), MaxCommandYAMLSize)
+	}
+	size := 0
+	for name, value := range command.Config.Variables {
+		size += len(name) + len(value)
+	}
+	if size > MaxCommandVariablesSize {
+		return fmt.Errorf("%w: the variables of the command hold %d bytes, the limit is %d bytes",
+			ErrPayloadInvalid, size, MaxCommandVariablesSize)
+	}
+	return nil
+}

@@ -495,6 +495,39 @@ func TestTheAgentReconnectsAfterADroppedConnection(t *testing.T) {
 	})
 }
 
+// TestAControlFrameWinsOverALogFrame proves that the answer of the control端
+// is never delayed by the fragments of a log.
+func TestAControlFrameWinsOverALogFrame(t *testing.T) {
+	control := make(chan []byte, 1)
+	logs := make(chan []byte, 1)
+	logs <- []byte("a fragment of a log")
+	control <- []byte("the answer of the control端")
+
+	frame, ok := nextFrame(context.Background(), control, logs, make(chan struct{}))
+	if !ok {
+		t.Fatal("the write loop of the agent got no frame")
+	}
+	if string(frame) != "the answer of the control端" {
+		t.Fatalf("the frame = %q, want the control frame", frame)
+	}
+}
+
+// TestALogFrameIsServedWhenNoControlFrameWaits proves that the logs of the
+// agent still reach the control端.
+func TestALogFrameIsServedWhenNoControlFrameWaits(t *testing.T) {
+	control := make(chan []byte, 1)
+	logs := make(chan []byte, 1)
+	logs <- []byte("a fragment of a log")
+
+	frame, ok := nextFrame(context.Background(), control, logs, make(chan struct{}))
+	if !ok {
+		t.Fatal("the write loop of the agent got no frame")
+	}
+	if string(frame) != "a fragment of a log" {
+		t.Fatalf("the frame = %q, want the log frame", frame)
+	}
+}
+
 func TestTheBackoffGrowsAndIsCapped(t *testing.T) {
 	first := backoff(0)
 	if first < 500*time.Millisecond || first > time.Second {
