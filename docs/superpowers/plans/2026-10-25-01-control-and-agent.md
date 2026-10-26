@@ -333,7 +333,7 @@ services:
       - /opt/hmoob-dock:/opt/hmoob-dock
 ```
 
-完整样例补入服务器 URL、CA 和接入令牌文件的必填变量与只读挂载，凭据不写入仓库。控制端仅暴露 HTTPS 服务端口，数据库卷与密钥文件分开挂载；Agent 不映射端口、不使用 `privileged`、不挂载整个宿主机根目录。Compose bind 路径两侧必须相同。
+完整样例补入服务器 URL、CA 和接入令牌文件的必填变量与只读挂载（Agent 除 `docker.sock` 与应用工作目录外，另有 CA 与接入令牌的只读文件挂载），凭据不写入仓库。控制端仅暴露 HTTPS 服务端口，数据库卷与密钥文件分开挂载；Agent 不映射端口、不使用 `privileged`、不挂载整个宿主机根目录。Compose bind 路径两侧必须相同。
 
 - [ ] **Step 4: 执行 GREEN 并构建镜像。** `go test ./...`、`npm --prefix web run build`；Docker 可用且用户允许构建后运行 `docker build -f deploy/Dockerfile.control -t hmoob-dock-control:local .` 和 Agent 对应命令。Compose 样例使用必填变量，没有变量时 `docker compose config` 必须失败而不是生成不安全默认凭据。
 - [ ] **Step 5: 独立阶段验收。** 在测试 Linux 主机启动两个容器，浏览器完成登录和节点查看；重启控制端后管理员与节点仍存在；撤销 Agent 后不能重连，业务容器不受影响。运行 `go test -tags=integration ./tests/integration -run 'AgentInventory|Packaging' -count=1`；缺环境则明确未验收。
