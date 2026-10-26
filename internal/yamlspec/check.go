@@ -67,7 +67,23 @@ const (
 	LifecycleExtension = "x-hmoob-lifecycle"
 	// LifecycleOneShot marks a service that runs once and exit.
 	LifecycleOneShot = "oneshot"
+	// platformExtensionPrefix is the prefix of the extensions the platform
+	// owns.
+	platformExtensionPrefix = "x-hmoob-"
 )
+
+// recognizedExtensions holds the extensions of the platform namespace the
+// platform understands.
+//
+// The platform owns the "x-hmoob-" namespace, so a key in it that the
+// platform does not know is a misspelling of an extension it does know. The
+// Compose specification lets such a key pass, and the Docker CLI ignores it,
+// so a misspelling would turn a service that runs once into a service that
+// runs forever without a word. The platform refuses the key instead and
+// names the extension it knows.
+var recognizedExtensions = map[string]bool{
+	LifecycleExtension: true,
+}
 
 // The codes of a failed check. They are part of the answer of the API, so
 // they stay stable.
@@ -507,6 +523,9 @@ func checkCompose(document map[string]any, index map[string]int) error {
 	if _, ok := document["include"]; ok {
 		return unsupportedField("include", index, "配置必须自包含，平台不支持 include")
 	}
+	if err := checkPlatformExtensions(sortedKeys(document), "", index); err != nil {
+		return err
+	}
 	services, names, err := serviceList(document, index)
 	if err != nil {
 		return err
@@ -517,6 +536,9 @@ func checkCompose(document map[string]any, index map[string]int) error {
 			continue
 		}
 		path := "services." + name
+		if err := checkPlatformExtensions(sortedKeys(service), path+".", index); err != nil {
+			return err
+		}
 		if err := checkForbiddenServiceFields(service, path, index); err != nil {
 			return err
 		}
@@ -526,6 +548,26 @@ func checkCompose(document map[string]any, index map[string]int) error {
 	}
 	if err := schema.Validate(document); err != nil {
 		return schemaError(err, index)
+	}
+	return nil
+}
+
+// checkPlatformExtensions refuses the extensions of the platform namespace
+// the platform does not know.
+//
+// The prefix names the level the keys belong to, so the error points at the
+// line the administrator has to change. An extension of another vendor is
+// left alone: it belongs to the Compose specification.
+func checkPlatformExtensions(keys []string, prefix string, index map[string]int) error {
+	for _, key := range keys {
+		if !strings.HasPrefix(key, platformExtensionPrefix) {
+			continue
+		}
+		if recognizedExtensions[key] {
+			continue
+		}
+		return unsupportedField(prefix+key, index, fmt.Sprintf(
+			"未知的平台扩展 %s，平台只支持 %s", key, LifecycleExtension))
 	}
 	return nil
 }
@@ -813,12 +855,16 @@ func stripLifecycle(document map[string]any) map[string]any {
 // The Docker CLI interpolates the document it reads a second time. A dollar
 // sign that reaches the CLI unchanged would start a variable reference
 // there, so a password or a command would change on the way to the target.
+//
+// The keys of a mapping are left alone: the CLI reads them literally, it
+// neither interpolates nor unescapes them. A key the platform escapes would
+// reach the target with a dollar sign more than the administrator wrote.
 func escapeDollar(value any) any {
 	switch typed := value.(type) {
 	case map[string]any:
 		escaped := make(map[string]any, len(typed))
 		for key, item := range typed {
-			escaped[strings.ReplaceAll(key, "$", "$$")] = escapeDollar(item)
+			escaped[key] = escapeDollar(item)
 		}
 		return escaped
 	case []any:

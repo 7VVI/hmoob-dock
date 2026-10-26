@@ -12,8 +12,9 @@ import (
 // supports.
 //
 // A field that starts with "x-" is an extension of the Compose
-// specification. The Swarm CLI ignores such a field, so the platform
-// accepts it as well.
+// specification. The Swarm CLI ignores such a field, so the profile only
+// accepts the extensions the platform recognizes and refuses the rest
+// instead of letting the CLI drop them silently.
 var swarmTopLevelFields = map[string]bool{
 	"version":  true,
 	"name":     true,
@@ -76,8 +77,18 @@ var swarmDeployModes = map[string]bool{
 // not ignore it silently.
 func checkSwarm(document map[string]any, index map[string]int) error {
 	for _, key := range sortedKeys(document) {
-		if swarmTopLevelFields[key] || strings.HasPrefix(key, "x-") {
+		if swarmTopLevelFields[key] {
 			continue
+		}
+		if strings.HasPrefix(key, "x-") {
+			if recognizedExtensions[key] {
+				continue
+			}
+			if strings.HasPrefix(key, platformExtensionPrefix) {
+				return unsupportedField(key, index, fmt.Sprintf(
+					"未知的平台扩展 %s，平台只支持 %s", key, LifecycleExtension))
+			}
+			return unsupportedField(key, index, "Swarm 模式不支持顶层扩展字段 "+key)
 		}
 		return unsupportedField(key, index, "Swarm 模式不支持顶层字段 "+key)
 	}

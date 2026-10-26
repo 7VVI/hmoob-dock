@@ -469,6 +469,97 @@ func TestSwarmProfileRejectsAnExternalResourceWithAFile(t *testing.T) {
 	}
 }
 
+func TestCheckRejectsAMisspelledPlatformExtension(t *testing.T) {
+	cfg := model.Config{
+		YAML:      "services:\n  api:\n    image: demo:1\n    x-hmoob-lifecyle: oneshot\n",
+		Variables: map[string]string{},
+	}
+	err := checkFails(t, composeApp(), cfg)
+	if err.Code != yamlspec.CodeUnsupportedField {
+		t.Fatalf("code=%q", err.Code)
+	}
+	field := fieldError(t, err, "services.api.x-hmoob-lifecyle")
+	if field.Line != 4 {
+		t.Fatalf("line=%d", field.Line)
+	}
+	if !strings.Contains(field.Message, yamlspec.LifecycleExtension) {
+		t.Fatalf("the error does not name the correct spelling: %v", err)
+	}
+}
+
+func TestCheckRejectsAnUnknownPlatformExtension(t *testing.T) {
+	cfg := model.Config{
+		YAML:      "services:\n  api:\n    image: demo:1\n    x-hmoob-anything: value\n",
+		Variables: map[string]string{},
+	}
+	err := checkFails(t, composeApp(), cfg)
+	if err.Code != yamlspec.CodeUnsupportedField {
+		t.Fatalf("code=%q", err.Code)
+	}
+	field := fieldError(t, err, "services.api.x-hmoob-anything")
+	if field.Line != 4 {
+		t.Fatalf("line=%d", field.Line)
+	}
+}
+
+func TestCheckRejectsAnUnknownPlatformExtensionAtTheTopLevel(t *testing.T) {
+	cfg := model.Config{
+		YAML:      "x-hmoob-anything: value\nservices:\n  api:\n    image: demo:1\n",
+		Variables: map[string]string{},
+	}
+	err := checkFails(t, composeApp(), cfg)
+	if err.Code != yamlspec.CodeUnsupportedField {
+		t.Fatalf("code=%q", err.Code)
+	}
+	field := fieldError(t, err, "x-hmoob-anything")
+	if field.Line != 1 {
+		t.Fatalf("line=%d", field.Line)
+	}
+}
+
+func TestCheckAcceptsAnExtensionOfAnotherVendor(t *testing.T) {
+	// The platform owns the "x-hmoob-" namespace. An extension of another
+	// vendor belongs to the Compose specification and stays untouched.
+	cfg := model.Config{
+		YAML:      "x-vendor: value\nservices:\n  api:\n    image: demo:1\n    x-vendor: value\n",
+		Variables: map[string]string{},
+	}
+	if _, err := yamlspec.Check(composeApp(), cfg); err != nil {
+		t.Fatalf("the configuration was rejected: %v", err)
+	}
+}
+
+func TestSwarmProfileRejectsAnUnknownPlatformExtension(t *testing.T) {
+	cfg := model.Config{
+		YAML:      "x-hmoob-anything: value\nservices:\n  api:\n    image: demo:1\n",
+		Variables: map[string]string{},
+	}
+	err := checkFails(t, swarmApp(), cfg)
+	if err.Code != yamlspec.CodeUnsupportedField {
+		t.Fatalf("code=%q", err.Code)
+	}
+	field := fieldError(t, err, "x-hmoob-anything")
+	if field.Line != 1 {
+		t.Fatalf("line=%d", field.Line)
+	}
+}
+
+func TestSwarmProfileRejectsAnUnknownTopLevelExtension(t *testing.T) {
+	// The Swarm profile only knows the extensions it recognizes.
+	cfg := model.Config{
+		YAML:      "x-vendor: value\nservices:\n  api:\n    image: demo:1\n",
+		Variables: map[string]string{},
+	}
+	err := checkFails(t, swarmApp(), cfg)
+	if err.Code != yamlspec.CodeUnsupportedField {
+		t.Fatalf("code=%q", err.Code)
+	}
+	field := fieldError(t, err, "x-vendor")
+	if field.Line != 1 {
+		t.Fatalf("line=%d", field.Line)
+	}
+}
+
 func TestCheckDigestIsStable(t *testing.T) {
 	cfg := model.Config{YAML: "services:\n  api:\n    image: demo:1\n", Variables: map[string]string{}}
 	first, err := yamlspec.Check(composeApp(), cfg)

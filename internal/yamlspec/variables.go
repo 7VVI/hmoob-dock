@@ -17,6 +17,17 @@ import (
 // can be told from a real one.
 var plainReference = regexp.MustCompile(`\$+\{([_a-zA-Z][_a-zA-Z0-9]*)\}`)
 
+// bareReference matches a variable a document refers to without braces.
+//
+// The Compose library reads a dollar sign followed by a name as a variable
+// reference, so the platform has to read it the same way. The name follows
+// the rule of the library: it starts with a letter or an underscore and
+// holds letters, digits and underscores.
+//
+// The leading dollar signs are part of the match, so an escaped reference
+// can be told from a real one.
+var bareReference = regexp.MustCompile(`\$+([_a-zA-Z][_a-zA-Z0-9]*)`)
+
 // interpolationPath reads the path of the field an interpolation error
 // belongs to.
 var interpolationPath = regexp.MustCompile(`(?:interpolating|format for)\s+([^\s:]+)`)
@@ -51,6 +62,12 @@ func scanVariables(document map[string]any, index map[string]int, variables map[
 			})
 		}
 		for _, name := range plainReferences(value) {
+			if _, ok := variables[name]; ok {
+				continue
+			}
+			unset[name] = true
+		}
+		for _, name := range bareReferences(value) {
 			if _, ok := variables[name]; ok {
 				continue
 			}
@@ -92,6 +109,26 @@ func plainReferences(value string) []string {
 	var names []string
 	for _, match := range plainReference.FindAllStringSubmatch(value, -1) {
 		dollars := len(match[0]) - len(match[1]) - 2
+		if dollars%2 == 0 {
+			continue
+		}
+		names = append(names, match[1])
+	}
+	return names
+}
+
+// bareReferences returns the names of the variables a value refers to
+// without braces.
+//
+// The Compose library reads a dollar sign followed by a name as a variable
+// reference, so the platform reports a variable of that shape the same way
+// it reports a variable of the braced shape. A reference that is escaped
+// with a dollar sign is not a reference: the Compose semantics turn "$$"
+// into a literal dollar sign.
+func bareReferences(value string) []string {
+	var names []string
+	for _, match := range bareReference.FindAllStringSubmatch(value, -1) {
+		dollars := len(match[0]) - len(match[1])
 		if dollars%2 == 0 {
 			continue
 		}

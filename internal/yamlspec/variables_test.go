@@ -158,6 +158,133 @@ func TestUnsetVariableIsReportedAsWarning(t *testing.T) {
 	}
 }
 
+// TestDollarEscapeKeepsTheKeys proves that the escape of the dollar signs
+// only touches the values of a mapping.
+//
+// The Docker CLI reads the keys of a mapping literally: it interpolates the
+// values and copies the keys as they are. A key the platform escapes would
+// reach the target with a dollar sign more than the administrator wrote.
+func TestDollarEscapeKeepsTheKeys(t *testing.T) {
+	cfg := model.Config{
+		YAML:      "services:\n  api:\n    image: demo:1\n    labels:\n      a$b: v1\n    environment:\n      TOKEN: \"pa$$ss\"\n",
+		Variables: map[string]string{},
+	}
+	checked, err := yamlspec.Check(composeApp(), cfg)
+	if err != nil {
+		t.Fatalf("the configuration was rejected: %v", err)
+	}
+	rendered := string(checked.RenderedYAML)
+	if strings.Contains(rendered, "a$$b") {
+		t.Fatalf("the key was escaped: %s", rendered)
+	}
+	if !strings.Contains(rendered, "a$b") {
+		t.Fatalf("the key was lost: %s", rendered)
+	}
+	if !strings.Contains(rendered, "pa$$ss") {
+		t.Fatalf("the value was not escaped: %s", rendered)
+	}
+
+	// The Docker CLI interpolates the rendered document a second time. The
+	// key has to reach the target as the administrator wrote it, while the
+	// value keeps its literal dollar sign.
+	second := interpolateAgain(t, checked.RenderedYAML)
+	service := second["services"].(map[string]any)["api"].(map[string]any)
+	labels, ok := service["labels"].(map[string]any)
+	if !ok {
+		t.Fatalf("labels=%v", service["labels"])
+	}
+	if _, ok := labels["a$b"]; !ok {
+		t.Fatalf("labels=%v", labels)
+	}
+	environment := service["environment"].(map[string]any)
+	if environment["TOKEN"] != "pa$ss" {
+		t.Fatalf("token=%v", environment["TOKEN"])
+	}
+}
+
+func TestUnsetBareVariableIsReportedLikeABracedVariable(t *testing.T) {
+	bare := model.Config{
+		YAML:      "services:\n  api:\n    image: demo:1\n    command: [\"sh\", \"-c\", \"curl -u $USER:$PASS\"]\n",
+		Variables: map[string]string{},
+	}
+	braced := model.Config{
+		YAML:      "services:\n  api:\n    image: demo:1\n    command: [\"sh\", \"-c\", \"curl -u ${USER}:${PASS}\"]\n",
+		Variables: map[string]string{},
+	}
+	bareChecked, err := yamlspec.Check(composeApp(), bare)
+	if err != nil {
+		t.Fatalf("the configuration was rejected: %v", err)
+	}
+	bracedChecked, err := yamlspec.Check(composeApp(), braced)
+	if err != nil {
+		t.Fatalf("the configuration was rejected: %v", err)
+	}
+	if len(bareChecked.Warnings) != len(bracedChecked.Warnings) {
+		t.Fatalf("warnings=%v, want %v", bareChecked.Warnings, bracedChecked.Warnings)
+	}
+	for i, warning := range bracedChecked.Warnings {
+		if bareChecked.Warnings[i] != warning {
+			t.Fatalf("the warning of the bare form is %q, want %q",
+				bareChecked.Warnings[i], warning)
+		}
+	}
+	for _, name := range []string{"USER", "PASS"} {
+		if !hasWarning(bareChecked.Warnings, name) {
+			t.Fatalf("the warnings %v do not mention %q", bareChecked.Warnings, name)
+		}
+	}
+	if got := serviceValue(t, bareChecked.RenderedYAML, "api", "command"); got == nil {
+		t.Fatal("the command was lost")
+	}
+}
+
+func TestBareVariableIsInterpolated(t *testing.T) {
+	cfg := model.Config{
+		YAML:      "services:\n  api:\n    image: demo:1\n    environment:\n      TOKEN: \"$TOKEN\"\n",
+		Variables: map[string]string{"TOKEN": "secret"},
+	}
+	checked, err := yamlspec.Check(composeApp(), cfg)
+	if err != nil {
+		t.Fatalf("the configuration was rejected: %v", err)
+	}
+	environment, ok := serviceValue(t, checked.RenderedYAML, "api", "environment").(map[string]any)
+	if !ok {
+		t.Fatal("the environment was lost")
+	}
+	if environment["TOKEN"] != "secret" {
+		t.Fatalf("token=%v", environment["TOKEN"])
+	}
+	if len(checked.Warnings) != 0 {
+		t.Fatalf("warnings=%v", checked.Warnings)
+	}
+}
+
+func TestEscapedBareVariableIsNotAReference(t *testing.T) {
+	cfg := model.Config{
+		YAML:      "services:\n  api:\n    image: demo:1\n    environment:\n      TOKEN: \"$$TOKEN\"\n",
+		Variables: map[string]string{},
+	}
+	checked, err := yamlspec.Check(composeApp(), cfg)
+	if err != nil {
+		t.Fatalf("the configuration was rejected: %v", err)
+	}
+	if hasWarning(checked.Warnings, "TOKEN") {
+		t.Fatalf("the escaped reference was reported: %v", checked.Warnings)
+	}
+	environment, ok := serviceValue(t, checked.RenderedYAML, "api", "environment").(map[string]any)
+	if !ok {
+		t.Fatal("the environment was lost")
+	}
+	if environment["TOKEN"] != "$$TOKEN" {
+		t.Fatalf("token=%v", environment["TOKEN"])
+	}
+	second := interpolateAgain(t, checked.RenderedYAML)
+	service := second["services"].(map[string]any)["api"].(map[string]any)
+	if got := service["environment"].(map[string]any)["TOKEN"]; got != "$TOKEN" {
+		t.Fatalf("token=%v", got)
+	}
+}
+
 func TestDollarEscapeRoundTrip(t *testing.T) {
 	cfg := model.Config{
 		YAML: "services:\n  api:\n    image: demo:1\n    command: [\"sh\", \"-c\", \"echo $$HOME\"]\n" +
