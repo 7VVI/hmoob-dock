@@ -7,11 +7,13 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -37,6 +39,24 @@ const (
 	readHeaderTimeout = 10 * time.Second
 	// stateTimeout bounds the read of the state of the administrator.
 	stateTimeout = 5 * time.Second
+	// healthCheckTimeout bounds the probe of the health endpoint.
+	healthCheckTimeout = 4 * time.Second
+	// healthCheckPath is the path of the liveness endpoint of the control端.
+	healthCheckPath = "/healthz"
+)
+
+// The flags of the command.
+//
+// The flags live in the package, so the health check of the image and the
+// tests of the command see the same set of flags.
+var (
+	// addrFlag is the listen address of the control端.
+	addrFlag = flag.String("addr", "", "listen address of the control端")
+	// genKeyFlag is the file that receives a new master key.
+	genKeyFlag = flag.String("gen-key", "", "write a new master key file to the given path and exit")
+	// healthCheckFlag turns the command into a probe of its own health
+	// endpoint.
+	healthCheckFlag = flag.Bool("health-check", false, "probe the health endpoint of the control端 and exit")
 )
 
 // initializationState is implemented by the handler of the control端. It
@@ -45,20 +65,134 @@ type initializationState interface {
 	Initialized(context.Context) (bool, error)
 }
 
+// listenAddress returns the address the control端 listens on.
+//
+// The rule is the same for the server and for its health check: an address
+// that the operator names wins, otherwise the address follows the switch of
+// TLS. A deployment with a certificate answers HTTPS on 8443, a deployment
+// without one answers HTTP on 8080.
+func listenAddress(addr string, cfg config.Control) string {
+	if addr != "" {
+		return addr
+	}
+	if cfg.TLSCert != "" {
+		return defaultTLSAddress
+	}
+	return defaultPlainAddress
+}
+
+// healthTarget describes the endpoint the health check asks.
+type healthTarget struct {
+	// scheme is "http" or "https".
+	scheme string
+	// address is the host and the port of the probe.
+	address string
+}
+
+// url returns the address of the probe.
+func (t healthTarget) url() string {
+	return t.scheme + "://" + t.address + healthCheckPath
+}
+
+// healthTargetFor returns the endpoint the health check has to ask.
+//
+// The target follows the listener of the control端: the same address and the
+// same switch of TLS. A wildcard address names every address of the host,
+// so it is asked on the loopback, which the container reaches.
+func healthTargetFor(addr string, cfg config.Control) (healthTarget, error) {
+	listen := listenAddress(addr, cfg)
+
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return healthTarget{}, fmt.Errorf("the listen address %s is malformed: %w", listen, err)
+	}
+	if port == "" {
+		return healthTarget{}, fmt.Errorf("the listen address %s names no port", listen)
+	}
+	switch host {
+	case "", "0.0.0.0":
+		host = "127.0.0.1"
+	case "::":
+		host = "::1"
+	}
+
+	scheme := "http"
+	if cfg.TLSCert != "" {
+		scheme = "https"
+	}
+	return healthTarget{scheme: scheme, address: net.JoinHostPort(host, port)}, nil
+}
+
+// probeHealth asks the health endpoint of the control端 whether it answers.
+//
+// The certificate of the deployment is not verified: the check proves that
+// the process answers and says nothing about the trust of the certificate.
+func probeHealth(target healthTarget) error {
+	client := &http.Client{
+		Timeout: healthCheckTimeout,
+		Transport: &http.Transport{
+			// The check proves the answer of the process, not the trust of
+			// the certificate of the deployment.
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+
+	response, err := client.Get(target.url())
+	if err != nil {
+		return fmt.Errorf("ask %s: %w", target.url(), err)
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s answered with the status %d", target.url(), response.StatusCode)
+	}
+	return nil
+}
+
+// runHealthCheck asks the running control端 for its health and reports
+// whether it answers.
+//
+// The command reads the same configuration as the server and resolves the
+// address of the probe with the same rule, so the check asks the listener
+// that the deployment really opens.
+func runHealthCheck(addr string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+
+	target, err := healthTargetFor(addr, cfg)
+	if err != nil {
+		return err
+	}
+	if err := probeHealth(target); err != nil {
+		return err
+	}
+	log.Printf("control: the health check answered %s", target.url())
+	return nil
+}
+
 func main() {
-	genKey := flag.String("gen-key", "", "write a new master key file to the given path and exit")
-	addr := flag.String("addr", "", "listen address of the control端")
 	flag.Parse()
 
-	if *genKey != "" {
-		if err := config.GenerateMasterKey(*genKey); err != nil {
+	if *genKeyFlag != "" {
+		if err := config.GenerateMasterKey(*genKeyFlag); err != nil {
 			log.Fatalf("control: %v", err)
 		}
-		log.Printf("control: a new master key was written to %s", *genKey)
+		log.Printf("control: a new master key was written to %s", *genKeyFlag)
 		return
 	}
 
-	if err := run(*addr); err != nil {
+	// The health check of the image runs the command a second time and asks
+	// the running control端 for its health. It never starts a server.
+	if *healthCheckFlag {
+		if err := runHealthCheck(*addrFlag); err != nil {
+			log.Fatalf("control: the health check failed: %v", err)
+		}
+		return
+	}
+
+	if err := run(*addrFlag); err != nil {
 		log.Fatalf("control: %v", err)
 	}
 }
@@ -144,12 +278,10 @@ func run(addr string) error {
 		}
 	}
 
-	if addr == "" {
-		addr = defaultPlainAddress
-		if cfg.TLSCert != "" {
-			addr = defaultTLSAddress
-		}
-	}
+	// The address of the listener is resolved by the same rule as the
+	// health check of the image uses, so the check asks the server that
+	// runs.
+	addr = listenAddress(addr, cfg)
 
 	// The frontend and the API share one origin, so the browser needs no
 	// second server and no cross origin request.

@@ -4,6 +4,7 @@ package integration
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path"
@@ -15,11 +16,25 @@ import (
 
 // The samples of the delivery and the names of the images of the delivery.
 const (
-	controlSample = "deploy/compose.control.yaml"
-	agentSample   = "deploy/compose.agent.yaml"
-	controlImage  = "hmoob-dock-control:local"
-	agentImage    = "hmoob-dock-agent:local"
+	controlSample     = "deploy/compose.control.yaml"
+	agentSample       = "deploy/compose.agent.yaml"
+	controlDockerfile = "deploy/Dockerfile.control"
+	agentDockerfile   = "deploy/Dockerfile.agent"
+	controlImage      = "hmoob-dock-control:local"
+	agentImage        = "hmoob-dock-agent:local"
 )
+
+// controlImageProbe lists the tools that the image of the control端 must
+// not hold and the frontend that it has to hold.
+//
+// The names of the tools are printed one per line, so the answer of the
+// image can be read without guessing.
+const controlImageProbe = `command -v node >/dev/null 2>&1 && echo node-present
+command -v npm >/dev/null 2>&1 && echo npm-present
+command -v docker >/dev/null 2>&1 && echo docker-present
+command -v curl >/dev/null 2>&1 && echo curl-present
+test -f /app/web/index.html && echo web-present
+echo probe-done`
 
 // The variables the control端 is configured with. The list is fixed by the
 // design of the deployment: a sample that adds another variable changes
@@ -90,6 +105,8 @@ type composeVolume struct {
 // The samples have to fail without their variables, so a deployment never
 // starts with a default credential.
 func TestPackagingComposeSamplesRestrictTheDeployment(t *testing.T) {
+	requireDocker(t)
+
 	control := composeConfigOf(t, controlSample, map[string]string{
 		"HMOOB_PUBLIC_URL": "https://hmoob.example.com",
 	})
@@ -204,45 +221,160 @@ func TestPackagingComposeSamplesRestrictTheDeployment(t *testing.T) {
 	}
 }
 
-// TestPackagingImagesHoldTheExpectedTools proves that the images of the
-// delivery hold what they promise.
+// TestPackagingControlImageHoldsTheExpectedTools proves that the image of
+// the control端 holds what it promises.
 //
 // The control端 serves the frontend and needs neither Node nor the command
-// line of Docker. The agent drives the Docker engine of its node, so it
-// needs the command line of Docker and the plugin of Compose v2, and it
-// must not hold the code of the control端.
-func TestPackagingImagesHoldTheExpectedTools(t *testing.T) {
-	if imageExists(t, controlImage) {
-		out := runInImage(t, controlImage, "sh", "-c",
-			"command -v node; command -v docker; command -v npm; test -f /app/web/index.html && echo web-present")
-		if strings.Contains(out, "node") || strings.Contains(out, "npm") {
-			t.Fatalf("the control端 image holds Node: %q", out)
+// line of Docker. Its health check asks the own listener with the command
+// of the control端, so the image needs no command line of its own either.
+//
+// The acceptance needs an image that was built. A machine that never built
+// it skips the acceptance and says that it did not verify anything.
+func TestPackagingControlImageHoldsTheExpectedTools(t *testing.T) {
+	requireDocker(t)
+	requireImage(t, controlImage, controlDockerfile)
+
+	out := runInImage(t, controlImage, "sh", "-c", controlImageProbe)
+	for _, tool := range []string{"node", "npm", "docker", "curl"} {
+		if strings.Contains(out, tool+"-present") {
+			t.Fatalf("the control端 image holds %s: %q", tool, out)
 		}
-		if strings.Contains(out, "/usr/bin/docker") || strings.Contains(out, "/usr/local/bin/docker") {
-			t.Fatalf("the control端 image holds the command line of Docker: %q", out)
-		}
-		if !strings.Contains(out, "web-present") {
-			t.Fatalf("the control端 image holds no frontend: %q", out)
-		}
-	} else {
-		t.Logf("the image %s does not exist yet: the acceptance of the image is blocked", controlImage)
+	}
+	if !strings.Contains(out, "web-present") {
+		t.Fatalf("the control端 image holds no frontend: %q", out)
 	}
 
-	if imageExists(t, agentImage) {
-		version := runInImage(t, agentImage, "sh", "-c", "docker --version")
-		if !strings.Contains(version, "Docker version") {
-			t.Fatalf("the agent image holds no command line of Docker: %q", version)
+	// The health check of the image asks the own listener with the command
+	// of the control端, so the image needs no command line of its own.
+	check := imageHealthCheck(t, controlImage)
+	if !strings.Contains(check, "-health-check") {
+		t.Fatalf("the health check of the control端 image does not use the self check: %s", check)
+	}
+	if strings.Contains(check, "curl") {
+		t.Fatalf("the health check of the control端 image uses curl: %s", check)
+	}
+}
+
+// TestPackagingAgentImageHoldsTheExpectedTools proves that the image of the
+// agent holds what it promises.
+//
+// The agent drives the Docker engine of its node, so it needs the command
+// line of Docker and the plugin of Compose v2, and it must not hold the code
+// of the control端.
+//
+// The acceptance needs an image that was built. A machine that never built
+// it skips the acceptance and says that it did not verify anything.
+func TestPackagingAgentImageHoldsTheExpectedTools(t *testing.T) {
+	requireDocker(t)
+	requireImage(t, agentImage, agentDockerfile)
+
+	version := runInImage(t, agentImage, "sh", "-c", "docker --version")
+	if !strings.Contains(version, "Docker version") {
+		t.Fatalf("the agent image holds no command line of Docker: %q", version)
+	}
+	compose := runInImage(t, agentImage, "sh", "-c", "docker compose version")
+	if !strings.Contains(compose, "Docker Compose version") {
+		t.Fatalf("the agent image holds no plugin of Compose v2: %q", compose)
+	}
+	control := runInImage(t, agentImage, "sh", "-c", "command -v control || true")
+	if strings.TrimSpace(control) != "" {
+		t.Fatalf("the agent image holds the code of the control端: %q", control)
+	}
+}
+
+// TestTheAcceptanceOfAMissingImageIsMarkedAsNotVerified proves that a
+// skipped acceptance says that it verified nothing and names the command
+// that builds the image.
+//
+// The acceptance of an image is the proof that the delivery works. A
+// machine that never built the image has to say so instead of reporting a
+// pass.
+func TestTheAcceptanceOfAMissingImageIsMarkedAsNotVerified(t *testing.T) {
+	message := imageMissingMessage(controlImage, controlDockerfile)
+
+	if !strings.Contains(message, "未验收") {
+		t.Fatalf("the message of a missing image does not mark the acceptance as not verified: %s", message)
+	}
+	command := "docker build -f " + controlDockerfile + " -t " + controlImage + " ."
+	if !strings.Contains(message, command) {
+		t.Fatalf("the message of a missing image does not name the build command %q: %s", command, message)
+	}
+	if !strings.Contains(message, controlImage) {
+		t.Fatalf("the message of a missing image does not name the image: %s", message)
+	}
+}
+
+// TestTheAcceptanceWithoutDockerIsMarkedAsNotVerified proves that a machine
+// without the command line of Docker says that it verified nothing.
+//
+// The acceptance needs Docker to read the images and the samples, so it
+// cannot run there. The machine has to say so instead of reporting a pass.
+func TestTheAcceptanceWithoutDockerIsMarkedAsNotVerified(t *testing.T) {
+	message := dockerMissingMessage()
+
+	if !strings.Contains(message, "未验收") {
+		t.Fatalf("the message of a missing Docker does not mark the acceptance as not verified: %s", message)
+	}
+	if !strings.Contains(message, "docker") {
+		t.Fatalf("the message of a missing Docker does not name the command: %s", message)
+	}
+}
+
+// TestTheAgentSampleDemandsAbsoluteBindPaths proves that the sample of the
+// agent tells the operator that the paths of its bind mounts have to be
+// absolute.
+//
+// The same variable names the file on the host and in the container, so a
+// relative path would be resolved on two sides against two directories and
+// the two sides would point at different files.
+func TestTheAgentSampleDemandsAbsoluteBindPaths(t *testing.T) {
+	content := readRepositoryFile(t, agentSample)
+
+	header := content
+	if index := strings.Index(content, "services:"); index >= 0 {
+		header = content[:index]
+	}
+	if !strings.Contains(header, "绝对路径") {
+		t.Fatalf("the sample %s does not tell the operator that the bind paths have to be absolute", agentSample)
+	}
+	if !strings.Contains(header, "相对路径") {
+		t.Fatalf("the sample %s does not tell the operator what a relative path does", agentSample)
+	}
+}
+
+// TestTheAgentSampleResolvesRelativeBindPathsToDifferentFiles proves that a
+// relative path in the bind variables of the agent names two different
+// files.
+//
+// The path on the host is resolved against the directory of the sample, the
+// path in the container against the working directory of the agent. The two
+// sides drift apart, which is the reason the sample asks for absolute
+// paths.
+func TestTheAgentSampleResolvesRelativeBindPathsToDifferentFiles(t *testing.T) {
+	requireDocker(t)
+
+	config := composeConfigOf(t, agentSample, map[string]string{
+		"HMOOB_SERVER_URL":      "https://hmoob.example.com",
+		"HMOOB_CA_FILE":         "./relative/ca.pem",
+		"HMOOB_ENROLLMENT_FILE": "/etc/hmoob-dock/enrollment.token",
+	})
+	service := serviceOf(t, config, "agent")
+
+	var found bool
+	for _, volume := range service.Volumes {
+		if !strings.Contains(volume.Target, "relative/ca.pem") {
+			continue
 		}
-		compose := runInImage(t, agentImage, "sh", "-c", "docker compose version")
-		if !strings.Contains(compose, "Docker Compose version") {
-			t.Fatalf("the agent image holds no plugin of Compose v2: %q", compose)
+		found = true
+		if volume.Source == volume.Target {
+			t.Fatalf("the mount %+v of the agent names the same file on the host and in the container", volume)
 		}
-		control := runInImage(t, agentImage, "sh", "-c", "command -v control || true")
-		if strings.TrimSpace(control) != "" {
-			t.Fatalf("the agent image holds the code of the control端: %q", control)
+		if !filepath.IsAbs(volume.Source) {
+			t.Fatalf("the source of the mount %+v of the agent is not an absolute path", volume)
 		}
-	} else {
-		t.Logf("the image %s does not exist yet: the acceptance of the image is blocked", agentImage)
+	}
+	if !found {
+		t.Fatalf("the sample %s mounts no file of a relative path", agentSample)
 	}
 }
 
@@ -254,6 +386,8 @@ func TestPackagingImagesHoldTheExpectedTools(t *testing.T) {
 // the deployment of the agent have to look the same for every operator,
 // and a variable that the process does not know is a silent mistake.
 func TestPackagingSamplesUseOnlyTheKnownVariables(t *testing.T) {
+	requireDocker(t)
+
 	for _, sample := range []struct {
 		path      string
 		variables []string
@@ -483,6 +617,60 @@ func imageExists(t *testing.T, image string) bool {
 
 	command := exec.Command("docker", "image", "inspect", image)
 	return command.Run() == nil
+}
+
+// requireDocker skips the test when the command line of Docker is missing.
+//
+// The acceptance of the delivery needs Docker to read the images and the
+// samples, so it cannot run on a machine without it. The machine has to say
+// that it verified nothing instead of reporting a pass.
+func requireDocker(t *testing.T) {
+	t.Helper()
+
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip(dockerMissingMessage())
+	}
+}
+
+// requireImage skips the test when the image was never built.
+//
+// The acceptance of an image is the proof that the delivery works, so a
+// machine that never built it has to say that it verified nothing and to
+// name the command that builds the image.
+func requireImage(t *testing.T, image, dockerfile string) {
+	t.Helper()
+
+	if !imageExists(t, image) {
+		t.Skip(imageMissingMessage(image, dockerfile))
+	}
+	t.Logf("已验收镜像 %s", image)
+}
+
+// imageMissingMessage describes an acceptance that was not performed,
+// because the image was never built.
+func imageMissingMessage(image, dockerfile string) string {
+	return fmt.Sprintf(
+		"未验收：镜像 %s 不存在，镜像验收没有执行，交付没有在镜像上验证。构建命令：docker build -f %s -t %s .",
+		image, dockerfile, image,
+	)
+}
+
+// dockerMissingMessage describes an acceptance that was not performed,
+// because the command line of Docker is missing.
+func dockerMissingMessage() string {
+	return "未验收：命令 docker 不存在，镜像与样例的验收没有执行，交付没有在镜像上验证。请安装 Docker 后重新运行本测试"
+}
+
+// imageHealthCheck returns the health check of the image.
+func imageHealthCheck(t *testing.T, image string) string {
+	t.Helper()
+
+	command := exec.Command("docker", "image", "inspect", "--format", "{{json .Config.Healthcheck}}", image)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("read the health check of %s: %v: %s", image, err, strings.TrimSpace(string(output)))
+	}
+	return string(output)
 }
 
 // runInImage runs a command in the image and returns its answer.
