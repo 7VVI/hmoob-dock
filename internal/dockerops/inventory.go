@@ -15,6 +15,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	swarmapi "github.com/docker/docker/api/types/swarm"
 	"github.com/docker/docker/api/types/system"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
@@ -32,6 +33,13 @@ const (
 	// ComposeServiceLabel is the label of the service of Compose.
 	ComposeServiceLabel = "com.docker.compose.service"
 )
+
+// StackNamespaceLabel is the label Docker puts on the services and the tasks
+// of a Swarm stack.
+//
+// The label names the stack, so the services of a stack are told apart from
+// the services of another stack.
+const StackNamespaceLabel = "com.docker.stack.namespace"
 
 // Local reads the state of the local Docker engine.
 type Local struct {
@@ -95,10 +103,16 @@ func (l *Local) Identity(ctx context.Context) (protocol.NodeIdentity, error) {
 
 // Inventory reads the containers of the local Docker engine.
 //
-// The engine is asked for its info, for the list of its containers and for
-// the details of every container, because the health of a container is
-// only part of the list. A container that disappears while the list is
-// read is left out, every other problem is reported.
+// The engine is asked for its info, for the list of its containers and for the
+// details of every container, because the health of a container is only part
+// of the list. A container that disappears while the list is read is left out,
+// every other problem is reported.
+//
+// A node that belongs to a Swarm cluster reports the nodes, the services and
+// the tasks of the cluster as well. The facts come from the Docker SDK and
+// the protocol carries a narrow projection of them: the objects of the SDK
+// hold the resources of the cluster and its secrets, so they never leave the
+// node.
 func (l *Local) Inventory(ctx context.Context) (protocol.Inventory, error) {
 	info, err := l.client.Info(ctx)
 	if err != nil {
@@ -124,11 +138,146 @@ func (l *Local) Inventory(ctx context.Context) (protocol.Inventory, error) {
 		containers = append(containers, containerOf(summary, details))
 	}
 
-	return protocol.Inventory{
+	inventory := protocol.Inventory{
 		Identity:    identityOf(info),
 		Containers:  containers,
 		CollectedAt: time.Now().UTC(),
-	}, nil
+	}
+
+	if info.Swarm.NodeID == "" {
+		// The node does not belong to a cluster, so it has no swarm facts.
+		return inventory, nil
+	}
+
+	nodes, err := l.SwarmNodes(ctx)
+	if err != nil {
+		return protocol.Inventory{}, err
+	}
+	services, err := l.SwarmServices(ctx, "")
+	if err != nil {
+		return protocol.Inventory{}, err
+	}
+	tasks, err := l.SwarmTasks(ctx, "")
+	if err != nil {
+		return protocol.Inventory{}, err
+	}
+	inventory.SwarmNodes = swarmNodesOf(nodes)
+	inventory.SwarmServices = swarmServicesOf(services, tasks, nodes)
+	inventory.SwarmTasks = swarmTasksOf(tasks)
+	return inventory, nil
+}
+
+// SwarmNodes returns the nodes of the Swarm cluster of the local engine.
+//
+// The nodes are the facts of the Docker SDK. The platform reads them to know
+// the role of a node and to know which nodes a stack may run on.
+func (l *Local) SwarmNodes(ctx context.Context) ([]swarmapi.Node, error) {
+	nodes, err := l.client.NodeList(ctx, swarmapi.NodeListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("dockerops: list the nodes of the cluster: %w", err)
+	}
+	return nodes, nil
+}
+
+// SwarmServices returns the services of the Swarm cluster of the local engine.
+//
+// An empty namespace returns the services of every stack, a namespace returns
+// the services of that stack. The services are selected by the label of the
+// stack, so a service of another stack is never part of the answer.
+func (l *Local) SwarmServices(ctx context.Context, namespace string) ([]swarmapi.Service, error) {
+	options := swarmapi.ServiceListOptions{}
+	if namespace != "" {
+		options.Filters = filters.NewArgs(
+			filters.Arg("label", StackNamespaceLabel+"="+namespace))
+	}
+	services, err := l.client.ServiceList(ctx, options)
+	if err != nil {
+		return nil, fmt.Errorf("dockerops: list the services of the cluster: %w", err)
+	}
+	return services, nil
+}
+
+// SwarmTasks returns the tasks of the Swarm cluster of the local engine.
+//
+// An empty namespace returns the tasks of every stack, a namespace returns
+// the tasks of that stack. The tasks are selected by the label of the stack,
+// so a task of another stack is never part of the answer.
+func (l *Local) SwarmTasks(ctx context.Context, namespace string) ([]swarmapi.Task, error) {
+	options := swarmapi.TaskListOptions{}
+	if namespace != "" {
+		options.Filters = filters.NewArgs(
+			filters.Arg("label", StackNamespaceLabel+"="+namespace))
+	}
+	tasks, err := l.client.TaskList(ctx, options)
+	if err != nil {
+		return nil, fmt.Errorf("dockerops: list the tasks of the cluster: %w", err)
+	}
+	return tasks, nil
+}
+
+// swarmNodesOf projects the nodes of the Docker SDK into the nodes of the
+// protocol.
+func swarmNodesOf(nodes []swarmapi.Node) []protocol.SwarmNode {
+	projected := make([]protocol.SwarmNode, 0, len(nodes))
+	for _, node := range nodes {
+		projected = append(projected, protocol.SwarmNode{
+			ID:           node.ID,
+			Hostname:     node.Description.Hostname,
+			Role:         string(node.Spec.Role),
+			Availability: string(node.Spec.Availability),
+			Status:       string(node.Status.State),
+		})
+	}
+	return projected
+}
+
+// swarmServicesOf projects the services of the Docker SDK into the services
+// of the protocol.
+//
+// The projection keeps the counts and the labels a stack is made of. The
+// specification of the service and the secrets it refers to stay on the node.
+func swarmServicesOf(services []swarmapi.Service, tasks []swarmapi.Task, nodes []swarmapi.Node) []protocol.SwarmService {
+	projected := make([]protocol.SwarmService, 0, len(services))
+	for _, service := range services {
+		labels := map[string]string{}
+		for key, value := range service.Spec.Labels {
+			labels[key] = value
+		}
+		target, known := effectiveTarget(service, nodes)
+		if !known {
+			// The target of the service cannot be proven, so the protocol
+			// reports the replicas the service asks for and nothing more.
+			target = replicasOf(service)
+		}
+		projected = append(projected, protocol.SwarmService{
+			ID:          service.ID,
+			Name:        service.Spec.Name,
+			Mode:        modeOf(service),
+			UpdateState: updateStateOf(service),
+			Desired:     target,
+			Running:     runningTasksOf(tasks, service.ID),
+			Labels:      labels,
+		})
+	}
+	return projected
+}
+
+// swarmTasksOf projects the tasks of the Docker SDK into the tasks of the
+// protocol.
+func swarmTasksOf(tasks []swarmapi.Task) []protocol.SwarmTask {
+	projected := make([]protocol.SwarmTask, 0, len(tasks))
+	for _, task := range tasks {
+		projected = append(projected, protocol.SwarmTask{
+			ID:           task.ID,
+			ServiceID:    task.ServiceID,
+			NodeID:       task.NodeID,
+			DesiredState: string(task.DesiredState),
+			State:        string(task.Status.State),
+			Error:        task.Status.Err,
+			Slot:         task.Slot,
+		})
+	}
+	return projected
 }
 
 // Host returns the address of the Docker engine the client talks to.
@@ -175,7 +324,7 @@ func (l *Local) ProjectContainers(ctx context.Context, namespace string) ([]prot
 		details, err := l.client.ContainerInspect(ctx, summary.ID)
 		if err != nil {
 			if errdefs.IsNotFound(err) {
-				// The container was removed while the list was read.
+				// The container was removed while the list is read.
 				continue
 			}
 			return nil, fmt.Errorf("dockerops: inspect the container %s: %w", summary.ID, err)

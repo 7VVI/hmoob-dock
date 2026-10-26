@@ -156,8 +156,14 @@ func (s *Service) Submit(ctx context.Context, req SubmitRequest) (model.Task, er
 	}
 
 	// The risks of the configuration need an explicit confirmation, the
-	// notice of a variable that was not provided does not.
-	if len(RiskWarnings(checked.Warnings)) > 0 && !req.AcceptWarnings {
+	// notice of a variable that was not provided does not. The notices of
+	// the platform about the target belong to the risks as well: a Swarm
+	// deployment names the nodes whose paths of the host it could not
+	// check.
+	warnings := make([]string, 0, len(checked.Warnings))
+	warnings = append(warnings, checked.Warnings...)
+	warnings = append(warnings, swarmWarnings(inventory, app, checked)...)
+	if len(RiskWarnings(warnings)) > 0 && !req.AcceptWarnings {
 		return model.Task{}, fmt.Errorf("%w: the configuration is risky", ErrConfirmationRequired)
 	}
 

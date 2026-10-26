@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 
 	"hmoob-dock/internal/model"
 	"hmoob-dock/internal/protocol"
@@ -102,12 +104,60 @@ func (s *Service) Preview(ctx context.Context, appID, baseVersionID string, cfg 
 		return Preview{}, err
 	}
 
+	warnings := make([]string, 0, len(checked.Warnings))
+	warnings = append(warnings, checked.Warnings...)
+	warnings = append(warnings, swarmWarnings(inventory, app, checked)...)
+
 	return Preview{
 		Digest:            checked.Digest,
 		RemovedServices:   removedServices(running, checked.Services),
-		Warnings:          checked.Warnings,
+		Warnings:          warnings,
 		InventoryRevision: revision,
 	}, nil
+}
+
+// swarmWarnings returns the notices of a Swarm deployment about the nodes the
+// platform could not check.
+//
+// The manager of a cluster checks the paths of the host of its own node. The
+// paths of the workers belong to the hosts of the workers, so the existence
+// of a path on the manager says nothing about the other nodes. The nodes
+// that no agent of the platform has verified yet are named, so the
+// administrator confirms them before the deployment.
+//
+// The notice is a risk of the deployment, so the administrator has to confirm
+// it: the platform never claims that the paths of a worker exist.
+func swarmWarnings(inventory protocol.Inventory, app model.App, checked model.CheckedConfig) []string {
+	if app.Mode != yamlspec.ModeSwarm {
+		return nil
+	}
+	if len(yamlspec.HostPaths(checked.RenderedYAML)) == 0 {
+		// The stack mounts no path of the host, so there is nothing the
+		// manager of the cluster could not prove.
+		return nil
+	}
+
+	var others []string
+	for _, node := range inventory.SwarmNodes {
+		if node.ID == inventory.Identity.SwarmNodeID {
+			continue
+		}
+		name := node.Hostname
+		if name == "" {
+			name = node.ID
+		}
+		others = append(others, name)
+	}
+	if len(others) == 0 {
+		// The cluster holds no other node, so every path of the host runs
+		// on the node of the manager.
+		return nil
+	}
+	sort.Strings(others)
+
+	return []string{fmt.Sprintf(
+		"Swarm 集群的其他节点无法核实主机路径：%s；这些节点上的路径由集群在运行任务时解析",
+		strings.Join(others, ", "))}
 }
 
 // runningServices returns the names of the services of the namespace that

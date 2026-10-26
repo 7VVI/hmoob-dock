@@ -56,12 +56,84 @@ type Container struct {
 	RestartCount int `json:"restart_count,omitempty"`
 }
 
+// SwarmNode is a node of a Swarm cluster.
+//
+// The fields are the ones the platform shows and reasons about. The object of
+// the Docker SDK is not part of the protocol: it holds the resources of the
+// node and the secrets of the engine.
+type SwarmNode struct {
+	// ID is the ID of the node inside of its Swarm cluster.
+	ID string `json:"id"`
+	// Hostname is the name of the host of the node.
+	Hostname string `json:"hostname,omitempty"`
+	// Role is the role of the node inside of the cluster, manager or worker.
+	Role string `json:"role,omitempty"`
+	// Availability is the state of the scheduler for the node, for example
+	// active, pause or drain.
+	Availability string `json:"availability,omitempty"`
+	// Status is the state of the node as the manager sees it, for example
+	// ready or down.
+	Status string `json:"status,omitempty"`
+}
+
+// SwarmService is a service of a Swarm stack.
+//
+// The fields are the ones the platform shows and reasons about. The object of
+// the Docker SDK is not part of the protocol: it holds the specification of
+// the service and the secrets it refers to.
+type SwarmService struct {
+	// ID is the ID of the service.
+	ID string `json:"id"`
+	// Name is the name of the service inside of its stack.
+	Name string `json:"name"`
+	// Mode is the mode of the service, replicated or global.
+	Mode string `json:"mode,omitempty"`
+	// UpdateState is the state of the update of the service, for example
+	// updating, paused, completed or rollback_completed.
+	UpdateState string `json:"update_state,omitempty"`
+	// Desired is the number of the tasks the service wants to run.
+	Desired int `json:"desired"`
+	// Running is the number of the tasks that run.
+	Running int `json:"running"`
+	// Labels are the labels of the service.
+	Labels map[string]string `json:"labels,omitempty"`
+}
+
+// SwarmTask is a task of a Swarm service.
+//
+// The fields are the ones the platform shows and reasons about. The object of
+// the Docker SDK is not part of the protocol: it holds the specification of
+// the task and the environment of its container.
+type SwarmTask struct {
+	// ID is the ID of the task.
+	ID string `json:"id"`
+	// ServiceID is the ID of the service the task belongs to.
+	ServiceID string `json:"service_id"`
+	// NodeID is the ID of the node the task runs on.
+	NodeID string `json:"node_id,omitempty"`
+	// DesiredState is the state the cluster wants the task to reach.
+	DesiredState string `json:"desired_state,omitempty"`
+	// State is the state of the task.
+	State string `json:"state,omitempty"`
+	// Error is the message of the failure of the task.
+	Error string `json:"error,omitempty"`
+	// Slot is the position of the task inside of its service.
+	Slot int `json:"slot,omitempty"`
+}
+
 // Inventory is the state of a node at a point in time.
 type Inventory struct {
 	// Identity is the identity of the node the inventory belongs to.
 	Identity NodeIdentity `json:"identity"`
 	// Containers are the containers of the node.
 	Containers []Container `json:"containers"`
+	// SwarmNodes are the nodes of the Swarm cluster the node belongs to.
+	SwarmNodes []SwarmNode `json:"swarm_nodes,omitempty"`
+	// SwarmServices are the services of the Swarm cluster the node belongs
+	// to.
+	SwarmServices []SwarmService `json:"swarm_services,omitempty"`
+	// SwarmTasks are the tasks of the Swarm cluster the node belongs to.
+	SwarmTasks []SwarmTask `json:"swarm_tasks,omitempty"`
 	// CollectedAt is the time the inventory was collected.
 	CollectedAt time.Time `json:"collected_at"`
 }
