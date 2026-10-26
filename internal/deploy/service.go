@@ -458,9 +458,26 @@ func imageRepository(image string) string {
 		parts[last] = parts[last][:colon]
 	}
 	if len(parts) > 1 && registryHost(parts[0]) {
+		host := parts[0]
 		parts = parts[1:]
+		// The "library" namespace only holds the default namespace of the
+		// Docker Hub, so "docker.io/library/nginx" names the same
+		// repository as "nginx". Another registry uses "library" as an
+		// ordinary namespace.
+		if len(parts) > 1 && parts[0] == "library" && dockerHubHost(host) {
+			parts = parts[1:]
+		}
 	}
 	return strings.Join(parts, "/")
+}
+
+// dockerHubHost reports whether a registry host names the Docker Hub.
+func dockerHubHost(host string) bool {
+	switch host {
+	case "docker.io", "index.docker.io", "registry-1.docker.io":
+		return true
+	}
+	return false
 }
 
 // registryHost reports whether the first part of the path of an image

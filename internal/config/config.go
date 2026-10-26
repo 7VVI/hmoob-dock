@@ -41,12 +41,23 @@ var DefaultPlatformImages = []string{"hmoob-dock-control", "hmoob-dock-agent"}
 // The list is read from the environment. It names the repository of an
 // image, the way the registry writes it: "hmoob-dock-control" names the
 // image of the control端, "registry.example.com/hmoob-dock-control" names
-// the same image in a registry. An empty list falls back to the images the
-// platform ships with.
+// the same image in a registry.
+//
+// The configured names are added to the images the platform ships with
+// instead of replacing them. A replacement would drop the protection of an
+// image whose name was left out by mistake, and a renamed image would
+// silently become a managed resource.
 func PlatformImages() []string {
-	images := envList(PlatformImagesEnv)
-	if len(images) == 0 {
-		return append([]string(nil), DefaultPlatformImages...)
+	images := append([]string(nil), DefaultPlatformImages...)
+	seen := make(map[string]bool, len(images))
+	for _, image := range images {
+		seen[image] = true
+	}
+	for _, image := range envList(PlatformImagesEnv) {
+		if !seen[image] {
+			seen[image] = true
+			images = append(images, image)
+		}
 	}
 	return images
 }

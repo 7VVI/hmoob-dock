@@ -38,6 +38,8 @@ func TestTheContainersOfThePlatformAreRecognized(t *testing.T) {
 		"registry.example.com/hmoob-dock-agent:1.0",
 		"registry.example.com/hmoob-dock-control@sha256:0123456789abcdef0123456789abcdef",
 		"localhost:5000/hmoob-dock-control:1.0",
+		"docker.io/library/hmoob-dock-control:1.0",
+		"index.docker.io/library/hmoob-dock-agent:1.0",
 	}
 	for _, image := range images {
 		env := newHarness(t, inventoryWithImage(image))
@@ -93,16 +95,18 @@ func TestTheListOfTheImagesOfThePlatformIsConfigurable(t *testing.T) {
 		t.Fatalf("the image of the configured list was not taken for a container of the platform: %v", err)
 	}
 
-	// The list of the environment replaces the images the platform ships
-	// with, so a renamed image is never taken silently for the old one.
+	// The list of the environment adds to the images the platform ships
+	// with, so a renamed image never loses the protection of the default
+	// one: a name left out by mistake cannot turn the container of the
+	// platform into a managed resource.
 	other := newHarness(t, inventoryWithImage("hmoob-dock-control:local"))
 	if _, err := other.service.CreateApp(context.Background(), model.App{
 		Name:      "demo",
 		Mode:      "compose",
 		TargetID:  other.nodeID,
 		Namespace: "demo",
-	}, true); err != nil {
-		t.Fatalf("the image of the old list was taken for a container of the platform: %v", err)
+	}, true); !errors.Is(err, deploy.ErrPlatformResource) {
+		t.Fatalf("the image of the default list was not taken for a container of the platform: %v", err)
 	}
 }
 
