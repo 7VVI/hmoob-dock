@@ -36,6 +36,22 @@ var (
 	// configuration. The task is known, so the command is refused instead
 	// of being executed.
 	ErrDigestConflict = errors.New("agent: the task was received with another configuration")
+	// ErrAppConflict reports a task ID that arrives again for another
+	// application. The task is known, so the command is refused instead of
+	// being executed for the wrong application.
+	ErrAppConflict = errors.New("agent: the task was received for another application")
+	// ErrVersionConflict reports a task ID that arrives again for another
+	// version. The task is known, so the command is refused instead of
+	// being executed for the wrong version.
+	ErrVersionConflict = errors.New("agent: the task was received for another version")
+	// ErrIncompleteCommand reports a command that names no task, no
+	// application or no configuration. Such a command cannot be kept in
+	// the ledger, and it cannot be compared with a known task either.
+	ErrIncompleteCommand = errors.New("agent: the command does not name its task, its application and its configuration")
+	// ErrSeqConflict reports a request that carries another sequence
+	// number than the task holds. The request is refused, so a stale
+	// request cannot cover a newer state of the task.
+	ErrSeqConflict = errors.New("agent: the sequence number of the task is not the expected one")
 	// ErrAppBusy reports an application that holds a task that did not
 	// finish. A task whose result is unknown holds its application as
 	// well: nobody may prove that the target is untouched.
@@ -54,6 +70,9 @@ const (
 	// CodeAgentRestarted marks a task whose execution was interrupted by
 	// the stop of the agent.
 	CodeAgentRestarted = "agent_restarted"
+	// CodeManualResolution marks a task that an administrator resolved
+	// after the agent could not prove the outcome of it.
+	CodeManualResolution = "manual_resolution"
 )
 
 // ledgerSchema is the schema of the ledger of the agent.
@@ -203,15 +222,28 @@ func (l *Ledger) Close() error {
 // nothing about the right to execute the command, which only the intent of
 // Begin grants.
 //
+// A command that names no task, no application or no configuration is
+// refused: without them the ledger cannot keep it, cannot compare it with a
+// known task and cannot hold its application exclusively.
+//
 // A task ID that arrives again with another configuration is refused, and so
-// is a command of an application that holds a task that did not finish.
+// is a task ID that arrives again for another application or for another
+// version. A command of another application would be executed for the wrong
+// application, even when its configuration is the same.
 func (l *Ledger) Accept(ctx context.Context, cmd model.Command) (model.Receipt, bool, error) {
 	taskID := strings.TrimSpace(cmd.Task.ID)
 	if taskID == "" {
-		return model.Receipt{}, false, errors.New("agent: the command names no task")
+		return model.Receipt{}, false, fmt.Errorf("%w: the command names no task", ErrIncompleteCommand)
 	}
 	digest := strings.TrimSpace(cmd.Task.Digest)
+	if digest == "" {
+		return model.Receipt{}, false, fmt.Errorf("%w: the command names no configuration", ErrIncompleteCommand)
+	}
 	appID := strings.TrimSpace(cmd.Task.AppID)
+	if appID == "" {
+		return model.Receipt{}, false, fmt.Errorf("%w: the command names no application", ErrIncompleteCommand)
+	}
+	versionID := strings.TrimSpace(cmd.Task.VersionID)
 
 	tx, err := l.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -227,6 +259,14 @@ func (l *Ledger) Accept(ctx context.Context, cmd model.Command) (model.Receipt, 
 		if existing.digest != digest {
 			return model.Receipt{}, false, fmt.Errorf("%w: the task %s holds the digest %s",
 				ErrDigestConflict, taskID, existing.digest)
+		}
+		if existing.appID != appID {
+			return model.Receipt{}, false, fmt.Errorf("%w: the task %s holds the application %s",
+				ErrAppConflict, taskID, existing.appID)
+		}
+		if existing.versionID != versionID {
+			return model.Receipt{}, false, fmt.Errorf("%w: the task %s holds the version %s",
+				ErrVersionConflict, taskID, existing.versionID)
 		}
 		if err := tx.Commit(); err != nil {
 			return model.Receipt{}, false, fmt.Errorf("agent: commit the transaction of the task %s: %w", taskID, err)
@@ -251,7 +291,7 @@ func (l *Ledger) Accept(ctx context.Context, cmd model.Command) (model.Receipt, 
 			result_code, result_message, result_rolled_back, result_partial,
 			output_bytes, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, 1, 0, ?, '', 0, 0, 0, ?, ?)`,
-		taskID, appID, strings.TrimSpace(cmd.Task.VersionID), digest,
+		taskID, appID, versionID, digest,
 		string(model.Queued), CodeAccepted, now, now); err != nil {
 		// The index of the open tasks refuses the command, when another
 		// task of the application reached the ledger in the meantime.
@@ -323,13 +363,23 @@ func (l *Ledger) Begin(ctx context.Context, taskID string) (bool, error) {
 
 // Record writes the outcome of a task.
 //
-// The outcome of a task that already finished is not written a second time:
+// The outcome of a task that already ended is not written a second time:
 // the first outcome and its sequence number stay, so a repeated report of
 // the control端 does not look like a new one.
+//
+// A task whose result is uncertain does not know its outcome yet, so a
+// report that arrives later is written into the ledger: the truth of a
+// deployment is not thrown away because it arrived late.
 func (l *Ledger) Record(ctx context.Context, taskID string, outcome model.Result) (model.Receipt, error) {
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" {
 		return model.Receipt{}, errors.New("agent: the task has no name")
+	}
+	// The outcome of a task is a final one. A phase is not an outcome, and
+	// a task that stays in a phase would hold its application for ever.
+	if !finished(outcome.State) {
+		return model.Receipt{}, fmt.Errorf("agent: the outcome of the task %s is not a final one: %q",
+			taskID, outcome.State)
 	}
 
 	tx, err := l.db.BeginTx(ctx, nil)
@@ -345,7 +395,7 @@ func (l *Ledger) Record(ctx context.Context, taskID string, outcome model.Result
 	if !found {
 		return model.Receipt{}, fmt.Errorf("%w: %s", ErrTaskNotFound, taskID)
 	}
-	if finished(existing.state) {
+	if knownOutcome(existing.state) {
 		if err := tx.Commit(); err != nil {
 			return model.Receipt{}, fmt.Errorf("agent: commit the transaction of the task %s: %w", taskID, err)
 		}
@@ -362,6 +412,101 @@ func (l *Ledger) Record(ctx context.Context, taskID string, outcome model.Result
 		boolToInt(outcome.RolledBack), boolToInt(outcome.PartialUpdate),
 		store.TimeToMillis(l.now()), taskID); err != nil {
 		return model.Receipt{}, fmt.Errorf("agent: record the outcome of the task %s: %w", taskID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Receipt{}, fmt.Errorf("agent: commit the transaction of the task %s: %w", taskID, err)
+	}
+
+	return model.Receipt{
+		TaskID: taskID,
+		Digest: existing.digest,
+		Seq:    seq,
+		Result: outcome,
+	}, nil
+}
+
+// Resolve ends a task whose result is unknown.
+//
+// A task whose outcome could not be proven waits for a check. The check ends
+// the task: the administrator confirms that the executor stopped, and the
+// task is written into the ledger as a finished task.
+//
+// The expected sequence number makes the request a compare and swap. A
+// request that carries another sequence number than the task holds is
+// refused, so a stale check cannot cover a newer state of the task.
+//
+// The task leaves the phases that hold an application, so the application may
+// be deployed again. The ledger keeps the outcome and names the source of
+// it, so the resolution stays auditable.
+func (l *Ledger) Resolve(ctx context.Context, taskID string, expectedSeq uint64, result model.Result) (model.Receipt, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return model.Receipt{}, errors.New("agent: the task has no name")
+	}
+	if !knownOutcome(result.State) {
+		return model.Receipt{}, fmt.Errorf("agent: the resolution of the task %s must end it in %q or %q",
+			taskID, model.Succeeded, model.Failed)
+	}
+
+	tx, err := l.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Receipt{}, fmt.Errorf("agent: start the transaction of the task %s: %w", taskID, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	existing, found, err := readTask(ctx, tx, taskID)
+	if err != nil {
+		return model.Receipt{}, err
+	}
+	if !found {
+		return model.Receipt{}, fmt.Errorf("%w: %s", ErrTaskNotFound, taskID)
+	}
+	if existing.seq != expectedSeq {
+		return model.Receipt{}, fmt.Errorf("%w: the task %s holds the sequence number %d, the request holds %d",
+			ErrSeqConflict, taskID, existing.seq, expectedSeq)
+	}
+	if knownOutcome(existing.state) {
+		// The outcome of the task is known already, so there is nothing to
+		// resolve.
+		if err := tx.Commit(); err != nil {
+			return model.Receipt{}, fmt.Errorf("agent: commit the transaction of the task %s: %w", taskID, err)
+		}
+		return existing.receipt(), nil
+	}
+
+	// The source of the outcome is the resolution of the administrator. The
+	// reason of it is the message of the outcome.
+	message := strings.TrimSpace(result.Message)
+	if message == "" {
+		message = "任务由管理员人工解除"
+	}
+	outcome := model.Result{
+		State:         result.State,
+		Code:          CodeManualResolution,
+		Message:       message,
+		RolledBack:    result.RolledBack,
+		PartialUpdate: result.PartialUpdate,
+	}
+
+	seq := existing.seq + 1
+	updated, err := tx.ExecContext(ctx, `
+		UPDATE agent_tasks
+		   SET state = ?, seq = ?, result_code = ?, result_message = ?,
+		       result_rolled_back = ?, result_partial = ?, updated_at = ?
+		 WHERE id = ? AND seq = ?`,
+		string(outcome.State), seq, outcome.Code, outcome.Message,
+		boolToInt(outcome.RolledBack), boolToInt(outcome.PartialUpdate),
+		store.TimeToMillis(l.now()), taskID, existing.seq)
+	if err != nil {
+		return model.Receipt{}, fmt.Errorf("agent: record the resolution of the task %s: %w", taskID, err)
+	}
+	affected, err := updated.RowsAffected()
+	if err != nil {
+		return model.Receipt{}, fmt.Errorf("agent: record the resolution of the task %s: %w", taskID, err)
+	}
+	if affected != 1 {
+		return model.Receipt{}, fmt.Errorf("%w: the task %s holds the sequence number %d, the request holds %d",
+			ErrSeqConflict, taskID, existing.seq, expectedSeq)
 	}
 	if err := tx.Commit(); err != nil {
 		return model.Receipt{}, fmt.Errorf("agent: commit the transaction of the task %s: %w", taskID, err)
@@ -563,6 +708,15 @@ func finished(state model.TaskState) bool {
 		}
 	}
 	return false
+}
+
+// knownOutcome reports whether the outcome of a task is known.
+//
+// A task whose result is uncertain does not know its outcome: nobody may
+// prove that the target is untouched. Such a task still waits for its
+// check, and a report that arrives later is written into the ledger.
+func knownOutcome(state model.TaskState) bool {
+	return state == model.Succeeded || state == model.Failed
 }
 
 // boolToInt turns a flag into the integer of the schema.

@@ -38,9 +38,20 @@ const (
 	// monitorBuffer is the number of monitoring frames that wait for the
 	// write loop of a connection.
 	monitorBuffer = 64
-	// inboundBuffer is the number of frames of the agent that wait for the
-	// subscribers of the hub.
-	inboundBuffer = 64
+	// InboundControlBuffer is the number of control frames of an agent
+	// that wait for the subscribers of the hub.
+	//
+	// The control frames of an agent are the reports of its tasks. They
+	// are never dropped: a queue that is full refuses the frame and the
+	// connection of the node.
+	InboundControlBuffer = 64
+	// InboundMonitorBuffer is the number of monitoring frames of an agent
+	// that wait for the subscribers of the hub.
+	//
+	// The monitoring frames of an agent are the fragments of the logs and
+	// the state of its node. They are dropped when their queue is full,
+	// because they may be fetched again.
+	InboundMonitorBuffer = 64
 	// snapshotTTL is the time an incomplete snapshot is kept.
 	snapshotTTL = 60 * time.Second
 )
@@ -100,6 +111,12 @@ type subscriber struct {
 // agent never blocks the other ones. The frames the control端 sends wait in
 // a bounded buffer, and a buffer that is full refuses the frame instead of
 // holding the caller.
+//
+// The frames of an agent wait in two queues as well: the reports of the
+// tasks of the agent wait in the control queue and the fragments of the logs
+// wait in the monitoring queue. The control queue is served first and is
+// never filled by dropping a frame: a report that may not be delivered ends
+// the connection of the node instead.
 type Hub struct {
 	db  *sql.DB
 	now func() time.Time
@@ -416,8 +433,12 @@ type connection struct {
 	control chan []byte
 	// monitor carries the frames that report the state of a node.
 	monitor chan []byte
-	// inbound carries the frames of the agent to the subscribers.
-	inbound chan protocol.Envelope
+	// inboundControl carries the control frames of the agent to the
+	// subscribers.
+	inboundControl chan protocol.Envelope
+	// inboundMonitor carries the monitoring frames of the agent to the
+	// subscribers.
+	inboundMonitor chan protocol.Envelope
 
 	// done closes when the connection ends.
 	done chan struct{}
@@ -466,16 +487,17 @@ type pendingSnapshot struct {
 // the values of the record and not the ones of the hello.
 func newConnection(hub *Hub, nodeID string, conn *websocket.Conn, identity protocol.NodeIdentity, record Node) *connection {
 	return &connection{
-		hub:      hub,
-		nodeID:   nodeID,
-		conn:     conn,
-		control:  make(chan []byte, controlBuffer),
-		monitor:  make(chan []byte, monitorBuffer),
-		inbound:  make(chan protocol.Envelope, inboundBuffer),
-		done:     make(chan struct{}),
-		record:   record,
-		identity: identity,
-		pending:  make(map[string]*pendingSnapshot),
+		hub:            hub,
+		nodeID:         nodeID,
+		conn:           conn,
+		control:        make(chan []byte, controlBuffer),
+		monitor:        make(chan []byte, monitorBuffer),
+		inboundControl: make(chan protocol.Envelope, InboundControlBuffer),
+		inboundMonitor: make(chan protocol.Envelope, InboundMonitorBuffer),
+		done:           make(chan struct{}),
+		record:         record,
+		identity:       identity,
+		pending:        make(map[string]*pendingSnapshot),
 	}
 }
 
@@ -527,7 +549,10 @@ func (c *connection) readLoop(ctx context.Context) error {
 			_ = c.conn.Close(websocket.StatusProtocolError, "the message is not accepted")
 			return err
 		}
-		c.dispatch(envelope)
+		if err := c.dispatch(envelope); err != nil {
+			_ = c.conn.Close(websocket.StatusPolicyViolation, "the control frames of the node wait too long")
+			return err
+		}
 	}
 }
 
@@ -543,7 +568,7 @@ func (c *connection) accept(envelope protocol.Envelope) error {
 		return nil
 	case protocol.TypeInventory:
 		return c.acceptInventory(envelope)
-	case protocol.TypeDeployReceipt, protocol.TypeDeployOutput:
+	case protocol.TypeDeployReceipt, protocol.TypeDeployQueryResult, protocol.TypeDeployOutput:
 		// The report of a task reaches the subscribers of the hub. The
 		// hub does not judge the report itself.
 		return nil
@@ -635,19 +660,35 @@ func (c *connection) pruneSnapshots(now time.Time) {
 
 // dispatch hands a frame of the agent to the subscribers.
 //
-// A buffer that is full means that the subscribers do not keep up. The
-// frame is dropped then, so the connection of this node stays alive and
-// the other nodes are not held back.
-func (c *connection) dispatch(envelope protocol.Envelope) {
+// The control frames and the monitoring frames wait in their own queue, so
+// a flood of the fragments of the logs cannot push the report of a task out
+// of the queue.
+//
+// A control queue that is full refuses the frame: a report of a task may not
+// be lost, so the connection of the node ends instead. A monitoring queue
+// that is full drops the frame: a fragment of a log may be fetched again.
+func (c *connection) dispatch(envelope protocol.Envelope) error {
+	if isMonitoringType(envelope.Type) {
+		select {
+		case c.inboundMonitor <- envelope:
+			return nil
+		case <-c.done:
+			return nil
+		default:
+			c.dropOnce.Do(func() {
+				log.Printf("control: the connection of the node %s is too slow, the monitoring frames are dropped", c.nodeID)
+			})
+			return nil
+		}
+	}
+
 	select {
-	case c.inbound <- envelope:
-		return
+	case c.inboundControl <- envelope:
+		return nil
 	case <-c.done:
-		return
+		return nil
 	default:
-		c.dropOnce.Do(func() {
-			log.Printf("control: the connection of the node %s is too slow, frames are dropped", c.nodeID)
-		})
+		return fmt.Errorf("%w: the control frames of the node %s wait too long", ErrQueueFull, c.nodeID)
 	}
 }
 
@@ -690,12 +731,30 @@ func (c *connection) nextFrame(ctx context.Context) ([]byte, bool) {
 // dispatchLoop hands the frames of the agent to the subscribers.
 func (c *connection) dispatchLoop(ctx context.Context) {
 	for {
+		// The control frames are served first, so the report of a task is
+		// never delayed by the fragments of the logs.
+		if envelope, ok := c.nextInbound(); ok {
+			c.hub.notify(ctx, c.nodeID, envelope)
+			continue
+		}
 		select {
 		case <-c.done:
 			return
-		case envelope := <-c.inbound:
+		case envelope := <-c.inboundControl:
+			c.hub.notify(ctx, c.nodeID, envelope)
+		case envelope := <-c.inboundMonitor:
 			c.hub.notify(ctx, c.nodeID, envelope)
 		}
+	}
+}
+
+// nextInbound returns the next control frame of the agent, if one waits.
+func (c *connection) nextInbound() (protocol.Envelope, bool) {
+	select {
+	case envelope := <-c.inboundControl:
+		return envelope, true
+	default:
+		return protocol.Envelope{}, false
 	}
 }
 

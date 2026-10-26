@@ -72,8 +72,10 @@ func TestTheDeploymentTypesAreRegistered(t *testing.T) {
 // TestTheBusinessLimitsHoldAfterTheDecode proves that a frame that fits into
 // the frame limit may still carry a configuration that is too large.
 func TestTheBusinessLimitsHoldAfterTheDecode(t *testing.T) {
+	// The command names its task, its application and its configuration,
+	// so the limits of the configuration are the ones that refuse it.
 	command := model.Command{
-		Task: model.Task{ID: "task-1"},
+		Task: model.Task{ID: "task-1", AppID: "app-1", VersionID: "v1", Digest: "digest-1"},
 		Config: model.Config{
 			YAML: strings.Repeat("y", MaxCommandYAMLSize+1),
 		},
@@ -135,5 +137,34 @@ func TestTheDecodeOfAQueryRefusesAnEmptyTask(t *testing.T) {
 	}
 	if _, err := DecodeDeployQuery(payload); err == nil {
 		t.Fatal("the decode accepted a query that names no task")
+	}
+}
+
+// TestTheDecodeOfACommandRefusesAnIncompleteCommand proves that a command
+// names its task, its application and its configuration.
+//
+// A command without an identity cannot be kept in the ledger of the agent,
+// and a command that changes the application of a task silently would break
+// the exclusion of the applications.
+func TestTheDecodeOfACommandRefusesAnIncompleteCommand(t *testing.T) {
+	cases := []struct {
+		name string
+		task model.Task
+	}{
+		{"the command names no task", model.Task{AppID: "app-1", Digest: "digest-1"}},
+		{"the command names no application", model.Task{ID: "task-1", Digest: "digest-1"}},
+		{"the command names no configuration", model.Task{ID: "task-1", AppID: "app-1"}},
+	}
+
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			payload, err := json.Marshal(DeployCommand{Command: model.Command{Task: test.task}})
+			if err != nil {
+				t.Fatalf("encode the command: %v", err)
+			}
+			if _, err := DecodeDeployCommand(payload); !errors.Is(err, ErrPayloadInvalid) {
+				t.Fatalf("the decode reported %v, want an invalid payload", err)
+			}
+		})
 	}
 }

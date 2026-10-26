@@ -40,6 +40,37 @@ func commandOf(taskID, appID, digest string) model.Command {
 	}
 }
 
+// uncertainTask accepts a task, takes the intent to execute it and reopens
+// the ledger, so the task waits for a check.
+//
+// The agent was stopped in the middle of the task, so the ledger does not
+// know the outcome of it.
+func uncertainTask(t *testing.T, path string) *agent.Ledger {
+	t.Helper()
+
+	ledger, err := agent.OpenLedger(path)
+	if err != nil {
+		t.Fatalf("open the ledger: %v", err)
+	}
+	ctx := context.Background()
+	if _, fresh, err := ledger.Accept(ctx, commandOf("task-1", "app-1", "digest-1")); err != nil || !fresh {
+		t.Fatalf("accept: %v", err)
+	}
+	if begin, err := ledger.Begin(ctx, "task-1"); err != nil || !begin {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := ledger.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := agent.OpenLedger(path)
+	if err != nil {
+		t.Fatalf("open the ledger again: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	return reopened
+}
+
 // TestExecutionIntentSurvivesReopen proves that a task whose execution
 // began is not executed a second time after a restart of the agent.
 func TestExecutionIntentSurvivesReopen(t *testing.T) {
@@ -369,5 +400,322 @@ func TestTheLedgerDoesNotKnowAnUnknownTask(t *testing.T) {
 	}
 	if _, err := ledger.Begin(ctx, "task-1"); !errors.Is(err, agent.ErrTaskNotFound) {
 		t.Fatalf("the ledger reported %v, want an unknown task", err)
+	}
+}
+
+// TestTheLedgerRefusesACommandWithoutATask proves that a command without a
+// task is refused, because the ledger cannot keep a task it cannot name.
+func TestTheLedgerRefusesACommandWithoutATask(t *testing.T) {
+	ledger := openLedger(t, ledgerPath(t))
+	ctx := context.Background()
+
+	_, fresh, err := ledger.Accept(ctx, commandOf("", "app-1", "digest-1"))
+	if err == nil {
+		t.Fatal("the ledger accepted a command that names no task")
+	}
+	if !errors.Is(err, agent.ErrIncompleteCommand) {
+		t.Fatalf("the ledger reported %v, want an incomplete command", err)
+	}
+	if fresh {
+		t.Fatal("the ledger reported a new reception of a command it refused")
+	}
+	if _, err := ledger.Lookup(ctx, ""); err == nil {
+		t.Fatal("the ledger answered a query about a task that has no name")
+	}
+}
+
+// TestTheLedgerRefusesACommandWithoutAnApplication proves that a command
+// without an application is refused, because an application that holds no
+// name cannot be held exclusively.
+func TestTheLedgerRefusesACommandWithoutAnApplication(t *testing.T) {
+	ledger := openLedger(t, ledgerPath(t))
+	ctx := context.Background()
+
+	_, fresh, err := ledger.Accept(ctx, commandOf("task-1", "", "digest-1"))
+	if err == nil {
+		t.Fatal("the ledger accepted a command that names no application")
+	}
+	if !errors.Is(err, agent.ErrIncompleteCommand) {
+		t.Fatalf("the ledger reported %v, want an incomplete command", err)
+	}
+	if fresh {
+		t.Fatal("the ledger reported a new reception of a command it refused")
+	}
+}
+
+// TestTheLedgerRefusesACommandWithoutADigest proves that a command without a
+// digest is refused, because the digest is what proves the configuration of
+// a repeated command.
+func TestTheLedgerRefusesACommandWithoutADigest(t *testing.T) {
+	ledger := openLedger(t, ledgerPath(t))
+	ctx := context.Background()
+
+	_, fresh, err := ledger.Accept(ctx, commandOf("task-1", "app-1", ""))
+	if err == nil {
+		t.Fatal("the ledger accepted a command that names no configuration")
+	}
+	if !errors.Is(err, agent.ErrIncompleteCommand) {
+		t.Fatalf("the ledger reported %v, want an incomplete command", err)
+	}
+	if fresh {
+		t.Fatal("the ledger reported a new reception of a command it refused")
+	}
+}
+
+// TestTheLedgerRefusesTheSameTaskOfAnotherApplication proves that a task ID
+// that arrives again for another application is refused, even when the
+// configuration of it is the same.
+func TestTheLedgerRefusesTheSameTaskOfAnotherApplication(t *testing.T) {
+	ledger := openLedger(t, ledgerPath(t))
+	ctx := context.Background()
+
+	if _, fresh, err := ledger.Accept(ctx, commandOf("task-1", "app-1", "digest-1")); err != nil || !fresh {
+		t.Fatalf("accept: %v", err)
+	}
+
+	_, fresh, err := ledger.Accept(ctx, commandOf("task-1", "app-2", "digest-1"))
+	if err == nil {
+		t.Fatal("the ledger accepted the same task for another application")
+	}
+	if !errors.Is(err, agent.ErrAppConflict) {
+		t.Fatalf("the ledger reported %v, want a conflict of the application", err)
+	}
+	if fresh {
+		t.Fatal("the ledger reported a new reception of a task it refused")
+	}
+
+	// The ledger keeps the application of the first reception.
+	looked, err := ledger.Lookup(ctx, "task-1")
+	if err != nil {
+		t.Fatalf("look the task up: %v", err)
+	}
+	if looked.Digest != "digest-1" {
+		t.Fatalf("the digest of the task = %q, want the one of the first reception", looked.Digest)
+	}
+}
+
+// TestTheLedgerRefusesTheSameTaskOfAnotherVersion proves that a task ID
+// that arrives again for another version is refused.
+func TestTheLedgerRefusesTheSameTaskOfAnotherVersion(t *testing.T) {
+	ledger := openLedger(t, ledgerPath(t))
+	ctx := context.Background()
+
+	if _, fresh, err := ledger.Accept(ctx, commandOf("task-1", "app-1", "digest-1")); err != nil || !fresh {
+		t.Fatalf("accept: %v", err)
+	}
+
+	other := commandOf("task-1", "app-1", "digest-1")
+	other.Task.VersionID = "v2"
+	_, fresh, err := ledger.Accept(ctx, other)
+	if err == nil {
+		t.Fatal("the ledger accepted the same task for another version")
+	}
+	if !errors.Is(err, agent.ErrVersionConflict) {
+		t.Fatalf("the ledger reported %v, want a conflict of the version", err)
+	}
+	if fresh {
+		t.Fatal("the ledger reported a new reception of a task it refused")
+	}
+}
+
+// TestTheLedgerAcceptsTheSameTaskAgain proves that a command that arrives
+// again with the same task, application, version and digest is answered with
+// the receipt of the first reception.
+func TestTheLedgerAcceptsTheSameTaskAgain(t *testing.T) {
+	ledger := openLedger(t, ledgerPath(t))
+	ctx := context.Background()
+	cmd := commandOf("task-1", "app-1", "digest-1")
+
+	first, fresh, err := ledger.Accept(ctx, cmd)
+	if err != nil || !fresh {
+		t.Fatalf("accept: %v", err)
+	}
+
+	second, fresh, err := ledger.Accept(ctx, cmd)
+	if err != nil {
+		t.Fatalf("accept the command again: %v", err)
+	}
+	if fresh {
+		t.Fatal("the ledger reported a new reception of a task it knows")
+	}
+	if second.Seq != first.Seq || second.TaskID != first.TaskID || second.Digest != first.Digest {
+		t.Fatalf("the repeated receipt = %+v, want %+v", second, first)
+	}
+}
+
+// TestTheLedgerRefusesAnOutcomeThatIsNotFinal proves that a phase is not
+// written into the ledger as the outcome of a task.
+//
+// A task that stays in a phase would hold its application for ever.
+func TestTheLedgerRefusesAnOutcomeThatIsNotFinal(t *testing.T) {
+	ledger := openLedger(t, ledgerPath(t))
+	ctx := context.Background()
+
+	if _, fresh, err := ledger.Accept(ctx, commandOf("task-1", "app-1", "digest-1")); err != nil || !fresh {
+		t.Fatalf("accept: %v", err)
+	}
+	if _, err := ledger.Record(ctx, "task-1", model.Result{State: model.Running}); err == nil {
+		t.Fatal("the ledger recorded a phase as the outcome of a task")
+	}
+}
+
+// TestTheLedgerRecordsAnOutcomeThatArrivesAfterAnUncertainTask proves that a
+// report that arrives after the agent lost the outcome of a task is written
+// into the ledger.
+//
+// The truth of a deployment may not be thrown away because it arrived late.
+func TestTheLedgerRecordsAnOutcomeThatArrivesAfterAnUncertainTask(t *testing.T) {
+	ledger := uncertainTask(t, ledgerPath(t))
+	ctx := context.Background()
+
+	current, err := ledger.Lookup(ctx, "task-1")
+	if err != nil {
+		t.Fatalf("look the task up: %v", err)
+	}
+
+	receipt, err := ledger.Record(ctx, "task-1", model.Result{
+		State:   model.Succeeded,
+		Code:    "deployed",
+		Message: "the application is ready",
+	})
+	if err != nil {
+		t.Fatalf("record the outcome: %v", err)
+	}
+	if receipt.Result.State != model.Succeeded {
+		t.Fatalf("the state of the receipt = %q, want %q", receipt.Result.State, model.Succeeded)
+	}
+	if receipt.Seq <= current.Seq {
+		t.Fatalf("the sequence number of the receipt = %d, want more than %d", receipt.Seq, current.Seq)
+	}
+
+	looked, err := ledger.Lookup(ctx, "task-1")
+	if err != nil {
+		t.Fatalf("look the task up: %v", err)
+	}
+	if looked.Result.State != model.Succeeded {
+		t.Fatalf("the state in the ledger = %q, want %q", looked.Result.State, model.Succeeded)
+	}
+}
+
+// TestTheLedgerResolvesAnUncertainTask proves that a task whose result is
+// unknown may be resolved into a final outcome.
+func TestTheLedgerResolvesAnUncertainTask(t *testing.T) {
+	ledger := uncertainTask(t, ledgerPath(t))
+	ctx := context.Background()
+
+	current, err := ledger.Lookup(ctx, "task-1")
+	if err != nil {
+		t.Fatalf("look the task up: %v", err)
+	}
+	if current.Result.State != model.Uncertain {
+		t.Fatalf("the state of the task = %q, want %q", current.Result.State, model.Uncertain)
+	}
+
+	receipt, err := ledger.Resolve(ctx, "task-1", current.Seq, model.Result{
+		State:   model.Failed,
+		Message: "管理员确认执行端已经停止",
+	})
+	if err != nil {
+		t.Fatalf("resolve the task: %v", err)
+	}
+	if receipt.Result.State != model.Failed {
+		t.Fatalf("the state of the receipt = %q, want %q", receipt.Result.State, model.Failed)
+	}
+	if receipt.Seq <= current.Seq {
+		t.Fatalf("the sequence number of the receipt = %d, want more than %d", receipt.Seq, current.Seq)
+	}
+}
+
+// TestTheLedgerRefusesAResolutionWithAnotherSequence proves that a request
+// that carries another sequence number than the task holds is refused, so a
+// stale request cannot cover a newer state of the task.
+func TestTheLedgerRefusesAResolutionWithAnotherSequence(t *testing.T) {
+	ledger := uncertainTask(t, ledgerPath(t))
+	ctx := context.Background()
+
+	current, err := ledger.Lookup(ctx, "task-1")
+	if err != nil {
+		t.Fatalf("look the task up: %v", err)
+	}
+
+	_, err = ledger.Resolve(ctx, "task-1", current.Seq+1, model.Result{State: model.Failed})
+	if err == nil {
+		t.Fatal("the ledger resolved a task with another sequence number")
+	}
+	if !errors.Is(err, agent.ErrSeqConflict) {
+		t.Fatalf("the ledger reported %v, want a conflict of the sequence number", err)
+	}
+
+	looked, err := ledger.Lookup(ctx, "task-1")
+	if err != nil {
+		t.Fatalf("look the task up: %v", err)
+	}
+	if looked.Result.State != model.Uncertain {
+		t.Fatalf("the state of the task = %q, want %q", looked.Result.State, model.Uncertain)
+	}
+	if looked.Seq != current.Seq {
+		t.Fatalf("the sequence number of the task = %d, want %d", looked.Seq, current.Seq)
+	}
+}
+
+// TestTheLedgerFreesTheApplicationAfterAResolution proves that a resolved
+// task holds its application no more, so the application may be deployed
+// again.
+func TestTheLedgerFreesTheApplicationAfterAResolution(t *testing.T) {
+	ledger := uncertainTask(t, ledgerPath(t))
+	ctx := context.Background()
+
+	current, err := ledger.Lookup(ctx, "task-1")
+	if err != nil {
+		t.Fatalf("look the task up: %v", err)
+	}
+	if _, err := ledger.Resolve(ctx, "task-1", current.Seq, model.Result{
+		State:   model.Failed,
+		Message: "管理员确认执行端已经停止",
+	}); err != nil {
+		t.Fatalf("resolve the task: %v", err)
+	}
+
+	if _, fresh, err := ledger.Accept(ctx, commandOf("task-2", "app-1", "digest-2")); err != nil || !fresh {
+		t.Fatalf("accept the task of the freed application: %v", err)
+	}
+}
+
+// TestTheLedgerKeepsTheTraceOfAResolution proves that the ledger shows the
+// final outcome of a resolved task and that it names the source of it.
+func TestTheLedgerKeepsTheTraceOfAResolution(t *testing.T) {
+	ledger := uncertainTask(t, ledgerPath(t))
+	ctx := context.Background()
+
+	current, err := ledger.Lookup(ctx, "task-1")
+	if err != nil {
+		t.Fatalf("look the task up: %v", err)
+	}
+	receipt, err := ledger.Resolve(ctx, "task-1", current.Seq, model.Result{
+		State:   model.Failed,
+		Message: "管理员确认执行端已经停止",
+	})
+	if err != nil {
+		t.Fatalf("resolve the task: %v", err)
+	}
+	if receipt.Result.Code != agent.CodeManualResolution {
+		t.Fatalf("the code of the receipt = %q, want %q", receipt.Result.Code, agent.CodeManualResolution)
+	}
+	if !strings.Contains(receipt.Result.Message, "管理员确认") {
+		t.Fatalf("the message of the receipt = %q, want the reason of the resolution", receipt.Result.Message)
+	}
+
+	looked, err := ledger.Lookup(ctx, "task-1")
+	if err != nil {
+		t.Fatalf("look the task up: %v", err)
+	}
+	if looked.Result.State != model.Failed {
+		t.Fatalf("the state in the ledger = %q, want %q", looked.Result.State, model.Failed)
+	}
+	if looked.Result.Code != agent.CodeManualResolution {
+		t.Fatalf("the code in the ledger = %q, want %q", looked.Result.Code, agent.CodeManualResolution)
+	}
+	if !strings.Contains(looked.Result.Message, "管理员确认") {
+		t.Fatalf("the message in the ledger = %q, want the reason of the resolution", looked.Result.Message)
 	}
 }

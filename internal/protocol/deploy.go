@@ -94,6 +94,11 @@ type DeployQueryResult struct {
 
 // DecodeDeployCommand reads the command of a frame.
 //
+// The identity of the command is checked before its limits: a command that
+// names no task, no application or no configuration cannot be kept in the
+// ledger of an agent, and a command that names another application silently
+// would break the exclusion of the applications.
+//
 // The limits of the configuration hold after the frame was decoded: a frame
 // that fits into the limit of its kind may still carry a document or
 // variables that are too large.
@@ -101,6 +106,9 @@ func DecodeDeployCommand(payload []byte) (model.Command, error) {
 	var message DeployCommand
 	if err := json.Unmarshal(payload, &message); err != nil {
 		return model.Command{}, fmt.Errorf("%w: decode the command: %v", ErrPayloadInvalid, err)
+	}
+	if err := checkCommandIdentity(message.Command); err != nil {
+		return model.Command{}, err
 	}
 	if err := checkCommandLimits(message.Command); err != nil {
 		return model.Command{}, err
@@ -118,6 +126,26 @@ func DecodeDeployQuery(payload []byte) (DeployQuery, error) {
 		return DeployQuery{}, fmt.Errorf("%w: the query names no task", ErrPayloadInvalid)
 	}
 	return query, nil
+}
+
+// checkCommandIdentity refuses a command that does not name its task, its
+// application and its configuration.
+//
+// The identity of a command is what the ledger of the agent compares, so a
+// command without it cannot be kept there and cannot be refused there
+// either. A command that names another application of a known task would be
+// executed for the wrong application.
+func checkCommandIdentity(command model.Command) error {
+	if strings.TrimSpace(command.Task.ID) == "" {
+		return fmt.Errorf("%w: the command names no task", ErrPayloadInvalid)
+	}
+	if strings.TrimSpace(command.Task.AppID) == "" {
+		return fmt.Errorf("%w: the command names no application", ErrPayloadInvalid)
+	}
+	if strings.TrimSpace(command.Task.Digest) == "" {
+		return fmt.Errorf("%w: the command names no configuration", ErrPayloadInvalid)
+	}
+	return nil
 }
 
 // checkCommandLimits refuses a command whose configuration is too large.

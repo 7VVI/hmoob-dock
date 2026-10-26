@@ -8,12 +8,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
 
 	"hmoob-dock/internal/agentlink"
+	"hmoob-dock/internal/model"
 	"hmoob-dock/internal/protocol"
 	"hmoob-dock/internal/store"
 )
@@ -143,6 +145,63 @@ func heartbeat(t *testing.T) protocol.Envelope {
 		Seq:     2,
 		Payload: payload,
 	}
+}
+
+// receiptFrame returns the frame that carries the report of a task.
+func receiptFrame(t *testing.T, seq uint64) protocol.Envelope {
+	t.Helper()
+
+	payload, err := json.Marshal(protocol.DeployReceipt{Receipt: model.Receipt{
+		TaskID: "task-1",
+		Digest: "digest-1",
+		Seq:    seq,
+		Result: model.Result{State: model.Succeeded, Code: "deployed"},
+	}})
+	if err != nil {
+		t.Fatalf("encode the receipt: %v", err)
+	}
+	return protocol.Envelope{
+		Version: protocol.WireVersion,
+		Type:    protocol.TypeDeployReceipt,
+		Seq:     seq,
+		Payload: payload,
+	}
+}
+
+// outputFrame returns the frame that carries a fragment of the output of a
+// task.
+func outputFrame(t *testing.T, seq uint64) protocol.Envelope {
+	t.Helper()
+
+	payload, err := json.Marshal(protocol.DeployOutput{
+		TaskID: "task-1",
+		Offset: 0,
+		Data:   []byte("a fragment of the log"),
+	})
+	if err != nil {
+		t.Fatalf("encode the output: %v", err)
+	}
+	return protocol.Envelope{
+		Version: protocol.WireVersion,
+		Type:    protocol.TypeDeployOutput,
+		Seq:     seq,
+		Payload: payload,
+	}
+}
+
+// sendIgnoringErrors writes a frame to the control端 and ignores a write
+// that fails.
+//
+// The control端 closes the connection when it refuses a frame, so the frames
+// that follow the refused one cannot be written any more.
+func sendIgnoringErrors(conn *websocket.Conn, envelope protocol.Envelope) {
+	data, err := protocol.Encode(envelope)
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = conn.Write(ctx, websocket.MessageText, data)
 }
 
 // inventoryBatch returns a frame that carries one batch of an inventory.
@@ -623,4 +682,120 @@ func TestHubDoesNotHoldBackOtherNodesOnASlowSubscriber(t *testing.T) {
 	})
 
 	close(release)
+}
+
+// TestTheHubDeliversAControlFrameWhenTheMonitorQueueIsFull proves that a
+// receipt of a task reaches the subscribers even when the queue of the
+// fragments of the logs is full.
+//
+// The fragments of the logs are dropped when their queue is full, but a
+// receipt may not be lost: it is the report of the outcome of a task.
+func TestTheHubDeliversAControlFrameWhenTheMonitorQueueIsFull(t *testing.T) {
+	h := newTestHub(t)
+	identity := protocol.NodeIdentity{EngineID: "engine-a"}
+	credential := h.enroll(t, identity)
+
+	conn := h.connect(t, credential)
+	send(t, conn, hello(t, identity))
+	waitFor(t, "the node to be connected", func() bool {
+		return h.hub.Connected(credential.NodeID)
+	})
+
+	// The first fragment of the log blocks the dispatcher of the
+	// connection, so the queue of the fragments fills up.
+	releaseFirst := make(chan struct{})
+	releaseRest := make(chan struct{})
+	defer close(releaseRest)
+	var fragments atomic.Int64
+	h.hub.Subscribe(protocol.TypeDeployOutput, func(ctx context.Context, nodeID string, envelope protocol.Envelope) error {
+		if fragments.Add(1) == 1 {
+			<-releaseFirst
+			return nil
+		}
+		// Every other fragment waits, so a fragment that is served before
+		// the receipt shows that the control frames are not served first.
+		<-releaseRest
+		return nil
+	})
+
+	delivered := make(chan int64, 1)
+	h.hub.Subscribe(protocol.TypeDeployReceipt, func(ctx context.Context, nodeID string, envelope protocol.Envelope) error {
+		// The number of the fragments that were served before the receipt
+		// tells whether the control frames are served first.
+		delivered <- fragments.Load()
+		return nil
+	})
+
+	send(t, conn, outputFrame(t, 2))
+	for index := 0; index < agentlink.InboundMonitorBuffer+5; index++ {
+		send(t, conn, outputFrame(t, uint64(index+3)))
+	}
+
+	// The fragments of the logs are dropped, but the connection of the node
+	// stays alive.
+	if !h.hub.Connected(credential.NodeID) {
+		t.Fatal("the control端 closed the connection although only fragments of the log were dropped")
+	}
+
+	// The receipt waits in the queue of the control frames.
+	send(t, conn, receiptFrame(t, uint64(agentlink.InboundMonitorBuffer+10)))
+
+	// The heartbeat proves that the control端 read the receipt, because the
+	// frames of a connection are read in the order they were sent.
+	before, ok := h.hub.Status(credential.NodeID)
+	if !ok {
+		t.Fatal("the hub does not know the node")
+	}
+	send(t, conn, heartbeat(t))
+	waitFor(t, "the control端 to read the receipt", func() bool {
+		status, ok := h.hub.Status(credential.NodeID)
+		return ok && status.LastSeen.After(before.LastSeen)
+	})
+
+	close(releaseFirst)
+
+	select {
+	case served := <-delivered:
+		// The receipt was served before the fragments that waited in the
+		// queue of the logs.
+		if served != 1 {
+			t.Fatalf("%d fragments of the log were served before the receipt, want 1", served)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the receipt never reached the subscribers")
+	}
+}
+
+// TestTheHubRefusesAControlFrameWhenTheControlQueueIsFull proves that a
+// receipt of a task is not dropped when the subscribers do not keep up.
+//
+// A control frame may not be lost, so the connection of the node is refused
+// instead of throwing the report of the task away.
+func TestTheHubRefusesAControlFrameWhenTheControlQueueIsFull(t *testing.T) {
+	h := newTestHub(t)
+	identity := protocol.NodeIdentity{EngineID: "engine-a"}
+	credential := h.enroll(t, identity)
+
+	conn := h.connect(t, credential)
+	send(t, conn, hello(t, identity))
+	waitFor(t, "the node to be connected", func() bool {
+		return h.hub.Connected(credential.NodeID)
+	})
+
+	// The subscribers of the receipts do not keep up.
+	release := make(chan struct{})
+	defer close(release)
+	h.hub.Subscribe(protocol.TypeDeployReceipt, func(ctx context.Context, nodeID string, envelope protocol.Envelope) error {
+		<-release
+		return nil
+	})
+
+	// The first receipt blocks the dispatcher of the connection, the others
+	// fill the queue of the control frames up.
+	send(t, conn, receiptFrame(t, 1))
+	for index := 0; index < agentlink.InboundControlBuffer+5; index++ {
+		sendIgnoringErrors(conn, receiptFrame(t, uint64(index+2)))
+	}
+
+	expectClosed(t, conn)
 }
