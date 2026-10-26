@@ -1,0 +1,50 @@
+# The image of the control端 of hmoob-dock.
+#
+# The build runs in three stages. The first stage builds the frontend with
+# Node, the second stage builds the binary of the control端 with Go and the
+# last stage holds the runtime. The runtime stage needs no Node, no command
+# line of Docker and no socket of Docker: the control端 manages no
+# container of the host.
+#
+# The base images are pinned to a digest, so a rebuild uses the same image
+# and not a newer one with the same tag.
+
+# --- The build of the frontend ---
+FROM node:25.8.1-bookworm-slim@sha256:44bcbf493408a824104e74976ae5539f596c46cbe75ed0423a137552a555e2de AS web
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web/ ./
+RUN npm run build
+
+# --- The build of the control端 ---
+FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS build
+ENV GOPROXY=https://goproxy.cn,direct
+ENV CGO_ENABLED=0
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/ cmd/
+COPY internal/ internal/
+RUN go build -trimpath -ldflags="-s -w" -o /out/control ./cmd/control
+
+# --- The runtime of the control端 ---
+FROM debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8 AS runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=build /out/control /app/control
+COPY --from=web /src/web/dist /app/web
+# The paths of the image are absolute, so the control端 does not depend on
+# the working directory of the container.
+ENV HMOOB_DB_PATH=/app/data/hmoob.db \
+    HMOOB_KEY_FILE=/etc/hmoob-dock/secrets/master.key \
+    HMOOB_WEB_DIR=/app/web
+EXPOSE 8443
+# The check asks the own listener of the container. The certificate of the
+# deployment is not verified here, because the check proves that the
+# process answers and says nothing about the trust of the certificate.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -fsS --insecure --max-time 4 https://127.0.0.1:8443/healthz || exit 1
+ENTRYPOINT ["/app/control"]

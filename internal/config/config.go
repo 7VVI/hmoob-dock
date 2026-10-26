@@ -147,6 +147,27 @@ func (c Control) Validate() error {
 	return c.checkKeyOutsideDatabaseDirectory()
 }
 
+// CheckWebDir reports whether the frontend directory of the control端 can
+// be served.
+//
+// The check is separate from Validate, because the control端 may run
+// without a frontend: the API works in any case, while a frontend that was
+// configured but cannot be read has to be reported instead of answered with
+// a blank page.
+func (c Control) CheckWebDir() error {
+	if strings.TrimSpace(c.WebDir) == "" {
+		return nil
+	}
+	info, err := os.Stat(c.WebDir)
+	if err != nil {
+		return fmt.Errorf("config: the web directory %s is not accessible: %w", c.WebDir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("config: the web path %s is not a directory", c.WebDir)
+	}
+	return nil
+}
+
 // checkKeyOutsideDatabaseDirectory makes sure the master key is not stored
 // next to the database it protects, because losing the database must not
 // mean losing the key as well.

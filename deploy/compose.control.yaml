@@ -1,0 +1,45 @@
+# The control端 of hmoob-dock.
+#
+# The sample holds no credential: every secret of the deployment comes from
+# the environment of the operator. A missing variable stops Compose with a
+# message, so a deployment never starts with a guessed secret.
+#
+# The variables of the deployment:
+#   HMOOB_PUBLIC_URL  the address the browser uses, e.g. https://hmoob.example.com
+#
+# The control端 answers HTTPS only. The database has a volume of its own and
+# the secrets are mounted read only from the host, so a lost database does
+# not mean a lost key. The control端 manages no container of the host, so it
+# gets no socket of Docker.
+#
+# The operator prepares the secrets of the host before the first start:
+#   /etc/hmoob-dock/secrets/master.key        the key of the database
+#   /etc/hmoob-dock/secrets/bootstrap.token    the one time credential of the
+#                                             first administrator
+#   /etc/hmoob-dock/secrets/tls.crt           the certificate of the server
+#   /etc/hmoob-dock/secrets/tls.key           the key of the certificate
+services:
+  control:
+    image: hmoob-dock-control:local
+    restart: unless-stopped
+    # The listen address is a flag of the command. The environment of the
+    # control端 does not carry it.
+    command: ["-addr", ":8443"]
+    environment:
+      HMOOB_DB_PATH: /app/data/hmoob.db
+      HMOOB_KEY_FILE: /etc/hmoob-dock/secrets/master.key
+      HMOOB_BOOTSTRAP_FILE: /etc/hmoob-dock/secrets/bootstrap.token
+      HMOOB_PUBLIC_URL: ${HMOOB_PUBLIC_URL:?the public URL of the control端 is required}
+      HMOOB_TLS_CERT: /etc/hmoob-dock/secrets/tls.crt
+      HMOOB_TLS_KEY: /etc/hmoob-dock/secrets/tls.key
+      HMOOB_WEB_DIR: /app/web
+    ports:
+      - "8443:8443"
+    volumes:
+      # The database has a volume of its own, the secrets are mounted read
+      # only from the host. The path of the host is the path of the
+      # container, so the two never drift apart.
+      - control-data:/app/data
+      - /etc/hmoob-dock/secrets:/etc/hmoob-dock/secrets:ro
+volumes:
+  control-data:

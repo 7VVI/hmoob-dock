@@ -1,0 +1,36 @@
+# The image of the agent of hmoob-dock.
+#
+# The agent drives the Docker engine of its node, so its image holds the
+# command line of Docker and the plugin of Compose v2 next to the binary
+# of the agent. The build asks both of them for their version, so an image
+# without them never reaches a node.
+#
+# The base images are pinned to a digest, so a rebuild uses the same image
+# and not a newer one with the same tag.
+
+# --- The build of the agent ---
+FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS build
+ENV GOPROXY=https://goproxy.cn,direct
+ENV CGO_ENABLED=0
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/ cmd/
+COPY internal/ internal/
+RUN go build -trimpath -ldflags="-s -w" -o /out/agent ./cmd/agent
+
+# --- The runtime of the agent ---
+FROM docker:cli@sha256:5e6baf67325a79f64ed3bed6863954d5e05d0f3d4e57cbdb14809346814bbfdb AS runtime
+# The certificates of the authority let the agent reach a registry and a
+# control端 that uses a certificate of its own.
+RUN apk add --no-cache ca-certificates \
+    && docker --version \
+    && docker compose version
+WORKDIR /opt/hmoob-dock
+COPY --from=build /out/agent /usr/local/bin/agent
+# The paths of the image are absolute, so the agent does not depend on the
+# working directory of the container.
+ENV HMOOB_WORK_ROOT=/opt/hmoob-dock \
+    HMOOB_DOCKER_SOCKET=/var/run/docker.sock \
+    HMOOB_CREDENTIAL_FILE=/opt/hmoob-dock/agent-credential
+ENTRYPOINT ["/usr/local/bin/agent"]

@@ -1,0 +1,33 @@
+# The agent of hmoob-dock.
+#
+# The agent opens no port of its own: it connects to the control端 and waits
+# for the commands. It needs the socket of the Docker engine of the node and
+# the directory that holds the work of the applications.
+#
+# The variables of the deployment:
+#   HMOOB_SERVER_URL       the address of the control端, e.g. https://hmoob.example.com
+#   HMOOB_CA_FILE          the path of the certificate authority that signed the
+#                          certificate of the control端
+#   HMOOB_ENROLLMENT_FILE  the path of the file that holds the one time enrollment
+#                          token of the node
+#
+# Every bind mount uses the same path on the host and in the container. The
+# Docker engine of the node resolves the relative bind mounts of a Compose
+# file of an application against the work directory of the agent, so the two
+# paths have to be the same one.
+services:
+  agent:
+    image: hmoob-dock-agent:local
+    restart: unless-stopped
+    environment:
+      HMOOB_SERVER_URL: ${HMOOB_SERVER_URL:?the address of the control端 is required}
+      HMOOB_CA_FILE: ${HMOOB_CA_FILE:?the path of the certificate authority is required}
+      HMOOB_ENROLLMENT_FILE: ${HMOOB_ENROLLMENT_FILE:?the path of the enrollment token is required}
+      HMOOB_CREDENTIAL_FILE: /opt/hmoob-dock/agent-credential
+      HMOOB_DOCKER_SOCKET: /var/run/docker.sock
+      HMOOB_WORK_ROOT: /opt/hmoob-dock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /opt/hmoob-dock:/opt/hmoob-dock
+      - ${HMOOB_CA_FILE:?the path of the certificate authority is required}:${HMOOB_CA_FILE:?the path of the certificate authority is required}:ro
+      - ${HMOOB_ENROLLMENT_FILE:?the path of the enrollment token is required}:${HMOOB_ENROLLMENT_FILE:?the path of the enrollment token is required}:ro

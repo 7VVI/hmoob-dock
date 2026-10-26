@@ -63,6 +63,21 @@ func main() {
 	}
 }
 
+// newHandler combines the API of the control端 with its frontend.
+//
+// The API lives below /api/v1 and answers the two health endpoints, so
+// every other path belongs to the frontend. The frontend answers the
+// navigation of the application with the index of its build and never
+// answers a path of the API.
+func newHandler(api http.Handler, web http.Handler) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/api/", api)
+	mux.Handle("/healthz", api)
+	mux.Handle("/readyz", api)
+	mux.Handle("/", web)
+	return mux
+}
+
 // run starts the control端 and blocks until it is asked to stop.
 func run(addr string) error {
 	cfg, err := config.Load()
@@ -71,6 +86,13 @@ func run(addr string) error {
 	}
 	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o700); err != nil {
 		return fmt.Errorf("create the database directory: %w", err)
+	}
+
+	// The frontend is optional: the API of the control端 works without it.
+	// A frontend that was configured but cannot be read is reported, so a
+	// misconfigured deployment does not hide behind a blank page.
+	if err := cfg.CheckWebDir(); err != nil {
+		log.Printf("control: %v", err)
 	}
 
 	key, err := config.LoadMasterKey(cfg.KeyFile)
@@ -129,9 +151,13 @@ func run(addr string) error {
 		}
 	}
 
+	// The frontend and the API share one origin, so the browser needs no
+	// second server and no cross origin request.
+	router := newHandler(handler, httpapi.StaticHandler(cfg.WebDir))
+
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           handler,
+		Handler:           router,
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
 

@@ -140,6 +140,49 @@ func TestValidateAcceptsKeyFileOutsideDatabaseDirectory(t *testing.T) {
 	}
 }
 
+// TestCheckWebDirReportsAMissingDirectory proves that a frontend directory
+// that does not exist is reported. The control端 has to know that the
+// frontend cannot be served, so a blank page does not hide the
+// misconfiguration of a deployment.
+func TestCheckWebDirReportsAMissingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Control{WebDir: filepath.Join(dir, "missing")}
+
+	if err := cfg.CheckWebDir(); err == nil {
+		t.Fatal("CheckWebDir accepted a frontend directory that does not exist")
+	}
+}
+
+// TestCheckWebDirRefusesAFile proves that a frontend path that is a file
+// instead of a directory is reported.
+func TestCheckWebDirRefusesAFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "index.html")
+	if err := os.WriteFile(path, []byte("<main>app</main>"), 0600); err != nil {
+		t.Fatalf("write the file: %v", err)
+	}
+	cfg := config.Control{WebDir: path}
+
+	if err := cfg.CheckWebDir(); err == nil {
+		t.Fatal("CheckWebDir accepted a frontend path that is not a directory")
+	}
+}
+
+// TestCheckWebDirAcceptsAnExistingDirectory proves that a frontend
+// directory that exists is accepted. A control端 without a frontend is
+// accepted as well, because the API works without one.
+func TestCheckWebDirAcceptsAnExistingDirectory(t *testing.T) {
+	cfg := config.Control{WebDir: t.TempDir()}
+	if err := cfg.CheckWebDir(); err != nil {
+		t.Fatalf("CheckWebDir: %v", err)
+	}
+
+	without := config.Control{}
+	if err := without.CheckWebDir(); err != nil {
+		t.Fatalf("CheckWebDir: %v", err)
+	}
+}
+
 func TestLoadMasterKeyReadsExactlyOneKey(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "master.key")

@@ -1,0 +1,27 @@
+# The context of the images holds the sources of the control端 and of the
+# frontend, nothing else. Every secret of the host and every build output
+# of the developer stay out of an image.
+
+.git
+.gitignore
+.superpowers
+docs
+tests
+
+# The frontend is built inside the image, so the packages and the build
+# output of the host are not part of the context.
+web/node_modules
+web/dist
+web/test-results
+web/playwright-report
+
+# The runtime data and the secrets of the host never belong into an image.
+data
+*.db
+*.db-wal
+*.db-shm
+*.key
+*.pem
+*.token
+agent-credential
+bootstrap-*
