@@ -55,7 +55,21 @@ const (
 // so the fields of the two sides do not have the same shape. The label is
 // part of the specification of the service, so a service that does not carry
 // the digest of this deployment does not run the target of this deployment.
+//
+// The digest is the evidence that the platform wrote the specification of the
+// service. It is not the only evidence: a change of the cluster that was
+// made by hand keeps the labels of the service, so the fields the
+// configuration determines are compared with the cluster as well.
 const SwarmVersionLabel = "com.hmoob-dock.version"
+
+// The modes a service of a stack may run in.
+const (
+	// modeReplicated marks a service that runs a number of replicas.
+	modeReplicated = "replicated"
+	// modeGlobal marks a service that runs one task on every node that may
+	// run it.
+	modeGlobal = "global"
+)
 
 // swarmEngine reads the facts of the Swarm cluster of the node.
 //
@@ -292,7 +306,7 @@ func (s *Swarm) Execute(ctx context.Context, cmd model.Command, output io.Writer
 
 	// The state of the cluster decides whether the deployment succeeded, not
 	// the exit code of the command line.
-	result := s.verify(ctx, cmd, document.Digests)
+	result := s.verify(ctx, cmd, document)
 	if note := hostPathNote(document.Paths, nodes, identity); note != "" {
 		result.Message = joinNote(result.Message, note)
 	}
@@ -522,7 +536,7 @@ func (s *Swarm) deploy(ctx context.Context, namespace string, workspace Workspac
 // The state of the cluster is read again and again: the command line reports
 // that a stack was written, not that its services run the version that was
 // deployed.
-func (s *Swarm) verify(ctx context.Context, cmd model.Command, digests map[string]string) model.Result {
+func (s *Swarm) verify(ctx context.Context, cmd model.Command, document stackDocument) model.Result {
 	var deadline time.Time
 	if cmd.VerifyTimeout > 0 {
 		deadline = time.Now().Add(cmd.VerifyTimeout)
@@ -553,8 +567,16 @@ func (s *Swarm) verify(ctx context.Context, cmd model.Command, digests map[strin
 			}
 		}
 
-		observations, missing, err := observe(services, tasks, nodes, cmd.App.Namespace, digests)
+		observations, missing, err := observe(services, tasks, nodes, cmd.App.Namespace, document)
 		if err != nil {
+			var mismatch *specMismatch
+			if errors.As(err, &mismatch) {
+				return model.Result{
+					State:   model.Failed,
+					Code:    CodeSwarmSpecMismatch,
+					Message: mismatch.Error(),
+				}
+			}
 			return model.Result{
 				State:   model.Failed,
 				Code:    CodeSwarmTargetUnknown,
@@ -600,20 +622,26 @@ func (s *Swarm) verify(ctx context.Context, cmd model.Command, digests map[strin
 // specification that run: a task of an older specification is a task of the
 // version before this deployment, so it does not count even when it still
 // runs.
+//
+// The target of the observation comes from the configuration of this
+// deployment and not from the cluster: a cluster that was changed by hand
+// never reached the target of this deployment. The specification of the
+// cluster is compared with the configuration first, so a service that runs
+// another specification is reported instead of being counted.
 func observe(
 	services []swarmapi.Service,
 	tasks []swarmapi.Task,
 	nodes []swarmapi.Node,
 	namespace string,
-	digests map[string]string,
+	document stackDocument,
 ) ([]ServiceObservation, []string, error) {
 	byName := map[string]swarmapi.Service{}
 	for _, service := range services {
 		byName[serviceName(service, namespace)] = service
 	}
 
-	names := make([]string, 0, len(digests))
-	for name := range digests {
+	names := make([]string, 0, len(document.Digests))
+	for name := range document.Digests {
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -626,7 +654,17 @@ func observe(
 			missing = append(missing, name)
 			continue
 		}
-		target, known := effectiveTarget(service, nodes)
+		target := document.Targets[name]
+		if !rolledBackState(updateStateOf(service)) {
+			// A service the cluster rolled back runs the specification of
+			// the version before this deployment, so the difference is
+			// expected and the rollback is reported instead of a
+			// difference of the specification.
+			if matches, reason := specMatches(target, service); !matches {
+				return nil, nil, &specMismatch{service: name, reason: reason}
+			}
+		}
+		desired, known := configuredTarget(target, nodes)
 		if !known {
 			return nil, nil, fmt.Errorf(
 				"dockerops: 服务 %s 的目标无法核实，placement 约束无法读取", name)
@@ -635,14 +673,60 @@ func observe(
 		observations = append(observations, ServiceObservation{
 			Name:              name,
 			UpdateState:       updateStateOf(service),
-			Desired:           target,
+			Desired:           desired,
 			Running:           running,
 			FailedTasks:       failed,
 			CurrentSpecDigest: service.Spec.Labels[SwarmVersionLabel],
-			TargetSpecDigest:  digests[name],
+			TargetSpecDigest:  document.Digests[name],
 		})
 	}
 	return observations, missing, nil
+}
+
+// specMismatch marks a service whose specification of the cluster is not the
+// specification the configuration of this deployment asks for.
+type specMismatch struct {
+	// service is the name of the service inside of the stack.
+	service string
+	// reason describes the difference between the two sides.
+	reason string
+}
+
+// Error returns the message of the difference.
+func (m *specMismatch) Error() string {
+	return fmt.Sprintf("服务 %s 的规格与本次部署的配置不符：%s", m.service, m.reason)
+}
+
+// specMatches reports whether the specification of the cluster is the
+// specification the configuration of this deployment asks for.
+//
+// The digest of the version is not enough: a change of the cluster that was
+// made by hand keeps the labels of the service, so the digest of the
+// version still names this deployment. The fields the configuration
+// determines are compared as well: the mode of the service, the number of
+// its replicas and the repository of its image.
+//
+// The image is compared by its repository, because the configuration names
+// it with a tag and the cluster holds it with the digest the registry
+// answered with.
+func specMatches(target stackTarget, service swarmapi.Service) (bool, string) {
+	mode := modeOf(service)
+	if mode == "" {
+		mode = modeReplicated
+	}
+	if mode != target.Mode {
+		return false, fmt.Sprintf("集群中的模式是 %q，配置要求 %q", mode, target.Mode)
+	}
+	if target.Mode == modeReplicated {
+		if replicas := replicasOf(service); replicas != target.Replicas {
+			return false, fmt.Sprintf("集群中的副本数是 %d，配置要求 %d", replicas, target.Replicas)
+		}
+	}
+	repository := imageRepository(target.Image)
+	if other := imageRepository(imageOfService(service)); repository != other {
+		return false, fmt.Sprintf("集群中的镜像 %q 与配置要求的 %q 不同", other, repository)
+	}
+	return true, ""
 }
 
 // taskStates returns the tasks of the current specification of a service that
@@ -755,10 +839,30 @@ type stackDocument struct {
 	Payload []byte
 	// Digests are the digests of the definitions of the services, by name.
 	Digests map[string]string
+	// Targets are what the configuration asks of every service of the
+	// stack, by name.
+	Targets map[string]stackTarget
 	// Images are the images of the services of the stack.
 	Images []string
 	// Paths are the paths of the host the services of the stack mount.
 	Paths []string
+}
+
+// stackTarget is what the configuration of a deployment asks of one service
+// of the stack.
+//
+// The fields are the ones the platform can compare with the specification of
+// the cluster: the mode of the service, the number of its replicas and the
+// image it runs.
+type stackTarget struct {
+	// Mode is the mode of the service: replicated or global.
+	Mode string
+	// Replicas is the number of the replicas of a replicated service.
+	Replicas int
+	// Image is the image of the service.
+	Image string
+	// Constraints are the constraints of the placement of the service.
+	Constraints []string
 }
 
 // prepareStack binds the version of this deployment to the services of the
@@ -786,6 +890,7 @@ func prepareStack(payload []byte) (stackDocument, error) {
 	}
 
 	digests := map[string]string{}
+	targets := map[string]stackTarget{}
 	images := []string{}
 	seenImage := map[string]bool{}
 	for name, definition := range services {
@@ -798,6 +903,7 @@ func prepareStack(payload []byte) (stackDocument, error) {
 			return stackDocument{}, err
 		}
 		digests[name] = digest
+		targets[name] = targetOfService(service)
 		bindVersion(service, digest)
 
 		if image := imageOf(service); image != "" && !seenImage[image] {
@@ -814,9 +920,66 @@ func prepareStack(payload []byte) (stackDocument, error) {
 	return stackDocument{
 		Payload: rendered,
 		Digests: digests,
+		Targets: targets,
 		Images:  images,
 		Paths:   yamlspec.HostPaths(rendered),
 	}, nil
+}
+
+// targetOfService reads what the configuration asks of one service of the
+// stack.
+//
+// The mode of a service is replicated and its number of replicas is one when
+// the configuration does not say otherwise: those are the defaults of the
+// Docker CLI.
+func targetOfService(service map[string]any) stackTarget {
+	target := stackTarget{Mode: modeReplicated, Replicas: 1, Image: imageOf(service)}
+
+	deploy, ok := service["deploy"].(map[string]any)
+	if !ok {
+		return target
+	}
+	if mode, ok := deploy["mode"].(string); ok && mode != "" {
+		target.Mode = mode
+	}
+	if replicas, ok := numberOf(deploy["replicas"]); ok {
+		target.Replicas = replicas
+	}
+	placement, ok := deploy["placement"].(map[string]any)
+	if !ok {
+		return target
+	}
+	values, ok := placement["constraints"].([]any)
+	if !ok {
+		return target
+	}
+	for _, value := range values {
+		constraint, ok := value.(string)
+		if !ok {
+			continue
+		}
+		target.Constraints = append(target.Constraints, constraint)
+	}
+	return target
+}
+
+// numberOf reads a number of the document.
+//
+// The parser of YAML hands the numbers of a document over as integers, but
+// a number that does not fit into an integer arrives as a float.
+func numberOf(value any) (int, bool) {
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case int64:
+		return int(typed), true
+	case uint64:
+		return int(typed), true
+	case float64:
+		return int(typed), true
+	default:
+		return 0, false
+	}
 }
 
 // bindVersion puts the digest of the definition of a service into the labels
@@ -886,6 +1049,66 @@ func imageOf(service map[string]any) string {
 	return strings.TrimSpace(image)
 }
 
+// imageOfService returns the image the service of the cluster runs.
+func imageOfService(service swarmapi.Service) string {
+	if service.Spec.TaskTemplate.ContainerSpec == nil {
+		return ""
+	}
+	return strings.TrimSpace(service.Spec.TaskTemplate.ContainerSpec.Image)
+}
+
+// imageRepository returns the repository of an image reference.
+//
+// A reference may name a registry, a tag and a digest. The registry is
+// recognized by the rule of Docker: the first part of the path names a
+// registry when it holds a point or a colon or when it is "localhost". The
+// result is the name of the repository alone, so "nginx", "nginx:alpine",
+// "nginx@sha256:..." and "docker.io/library/nginx@sha256:..." name the same
+// repository. The comparison of the images therefore does not mistake the
+// digest of the registry for a difference.
+func imageRepository(image string) string {
+	reference := strings.TrimSpace(image)
+	if reference == "" {
+		return ""
+	}
+	// The digest comes last.
+	if at := strings.Index(reference, "@"); at >= 0 {
+		reference = reference[:at]
+	}
+	parts := strings.Split(reference, "/")
+	// The tag belongs to the last part of the path.
+	last := len(parts) - 1
+	if colon := strings.LastIndex(parts[last], ":"); colon >= 0 {
+		parts[last] = parts[last][:colon]
+	}
+	if len(parts) > 1 && registryHost(parts[0]) {
+		host := parts[0]
+		parts = parts[1:]
+		// The "library" namespace only holds the default namespace of the
+		// Docker Hub, so "docker.io/library/nginx" names the same
+		// repository as "nginx".
+		if len(parts) > 1 && parts[0] == "library" && dockerHubHost(host) {
+			parts = parts[1:]
+		}
+	}
+	return strings.Join(parts, "/")
+}
+
+// registryHost reports whether the first part of the path of an image
+// reference names a registry.
+func registryHost(part string) bool {
+	return part == "localhost" || strings.ContainsAny(part, ".:")
+}
+
+// dockerHubHost reports whether a registry host names the Docker Hub.
+func dockerHubHost(host string) bool {
+	switch host {
+	case "docker.io", "index.docker.io", "registry-1.docker.io":
+		return true
+	}
+	return false
+}
+
 // needsRegistryAuth reports whether the stack needs the credentials of the
 // registry of the manager.
 //
@@ -916,8 +1139,7 @@ func privateRegistry(image string) bool {
 	if len(parts) < 2 {
 		return false
 	}
-	host := parts[0]
-	return host == "localhost" || strings.ContainsAny(host, ".:")
+	return registryHost(parts[0])
 }
 
 // hostPathNote reports what the manager could not prove about the paths of

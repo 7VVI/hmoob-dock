@@ -146,3 +146,22 @@ func TestTheSwarmReadinessReportsAPausedUpdate(t *testing.T) {
 		t.Fatalf("the code = %q, want %q", result.Code, dockerops.CodeSwarmUpdatePaused)
 	}
 }
+
+// TestTheSwarmReadinessUsesTheTargetOfTheConfiguration proves that the
+// target of the check is the target of the configuration.
+//
+// The target is derived from the configuration and not from the cluster: a
+// stack that was scaled by hand runs more tasks than the configuration asks
+// for, so it never reached the target of this deployment.
+func TestTheSwarmReadinessUsesTheTargetOfTheConfiguration(t *testing.T) {
+	result := dockerops.CheckSwarmReadiness([]dockerops.ServiceObservation{{
+		Name: "api", UpdateState: "completed", Desired: 2, Running: 5,
+		CurrentSpecDigest: "new", TargetSpecDigest: "new",
+	}})
+	if result.State == model.Succeeded {
+		t.Fatalf("the state = %q, want a failure", result.State)
+	}
+	if result.Code != dockerops.CodeSwarmNotReady {
+		t.Fatalf("the code = %q, want %q", result.Code, dockerops.CodeSwarmNotReady)
+	}
+}

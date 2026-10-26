@@ -71,9 +71,10 @@ type ServiceObservation struct {
 	// UpdateState is the state of the update of the service, for example
 	// updating, paused, completed or rollback_completed.
 	UpdateState string
-	// Desired is the effective target of the service: the number of the
-	// replicas of a replicated service and the number of the eligible
-	// nodes of a global one.
+	// Desired is the target of this deployment: the number of the replicas
+	// the configuration asks for and the number of the eligible nodes of a
+	// global service. The target comes from the configuration and not from
+	// the cluster, so a cluster that was changed by hand never reaches it.
 	Desired int
 	// Running is the number of the tasks of the current specification that
 	// run.
@@ -97,8 +98,12 @@ type ServiceObservation struct {
 //   - a service with a failed task is not ready;
 //   - a service whose update the cluster paused or rolled back is not ready,
 //     and a rollback is reported as such;
-//   - a service that runs fewer tasks than its effective target is not ready
-//     yet, and a service that runs none of them is ready.
+//   - a service that runs fewer tasks than the target of this deployment is
+//     not ready yet, and a service that runs none of them is ready.
+//
+// The target of a service comes from the configuration of the deployment and
+// not from the cluster, so a cluster that was changed by hand never reaches
+// it.
 //
 // The outcome of a deployment the administrator caused is a result and not an
 // error. The executor waits while the result is "not ready", because the
@@ -209,10 +214,23 @@ func swarmWaits(code string) bool {
 // services.
 func rolledBack(services []ServiceObservation) bool {
 	for _, service := range services {
-		switch service.UpdateState {
-		case updateRollbackCompleted, updateRollbackStarted, updateRollbackPaused:
+		if rolledBackState(service.UpdateState) {
 			return true
 		}
+	}
+	return false
+}
+
+// rolledBackState reports whether the state of the update of a service means
+// that the cluster undid the change.
+//
+// A service the cluster rolled back runs the specification of the version
+// before the deployment, so its specification differs from the specification
+// of the deployment by its own accord.
+func rolledBackState(state string) bool {
+	switch state {
+	case updateRollbackCompleted, updateRollbackStarted, updateRollbackPaused:
+		return true
 	}
 	return false
 }
@@ -254,11 +272,16 @@ func replicasOf(service swarmapi.Service) int {
 	return int(*service.Spec.Mode.Replicated.Replicas)
 }
 
-// effectiveTarget returns the number of the tasks a service has to run.
+// effectiveTarget returns the number of the tasks a service of the cluster
+// has to run.
 //
 // A replicated service runs the number of its replicas. A global service runs
 // one task on every node that is eligible for it, so its target depends on
 // the nodes of the cluster and on the constraints of its placement.
+//
+// The target is the target of the cluster and not the target of a
+// deployment: the convergence check derives its own target from the
+// configuration, so a cluster that was changed by hand never reaches it.
 //
 // The second return value reports whether the target could be proven. A
 // constraint the platform cannot read leaves the target unknown, and the
@@ -268,7 +291,34 @@ func effectiveTarget(service swarmapi.Service, nodes []swarmapi.Node) (int, bool
 	case service.Spec.Mode.Replicated != nil:
 		return replicasOf(service), true
 	case service.Spec.Mode.Global != nil:
-		eligible, known := eligibleNodes(service, nodes)
+		eligible, known := eligibleNodes(placementConstraints(service), nodes)
+		if !known {
+			return 0, false
+		}
+		return len(eligible), true
+	default:
+		return 0, false
+	}
+}
+
+// configuredTarget returns the number of the tasks a service of this
+// deployment has to run.
+//
+// A replicated service asks for the number of its replicas, a global service
+// for one task on every node that may run it. The target comes from the
+// configuration of this deployment and not from the cluster: a cluster that
+// was scaled by hand runs more tasks than the deployment asks for, so it
+// never reached the target of this deployment.
+//
+// The second return value reports whether the target could be proven. A
+// constraint the platform cannot read leaves the target unknown, and the
+// platform never claims that such a service converged.
+func configuredTarget(target stackTarget, nodes []swarmapi.Node) (int, bool) {
+	switch target.Mode {
+	case modeReplicated:
+		return target.Replicas, true
+	case modeGlobal:
+		eligible, known := eligibleNodes(target.Constraints, nodes)
 		if !known {
 			return 0, false
 		}
@@ -283,9 +333,7 @@ func effectiveTarget(service swarmapi.Service, nodes []swarmapi.Node) (int, bool
 // A node is eligible when it is active, when it is ready and when it
 // satisfies the constraints of the placement of the service. The second
 // return value reports whether the constraints could be read.
-func eligibleNodes(service swarmapi.Service, nodes []swarmapi.Node) ([]swarmapi.Node, bool) {
-	constraints := placementConstraints(service)
-
+func eligibleNodes(constraints []string, nodes []swarmapi.Node) ([]swarmapi.Node, bool) {
 	var eligible []swarmapi.Node
 	for _, node := range nodes {
 		if node.Spec.Availability != swarmapi.NodeAvailabilityActive {

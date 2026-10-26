@@ -165,7 +165,16 @@ func swarmWarnings(inventory protocol.Inventory, app model.App, checked model.Ch
 //
 // The containers of the platform itself are left out: they never belong to
 // a managed application, so they are never removed by a deployment.
+//
+// A Swarm stack is a set of services of the cluster and not a set of
+// containers of a node: the services of a stack run on the workers of the
+// cluster, so the manager of the cluster holds no container of them at all.
+// The services of the cluster are therefore the ones the preview names.
 func (s *Service) runningServices(inventory protocol.Inventory, mode, namespace string) []string {
+	if mode == yamlspec.ModeSwarm {
+		return swarmRunningServices(inventory, namespace)
+	}
+
 	seen := make(map[string]bool)
 	var names []string
 	for _, container := range namespaceContainers(inventory, mode, namespace) {
@@ -178,6 +187,35 @@ func (s *Service) runningServices(inventory protocol.Inventory, mode, namespace 
 		}
 		seen[service] = true
 		names = append(names, service)
+	}
+	return sortServices(names)
+}
+
+// swarmRunningServices returns the names of the services of the stack that
+// run in the cluster.
+//
+// The services of the cluster are selected by the label of the stack, so a
+// service of another stack is never part of the answer. The name of a
+// service of a stack is the name of the stack, an underscore and the name of
+// the service, so the name of the service is what follows the namespace.
+// This is the same rule the executor of the stack uses, so both sides name
+// a service of a stack the same way.
+func swarmRunningServices(inventory protocol.Inventory, namespace string) []string {
+	seen := make(map[string]bool)
+	var names []string
+	for _, service := range inventory.SwarmServices {
+		if service.Labels[stackNamespaceLabel] != namespace {
+			continue
+		}
+		name := service.Name
+		if namespace != "" {
+			name = strings.TrimPrefix(name, namespace+"_")
+		}
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
 	}
 	return sortServices(names)
 }
@@ -203,6 +241,11 @@ func removedServices(running, configured []string) []string {
 // The revision names the state the preview was computed from. The
 // confirmation of a removal is bound to it, so a confirmation of an older
 // state cannot be reused.
+//
+// The services of a Swarm stack are part of the state of the namespace: the
+// confirmation of a removal names the services of the cluster, so the
+// revision has to hold them as well. Only the identity of a service is
+// counted, because the number of its tasks changes while the cluster works.
 func inventoryRevision(inventory protocol.Inventory, mode, namespace string) (string, error) {
 	containers := namespaceContainers(inventory, mode, namespace)
 	type containerState struct {
@@ -211,9 +254,15 @@ func inventoryRevision(inventory protocol.Inventory, mode, namespace string) (st
 		Image   string `json:"image"`
 		Service string `json:"service"`
 	}
+	type serviceState struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+		Mode string `json:"mode"`
+	}
 	payload := struct {
 		Namespace  string           `json:"namespace"`
 		Containers []containerState `json:"containers"`
+		Services   []serviceState   `json:"services"`
 	}{Namespace: namespace}
 
 	for _, container := range containers {
@@ -222,6 +271,21 @@ func inventoryRevision(inventory protocol.Inventory, mode, namespace string) (st
 			Name:    container.Name,
 			Image:   container.Image,
 			Service: containerService(container, mode, namespace),
+		})
+	}
+	if mode == yamlspec.ModeSwarm {
+		for _, service := range inventory.SwarmServices {
+			if service.Labels[stackNamespaceLabel] != namespace {
+				continue
+			}
+			payload.Services = append(payload.Services, serviceState{
+				ID:   service.ID,
+				Name: service.Name,
+				Mode: service.Mode,
+			})
+		}
+		sort.Slice(payload.Services, func(first, second int) bool {
+			return payload.Services[first].ID < payload.Services[second].ID
 		})
 	}
 	encoded, err := json.Marshal(payload)

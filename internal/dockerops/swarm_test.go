@@ -182,13 +182,25 @@ func swarmService(name string, replicas uint64, digest string, update swarmapi.U
 
 // swarmTask builds a task of a service of the stack of the tests.
 func swarmTask(id, serviceID string, slot int, state swarmapi.TaskState, errMessage string) swarmapi.Task {
+	return swarmTaskWithImage(id, serviceID, slot, state, errMessage, "nginx:alpine")
+}
+
+// swarmTaskWithImage builds a task of a service of the stack of the tests
+// that runs the given image.
+func swarmTaskWithImage(
+	id, serviceID string,
+	slot int,
+	state swarmapi.TaskState,
+	errMessage string,
+	image string,
+) swarmapi.Task {
 	return swarmapi.Task{
 		ID:        id,
 		ServiceID: serviceID,
 		Slot:      slot,
 		NodeID:    "node-2",
 		Spec: swarmapi.TaskSpec{
-			ContainerSpec: &swarmapi.ContainerSpec{Image: "nginx:alpine"},
+			ContainerSpec: &swarmapi.ContainerSpec{Image: image},
 		},
 		Status: swarmapi.TaskStatus{State: state, Err: errMessage},
 	}
@@ -1443,4 +1455,177 @@ func TestTheSwarmExecutorReportsTheVersionOfTheStack(t *testing.T) {
 		t.Fatalf("the message = %q, want the service of the stack", result.Message)
 	}
 	fmt.Fprintln(io.Discard, result.Message)
+}
+
+// TestTheSwarmExecutorRefusesAServiceWhoseModeDiffersFromTheConfiguration
+// proves that the mode of the configuration is compared with the mode of the
+// service of the cluster.
+//
+// The digest of the version is not enough: a change of the cluster that was
+// made by hand keeps the labels of the service, so the digest still names
+// this deployment.
+func TestTheSwarmExecutorRefusesAServiceWhoseModeDiffersFromTheConfiguration(t *testing.T) {
+	runner := &fakeRunner{}
+	engine := swarmTestEngine(t)
+	cmd := swarmTestCommand()
+	cmd.Config.YAML = "services:\n  api:\n    image: nginx:alpine\n    deploy:\n      mode: global\n"
+	engine.services = []swarmapi.Service{
+		swarmService("api", 2, swarmDigests(t, cmd)["api"], swarmapi.UpdateStatus{
+			State: swarmapi.UpdateStateCompleted,
+		}),
+	}
+	engine.tasks = []swarmapi.Task{
+		swarmTask("task-1", "service-api", 1, swarmapi.TaskStateRunning, ""),
+		swarmTask("task-2", "service-api", 2, swarmapi.TaskStateRunning, ""),
+	}
+	executor := newSwarmExecutor(t, runner, engine)
+
+	result, err := executor.Execute(context.Background(), cmd, io.Discard)
+	if err != nil {
+		t.Fatalf("execute the command: %v", err)
+	}
+	if result.State == model.Succeeded {
+		t.Fatalf("the state = %q, want a failure", result.State)
+	}
+	if result.Code != CodeSwarmSpecMismatch {
+		t.Fatalf("the code = %q, want %q", result.Code, CodeSwarmSpecMismatch)
+	}
+	if !strings.Contains(result.Message, "api") {
+		t.Fatalf("the message = %q, want the service", result.Message)
+	}
+}
+
+// TestTheSwarmExecutorRefusesAServiceWhoseImageDiffersFromTheConfiguration
+// proves that the image of the configuration is compared with the image of
+// the service of the cluster.
+func TestTheSwarmExecutorRefusesAServiceWhoseImageDiffersFromTheConfiguration(t *testing.T) {
+	runner := &fakeRunner{}
+	engine := swarmTestEngine(t)
+	cmd := swarmTestCommand()
+	service := swarmService("api", 2, swarmDigests(t, cmd)["api"], swarmapi.UpdateStatus{
+		State: swarmapi.UpdateStateCompleted,
+	})
+	service.Spec.TaskTemplate.ContainerSpec.Image = "redis:alpine"
+	engine.services = []swarmapi.Service{service}
+	engine.tasks = []swarmapi.Task{
+		swarmTaskWithImage("task-1", "service-api", 1, swarmapi.TaskStateRunning, "", "redis:alpine"),
+		swarmTaskWithImage("task-2", "service-api", 2, swarmapi.TaskStateRunning, "", "redis:alpine"),
+	}
+	executor := newSwarmExecutor(t, runner, engine)
+
+	result, err := executor.Execute(context.Background(), cmd, io.Discard)
+	if err != nil {
+		t.Fatalf("execute the command: %v", err)
+	}
+	if result.State == model.Succeeded {
+		t.Fatalf("the state = %q, want a failure", result.State)
+	}
+	if result.Code != CodeSwarmSpecMismatch {
+		t.Fatalf("the code = %q, want %q", result.Code, CodeSwarmSpecMismatch)
+	}
+}
+
+// TestTheSwarmExecutorAcceptsTheDigestOfTheImageOfTheCluster proves that
+// the digest of an image is not a difference.
+//
+// The configuration names the image with a tag, the cluster holds it with
+// the digest the registry answered with.
+func TestTheSwarmExecutorAcceptsTheDigestOfTheImageOfTheCluster(t *testing.T) {
+	runner := &fakeRunner{}
+	engine := swarmTestEngine(t)
+	cmd := swarmTestCommand()
+	digest := "nginx@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	service := swarmService("api", 2, swarmDigests(t, cmd)["api"], swarmapi.UpdateStatus{
+		State: swarmapi.UpdateStateCompleted,
+	})
+	service.Spec.TaskTemplate.ContainerSpec.Image = digest
+	engine.services = []swarmapi.Service{service}
+	engine.tasks = []swarmapi.Task{
+		swarmTaskWithImage("task-1", "service-api", 1, swarmapi.TaskStateRunning, "", digest),
+		swarmTaskWithImage("task-2", "service-api", 2, swarmapi.TaskStateRunning, "", digest),
+	}
+	executor := newSwarmExecutor(t, runner, engine)
+
+	result, err := executor.Execute(context.Background(), cmd, io.Discard)
+	if err != nil {
+		t.Fatalf("execute the command: %v", err)
+	}
+	if result.State != model.Succeeded {
+		t.Fatalf("the state = %q, want %q (%s)", result.State, model.Succeeded, result.Message)
+	}
+}
+
+// TestTheSwarmExecutorRefusesAStackThatWasScaledByHand proves that a stack
+// that was scaled by hand is never reported as the deployment of this
+// configuration.
+//
+// The number of the replicas of the configuration is the target of the
+// deployment, so a stack that runs more tasks than the configuration asks
+// for never reached the target of this deployment.
+func TestTheSwarmExecutorRefusesAStackThatWasScaledByHand(t *testing.T) {
+	runner := &fakeRunner{}
+	engine := swarmTestEngine(t)
+	cmd := swarmTestCommand()
+	engine.services = []swarmapi.Service{
+		swarmService("api", 5, swarmDigests(t, cmd)["api"], swarmapi.UpdateStatus{
+			State: swarmapi.UpdateStateCompleted,
+		}),
+	}
+	engine.tasks = []swarmapi.Task{
+		swarmTask("task-1", "service-api", 1, swarmapi.TaskStateRunning, ""),
+		swarmTask("task-2", "service-api", 2, swarmapi.TaskStateRunning, ""),
+		swarmTask("task-3", "service-api", 3, swarmapi.TaskStateRunning, ""),
+		swarmTask("task-4", "service-api", 4, swarmapi.TaskStateRunning, ""),
+		swarmTask("task-5", "service-api", 5, swarmapi.TaskStateRunning, ""),
+	}
+	executor := newSwarmExecutor(t, runner, engine)
+
+	result, err := executor.Execute(context.Background(), cmd, io.Discard)
+	if err != nil {
+		t.Fatalf("execute the command: %v", err)
+	}
+	if result.State == model.Succeeded {
+		t.Fatalf("the state = %q, want a failure", result.State)
+	}
+	if result.Code != CodeSwarmSpecMismatch {
+		t.Fatalf("the code = %q, want %q", result.Code, CodeSwarmSpecMismatch)
+	}
+}
+
+// TestTheSwarmExecutorReportsTheRollbackOfAChangedImage proves that the
+// rollback of the cluster is reported even when the image of the
+// configuration differs from the image the rolled back service runs.
+//
+// The cluster undoes the change of the image, so the service runs the image
+// of the version before this deployment. The rollback is the outcome of the
+// deployment, not a difference of the specification.
+func TestTheSwarmExecutorReportsTheRollbackOfAChangedImage(t *testing.T) {
+	runner := &fakeRunner{}
+	engine := swarmTestEngine(t)
+	cmd := swarmTestCommand()
+	cmd.Config.YAML = "services:\n  api:\n    image: redis:alpine\n    deploy:\n      replicas: 2\n"
+	service := swarmService("api", 2, swarmDigests(t, cmd)["api"], swarmapi.UpdateStatus{
+		State: swarmapi.UpdateStateRollbackCompleted,
+	})
+	service.Spec.TaskTemplate.ContainerSpec.Image = "nginx:alpine"
+	engine.services = []swarmapi.Service{service}
+	engine.tasks = []swarmapi.Task{
+		swarmTask("task-1", "service-api", 1, swarmapi.TaskStateRunning, ""),
+		swarmTask("task-2", "service-api", 2, swarmapi.TaskStateRunning, ""),
+	}
+	executor := newSwarmExecutor(t, runner, engine)
+
+	result, err := executor.Execute(context.Background(), cmd, io.Discard)
+	if err != nil {
+		t.Fatalf("execute the command: %v", err)
+	}
+	if result.State == model.Succeeded {
+		t.Fatalf("the state = %q, want a failure", result.State)
+	}
+	if !result.RolledBack {
+		t.Fatalf("the rollback was not reported: %+v", result)
+	}
+	if result.Code != CodeSwarmRolledBack {
+		t.Fatalf("the code = %q, want %q", result.Code, CodeSwarmRolledBack)
+	}
 }

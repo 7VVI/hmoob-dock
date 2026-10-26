@@ -96,6 +96,42 @@ func swarmInventory() fixedInventory {
 	}}
 }
 
+// swarmStackInventory is the state of a cluster whose stack demo holds two
+// services: the service api and the service cache.
+//
+// The tasks of the services run on the worker, so the manager holds no
+// container of the stack at all.
+func swarmStackInventory() fixedInventory {
+	inventory := swarmInventory()
+	inventory.value.SwarmServices = []protocol.SwarmService{
+		{
+			ID:   "service-api",
+			Name: "demo_api",
+			Mode: "replicated",
+			Labels: map[string]string{
+				"com.docker.stack.namespace": "demo",
+			},
+		},
+		{
+			ID:   "service-cache",
+			Name: "demo_cache",
+			Mode: "replicated",
+			Labels: map[string]string{
+				"com.docker.stack.namespace": "demo",
+			},
+		},
+		{
+			ID:   "service-other",
+			Name: "other_api",
+			Mode: "replicated",
+			Labels: map[string]string{
+				"com.docker.stack.namespace": "other",
+			},
+		},
+	}
+	return inventory
+}
+
 // TestThePreviewNamesTheNodesThePlatformCouldNotCheck proves that the
 // preview of a Swarm deployment names the nodes whose paths of the host no
 // agent of the platform has verified.
@@ -184,5 +220,122 @@ func TestASwarmDeploymentWithoutAPathNeedsNoConfirmation(t *testing.T) {
 		PreviewDigest:  preview.Digest,
 	}); err != nil {
 		t.Fatalf("submit the deployment: %v", err)
+	}
+}
+
+// TestThePreviewNamesTheServicesOfTheStackThatTheConfigurationDoesNotHold
+// proves that the preview of a Swarm deployment names the services of the
+// cluster that the configuration does not hold any more.
+//
+// The services of a stack are the services of the cluster and not the
+// containers of a node: a service whose tasks run on the workers has no
+// container on the manager, so the containers of the manager never tell the
+// whole stack.
+func TestThePreviewNamesTheServicesOfTheStackThatTheConfigurationDoesNotHold(t *testing.T) {
+	env := newSwarmHarness(t, swarmStackInventory())
+	app := env.createApp("demo")
+	cfg := model.Config{YAML: "services:\n  api:\n    image: nginx:alpine\n"}
+
+	preview, err := env.service.Preview(context.Background(), app.ID, "", cfg)
+	if err != nil {
+		t.Fatalf("preview the deployment: %v", err)
+	}
+	if len(preview.RemovedServices) != 1 || preview.RemovedServices[0] != "cache" {
+		t.Fatalf("the removed services = %v, want the service cache", preview.RemovedServices)
+	}
+}
+
+// TestThePreviewNamesTheServicesOfTheStackWithTheNameOfTheExecutor proves
+// that the control端 and the executor of the stack name a service of a stack
+// the same way.
+//
+// The name of a service of a stack is the name of the stack, an underscore
+// and the name of the service, so the name of the service is what follows
+// the namespace. A service of another stack is never part of the answer,
+// because the executor only reads the services of the stack of the
+// application.
+func TestThePreviewNamesTheServicesOfTheStackWithTheNameOfTheExecutor(t *testing.T) {
+	env := newSwarmHarness(t, swarmStackInventory())
+	app := env.createApp("demo")
+	cfg := model.Config{YAML: "services:\n  api:\n    image: nginx:alpine\n"}
+
+	preview, err := env.service.Preview(context.Background(), app.ID, "", cfg)
+	if err != nil {
+		t.Fatalf("preview the deployment: %v", err)
+	}
+	if len(preview.RemovedServices) != 1 || preview.RemovedServices[0] != "cache" {
+		t.Fatalf("the removed services = %v, want the service cache of the stack demo", preview.RemovedServices)
+	}
+	for _, name := range preview.RemovedServices {
+		if strings.Contains(name, "demo_") {
+			t.Fatalf("the removed service %q holds the name of the stack", name)
+		}
+	}
+}
+
+// TestASwarmDeploymentRemovesTheServiceTheAdministratorConfirmed proves that
+// the confirmation of a removal of a Swarm stack can be produced at all.
+//
+// The set of the services the administrator confirms has to be the set of
+// the services of the cluster the configuration does not hold, or the
+// executor refuses the deployment of every removal.
+func TestASwarmDeploymentRemovesTheServiceTheAdministratorConfirmed(t *testing.T) {
+	env := newSwarmHarness(t, swarmStackInventory())
+	app := env.createApp("demo")
+	cfg := model.Config{YAML: "services:\n  api:\n    image: nginx:alpine\n"}
+
+	preview, err := env.service.Preview(context.Background(), app.ID, "", cfg)
+	if err != nil {
+		t.Fatalf("preview the deployment: %v", err)
+	}
+	if len(preview.RemovedServices) != 1 || preview.RemovedServices[0] != "cache" {
+		t.Fatalf("the removed services = %v, want the service cache", preview.RemovedServices)
+	}
+	if _, err := env.service.Submit(context.Background(), deploy.SubmitRequest{
+		AppID:             app.ID,
+		IdempotencyKey:    "request-1",
+		Config:            cfg,
+		PreviewDigest:     preview.Digest,
+		InventoryRevision: preview.InventoryRevision,
+		ConfirmedRemoval:  preview.RemovalConfirmation(),
+	}); err != nil {
+		t.Fatalf("submit the confirmed deployment: %v", err)
+	}
+}
+
+// TestTheRevisionOfTheTargetHoldsTheServicesOfTheCluster proves that the
+// revision of the target names the services of the cluster.
+//
+// The confirmation of a removal is bound to the revision, so a confirmation
+// of a state that does not hold the services of the cluster any more may
+// not be reused.
+func TestTheRevisionOfTheTargetHoldsTheServicesOfTheCluster(t *testing.T) {
+	cfg := model.Config{YAML: "services:\n  api:\n    image: nginx:alpine\n"}
+
+	first := newSwarmHarness(t, swarmStackInventory())
+	app := first.createApp("demo")
+	before, err := first.service.Preview(context.Background(), app.ID, "", cfg)
+	if err != nil {
+		t.Fatalf("preview the deployment: %v", err)
+	}
+
+	changed := swarmStackInventory()
+	changed.value.SwarmServices = append(changed.value.SwarmServices, protocol.SwarmService{
+		ID:   "service-extra",
+		Name: "demo_extra",
+		Mode: "replicated",
+		Labels: map[string]string{
+			"com.docker.stack.namespace": "demo",
+		},
+	})
+	second := newSwarmHarness(t, changed)
+	other := second.createApp("demo")
+	after, err := second.service.Preview(context.Background(), other.ID, "", cfg)
+	if err != nil {
+		t.Fatalf("preview the deployment: %v", err)
+	}
+
+	if before.InventoryRevision == after.InventoryRevision {
+		t.Fatalf("the revision = %q, want the revision of the state of the cluster", after.InventoryRevision)
 	}
 }
