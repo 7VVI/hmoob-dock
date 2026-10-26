@@ -155,6 +155,20 @@ func (h *harness) createAdoptedApp(namespace string) model.App {
 	return app
 }
 
+// preview asks the control端 for the impact of a configuration.
+//
+// Every deployment names the preview the administrator saw, so the tests
+// ask for the preview of the configuration they deploy.
+func (h *harness) preview(app model.App, baseVersionID string, cfg model.Config) deploy.Preview {
+	h.t.Helper()
+
+	preview, err := h.service.Preview(context.Background(), app.ID, baseVersionID, cfg)
+	if err != nil {
+		h.t.Fatalf("preview the deployment: %v", err)
+	}
+	return preview
+}
+
 // finishTask ends a task.
 //
 // The state machine of a task belongs to a later task of the plan, so the
@@ -235,11 +249,13 @@ func TestSubmitWithTheSameKeyAndAnotherRequestIsAConflict(t *testing.T) {
 	env := newHarness(t, fixedInventory{})
 	app := env.createApp("demo")
 	cfg := composeConfig("nginx:alpine")
+	preview := env.preview(app, "", cfg)
 
 	first, err := env.service.Submit(context.Background(), deploy.SubmitRequest{
 		AppID:          app.ID,
 		IdempotencyKey: "request-1",
 		Config:         cfg,
+		PreviewDigest:  preview.Digest,
 	})
 	if err != nil {
 		t.Fatalf("submit the deployment: %v", err)
@@ -265,7 +281,13 @@ func TestSubmitRepeatedlyAnswersTheTaskOfTheFirstRequest(t *testing.T) {
 	env := newHarness(t, fixedInventory{})
 	app := env.createApp("demo")
 	cfg := composeConfig("nginx:alpine")
-	request := deploy.SubmitRequest{AppID: app.ID, IdempotencyKey: "request-1", Config: cfg}
+	preview := env.preview(app, "", cfg)
+	request := deploy.SubmitRequest{
+		AppID:          app.ID,
+		IdempotencyKey: "request-1",
+		Config:         cfg,
+		PreviewDigest:  preview.Digest,
+	}
 
 	first, err := env.service.Submit(context.Background(), request)
 	if err != nil {
@@ -287,6 +309,7 @@ func TestSubmitRepeatedlyAnswersTheTaskOfTheFirstRequest(t *testing.T) {
 		AppID:          app.ID,
 		IdempotencyKey: "request-2",
 		Config:         cfg,
+		PreviewDigest:  preview.Digest,
 	})
 	if !errors.Is(err, deploy.ErrBusy) {
 		t.Fatalf("error = %v, want a busy application", err)
@@ -297,7 +320,13 @@ func TestConcurrentSubmissionsWithOneKeyCreateOneTask(t *testing.T) {
 	env := newHarness(t, fixedInventory{})
 	app := env.createApp("demo")
 	cfg := composeConfig("nginx:alpine")
-	request := deploy.SubmitRequest{AppID: app.ID, IdempotencyKey: "request-1", Config: cfg}
+	preview := env.preview(app, "", cfg)
+	request := deploy.SubmitRequest{
+		AppID:          app.ID,
+		IdempotencyKey: "request-1",
+		Config:         cfg,
+		PreviewDigest:  preview.Digest,
+	}
 
 	const submissions = 20
 	tasks := make([]model.Task, submissions)
@@ -348,6 +377,7 @@ func TestSubmitRollsTheVersionBackWithTheTask(t *testing.T) {
 		AppID:          app.ID,
 		IdempotencyKey: "request-1",
 		Config:         composeConfig("nginx:alpine"),
+		PreviewDigest:  env.preview(app, "", composeConfig("nginx:alpine")).Digest,
 	})
 	if err == nil {
 		t.Fatal("the deployment was accepted although the database refused the task")
@@ -380,6 +410,7 @@ func TestSubmitStoresTheConfigurationEncrypted(t *testing.T) {
 		AppID:          app.ID,
 		IdempotencyKey: "request-1",
 		Config:         cfg,
+		PreviewDigest:  env.preview(app, "", cfg).Digest,
 	}); err != nil {
 		t.Fatalf("submit the deployment: %v", err)
 	}
@@ -442,7 +473,11 @@ func TestSubmitNeedsTheConfirmationOfARemovedService(t *testing.T) {
 		t.Fatalf("tasks = %d, want 0", env.countRows("tasks"))
 	}
 
-	request.ConfirmedRemovedServices = []string{"db"}
+	request.ConfirmedRemoval = deploy.RemovalConfirmation{
+		Digest:            preview.Digest,
+		Services:          preview.RemovedServices,
+		InventoryRevision: preview.InventoryRevision,
+	}
 	if _, err := env.service.Submit(context.Background(), request); err != nil {
 		t.Fatalf("submit the confirmed deployment: %v", err)
 	}
@@ -472,12 +507,16 @@ func TestSubmitRefusesTheConfirmationOfAnotherService(t *testing.T) {
 	}
 
 	_, err = env.service.Submit(context.Background(), deploy.SubmitRequest{
-		AppID:                    app.ID,
-		IdempotencyKey:           "request-1",
-		Config:                   cfg,
-		PreviewDigest:            preview.Digest,
-		InventoryRevision:        preview.InventoryRevision,
-		ConfirmedRemovedServices: []string{"cache"},
+		AppID:             app.ID,
+		IdempotencyKey:    "request-1",
+		Config:            cfg,
+		PreviewDigest:     preview.Digest,
+		InventoryRevision: preview.InventoryRevision,
+		ConfirmedRemoval: deploy.RemovalConfirmation{
+			Digest:            preview.Digest,
+			Services:          []string{"cache"},
+			InventoryRevision: preview.InventoryRevision,
+		},
 	})
 	if !errors.Is(err, deploy.ErrConfirmationRequired) {
 		t.Fatalf("error = %v, want a confirmation", err)
@@ -509,12 +548,16 @@ func TestSubmitRefusesTheConfirmationOfAnOlderTarget(t *testing.T) {
 
 	// The confirmation of an older state of the target cannot be reused.
 	_, err = env.service.Submit(context.Background(), deploy.SubmitRequest{
-		AppID:                    app.ID,
-		IdempotencyKey:           "request-1",
-		Config:                   cfg,
-		PreviewDigest:            preview.Digest,
-		InventoryRevision:        "a-revision-of-an-older-state",
-		ConfirmedRemovedServices: []string{"db"},
+		AppID:             app.ID,
+		IdempotencyKey:    "request-1",
+		Config:            cfg,
+		PreviewDigest:     preview.Digest,
+		InventoryRevision: "a-revision-of-an-older-state",
+		ConfirmedRemoval: deploy.RemovalConfirmation{
+			Digest:            preview.Digest,
+			Services:          preview.RemovedServices,
+			InventoryRevision: preview.InventoryRevision,
+		},
 	})
 	if !errors.Is(err, deploy.ErrConflict) {
 		t.Fatalf("error = %v, want a conflict", err)
@@ -593,6 +636,7 @@ func TestSubmitOfAnOutdatedPageIsRefused(t *testing.T) {
 		AppID:          app.ID,
 		IdempotencyKey: "request-1",
 		Config:         cfg,
+		PreviewDigest:  env.preview(app, "", cfg).Digest,
 	})
 	if err != nil {
 		t.Fatalf("submit the deployment: %v", err)
@@ -601,11 +645,14 @@ func TestSubmitOfAnOutdatedPageIsRefused(t *testing.T) {
 
 	// The page was opened before the first deployment, so it names no
 	// version while the application has one now.
+	changed := composeConfig("nginx:1.27")
+	preview := env.preview(app, first.VersionID, changed)
 	_, err = env.service.Submit(context.Background(), deploy.SubmitRequest{
 		AppID:          app.ID,
 		IdempotencyKey: "request-2",
 		BaseVersionID:  "",
-		Config:         composeConfig("nginx:1.27"),
+		Config:         changed,
+		PreviewDigest:  preview.Digest,
 	})
 	if !errors.Is(err, deploy.ErrConflict) {
 		t.Fatalf("error = %v, want a conflict", err)
@@ -616,7 +663,8 @@ func TestSubmitOfAnOutdatedPageIsRefused(t *testing.T) {
 		AppID:          app.ID,
 		IdempotencyKey: "request-3",
 		BaseVersionID:  first.VersionID,
-		Config:         composeConfig("nginx:1.27"),
+		Config:         changed,
+		PreviewDigest:  preview.Digest,
 	})
 	if err != nil {
 		t.Fatalf("submit the deployment: %v", err)
@@ -763,11 +811,17 @@ func TestSubmitOfAnOfflineTargetIsRefused(t *testing.T) {
 		AppID:          app.ID,
 		IdempotencyKey: "request-1",
 		Config:         cfg,
+		PreviewDigest:  env.preview(app, "", cfg).Digest,
 	})
 	if err != nil {
 		t.Fatalf("submit the deployment: %v", err)
 	}
 	env.finishTask(task.ID)
+
+	// The administrator looks at the impact of the next deployment before
+	// the agent of the node is gone.
+	changed := composeConfig("nginx:1.27")
+	preview := env.preview(app, task.VersionID, changed)
 
 	// The agent of the node is gone.
 	source.unavailable(errors.New("the node is not connected"))
@@ -779,7 +833,8 @@ func TestSubmitOfAnOfflineTargetIsRefused(t *testing.T) {
 		AppID:          app.ID,
 		IdempotencyKey: "request-2",
 		BaseVersionID:  task.VersionID,
-		Config:         composeConfig("nginx:1.27"),
+		Config:         changed,
+		PreviewDigest:  preview.Digest,
 	}); !errors.Is(err, deploy.ErrTargetUnavailable) {
 		t.Fatalf("error = %v, want an unavailable target", err)
 	}

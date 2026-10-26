@@ -13,6 +13,23 @@ import (
 	"hmoob-dock/internal/yamlspec"
 )
 
+// RemovalConfirmation confirms the removal of the services of a preview.
+//
+// The confirmation is bound to the configuration, to the exact set of the
+// services and to the state of the target the preview was computed from.
+// A confirmation of another preview therefore never fits: the digest of the
+// configuration tells the previews apart, even when they remove the same
+// services.
+type RemovalConfirmation struct {
+	// Digest is the digest of the configuration of the preview.
+	Digest string `json:"digest"`
+	// Services are the services the administrator confirmed the removal of.
+	Services []string `json:"services"`
+	// InventoryRevision is the revision of the target the preview was
+	// computed from.
+	InventoryRevision string `json:"inventory_revision"`
+}
+
 // SubmitRequest is a request to deploy a configuration.
 type SubmitRequest struct {
 	// AppID is the application the deployment belongs to.
@@ -24,15 +41,16 @@ type SubmitRequest struct {
 	// request.
 	IdempotencyKey string `json:"idempotency_key"`
 	// PreviewDigest is the digest of the preview the administrator saw.
+	// The request has to name it: a deployment without a preview is
+	// refused, because nobody looked at the impact of the configuration.
 	PreviewDigest string `json:"preview_digest"`
 	// InventoryRevision is the revision of the target the preview was
 	// computed from.
 	InventoryRevision string `json:"inventory_revision"`
 	// Config is the configuration to deploy.
 	Config model.Config `json:"config"`
-	// ConfirmedRemovedServices are the services the administrator confirmed
-	// the removal of.
-	ConfirmedRemovedServices []string `json:"confirmed_removed_services"`
+	// ConfirmedRemoval confirms the removal of the services of the preview.
+	ConfirmedRemoval RemovalConfirmation `json:"confirmed_removal"`
 	// AcceptWarnings confirms the risky configuration.
 	AcceptWarnings bool `json:"accept_warnings"`
 }
@@ -42,6 +60,11 @@ type SubmitRequest struct {
 // The version and the task are written in one transaction and the
 // application points at the new version afterwards, so a task never refers
 // to a version that does not exist.
+//
+// The request has to name the preview the administrator saw: a deployment
+// without a preview is refused. The version the administrator edited is
+// compared inside the transaction, so a page that is out of date changes
+// nothing.
 //
 // The idempotency key of the request is unique per application. A request
 // with a known key and the same content answers with the task of the first
@@ -87,22 +110,23 @@ func (s *Service) Submit(ctx context.Context, req SubmitRequest) (model.Task, er
 		return model.Task{}, fmt.Errorf("%w: the task %s", ErrBusy, open.task.ID)
 	}
 
-	// The page of the administrator names the version it was opened with.
-	// A page that is out of date may not decide what happens on the target.
-	if req.BaseVersionID != app.LatestVersionID {
-		return model.Task{}, fmt.Errorf(
-			"%w: the base version %q is not the latest version of the application",
-			ErrConflict, req.BaseVersionID,
-		)
+	// The administrator looked at the impact of the configuration before it
+	// was deployed, so the request has to name that preview.
+	if strings.TrimSpace(req.PreviewDigest) == "" {
+		return model.Task{}, fmt.Errorf("%w: the request names no preview", ErrConflict)
 	}
 
+	// The version the administrator edited is not compared here: the
+	// comparison happens inside the transaction that writes the deployment,
+	// so a deployment that lost the race against another one changes
+	// nothing at all.
 	checked, err := yamlspec.Check(app, req.Config)
 	if err != nil {
 		return model.Task{}, err
 	}
 	// The configuration of the submission is the configuration of the
 	// preview the administrator saw.
-	if req.PreviewDigest != "" && req.PreviewDigest != checked.Digest {
+	if req.PreviewDigest != checked.Digest {
 		return model.Task{}, fmt.Errorf("%w: the configuration differs from the preview", ErrConflict)
 	}
 
@@ -110,34 +134,25 @@ func (s *Service) Submit(ctx context.Context, req SubmitRequest) (model.Task, er
 	if err != nil {
 		return model.Task{}, err
 	}
-	running := runningServices(inventory, app.Mode, app.Namespace)
+	running := s.runningServices(inventory, app.Mode, app.Namespace)
 	removed := removedServices(running, checked.Services)
 	revision, err := inventoryRevision(inventory, app.Mode, app.Namespace)
 	if err != nil {
 		return model.Task{}, err
 	}
 
-	// The confirmation of a removal is bound to the state of the target and
-	// to the exact set of the services that are removed, so a confirmation
-	// of an older state cannot be reused.
-	if len(removed) > 0 {
-		if strings.TrimSpace(req.InventoryRevision) == "" {
-			return model.Task{}, fmt.Errorf(
-				"%w: the removal of %s needs the revision of the target",
-				ErrConfirmationRequired, strings.Join(removed, ", "),
-			)
-		}
-		if req.InventoryRevision != revision {
-			return model.Task{}, fmt.Errorf("%w: the state of the target changed since the preview", ErrConflict)
-		}
-		if !sameServices(req.ConfirmedRemovedServices, removed) {
-			return model.Task{}, fmt.Errorf(
-				"%w: the removal of %s is not confirmed",
-				ErrConfirmationRequired, strings.Join(removed, ", "),
-			)
-		}
-	} else if req.InventoryRevision != "" && req.InventoryRevision != revision {
+	// The state of the target has to be the state of the preview, so a
+	// confirmation of an older state cannot be reused.
+	if req.InventoryRevision != "" && req.InventoryRevision != revision {
 		return model.Task{}, fmt.Errorf("%w: the state of the target changed since the preview", ErrConflict)
+	}
+	// The confirmation of a removal is bound to the configuration, to the
+	// exact set of the services and to the state of the target, so a
+	// confirmation of another preview cannot be reused.
+	if len(removed) > 0 {
+		if err := checkRemoval(req.ConfirmedRemoval, checked.Digest, removed, revision); err != nil {
+			return model.Task{}, err
+		}
 	}
 
 	// The risks of the configuration need an explicit confirmation, the
@@ -149,11 +164,41 @@ func (s *Service) Submit(ctx context.Context, req SubmitRequest) (model.Task, er
 	return s.store(ctx, app, req, checked, removed, digest)
 }
 
+// checkRemoval makes sure that the administrator confirmed the removal of
+// the given services.
+//
+// The confirmation has to name the configuration of the deployment and the
+// state of the target the preview was computed from. A confirmation of
+// another configuration is a conflict: the administrator confirmed another
+// impact, so the request has to be previewed again.
+func checkRemoval(confirmation RemovalConfirmation, digest string, removed []string, revision string) error {
+	if strings.TrimSpace(confirmation.Digest) == "" ||
+		strings.TrimSpace(confirmation.InventoryRevision) == "" ||
+		len(confirmation.Services) == 0 {
+		return fmt.Errorf("%w: the removal of %s is not confirmed", ErrConfirmationRequired, strings.Join(removed, ", "))
+	}
+	if confirmation.Digest != digest {
+		return fmt.Errorf("%w: the confirmation belongs to another configuration", ErrConflict)
+	}
+	if confirmation.InventoryRevision != revision {
+		return fmt.Errorf("%w: the state of the target changed since the preview", ErrConflict)
+	}
+	if !sameServices(confirmation.Services, removed) {
+		return fmt.Errorf("%w: the removal of %s is not confirmed", ErrConfirmationRequired, strings.Join(removed, ", "))
+	}
+	return nil
+}
+
 // store writes the version and the task of a deployment in one transaction.
 //
 // The transaction holds the version, the task and the reference of the
 // application together: a task that refers to a version that does not
 // exist can never come to life.
+//
+// The application points at the new version only if it still points at the
+// version the administrator edited. The comparison happens inside the
+// transaction, so a deployment that lost the race against another one
+// changes nothing at all.
 func (s *Service) store(
 	ctx context.Context,
 	app model.App,
@@ -204,9 +249,25 @@ func (s *Service) store(
 		return s.resolveRace(ctx, app.ID, req, digest)
 	}
 
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE apps SET latest_version_id = ? WHERE id = ?`, versionID, app.ID); err != nil {
+	// The application points at the new version only while it points at the
+	// version the administrator edited. A deployment whose base version is
+	// out of date changes nothing: the version and the task of the
+	// transaction disappear with it.
+	result, err := tx.ExecContext(ctx,
+		`UPDATE apps SET latest_version_id = ? WHERE id = ? AND latest_version_id = ?`,
+		versionID, app.ID, req.BaseVersionID)
+	if err != nil {
 		return model.Task{}, fmt.Errorf("deploy: point the application at the new version: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return model.Task{}, fmt.Errorf("deploy: point the application at the new version: %w", err)
+	}
+	if affected == 0 {
+		return model.Task{}, fmt.Errorf(
+			"%w: the base version %q is not the latest version of the application",
+			ErrConflict, req.BaseVersionID,
+		)
 	}
 	if err := tx.Commit(); err != nil {
 		return model.Task{}, fmt.Errorf("deploy: commit the submission: %w", err)
@@ -354,24 +415,26 @@ func (s *Service) openTask(ctx context.Context, appID string) (*taskRecord, erro
 // same content. The digest is a hash, so it never holds the value of a
 // variable.
 func requestDigest(req SubmitRequest) string {
+	confirmation := req.ConfirmedRemoval
+	confirmation.Services = sortServices(req.ConfirmedRemoval.Services)
 	payload := struct {
-		AppID                   string            `json:"app_id"`
-		BaseVersionID           string            `json:"base_version_id"`
-		PreviewDigest           string            `json:"preview_digest"`
-		InventoryRevision       string            `json:"inventory_revision"`
-		YAML                    string            `json:"yaml"`
-		Variables               map[string]string `json:"variables"`
-		ConfirmedRemovedService []string          `json:"confirmed_removed_services"`
-		AcceptWarnings          bool              `json:"accept_warnings"`
+		AppID             string              `json:"app_id"`
+		BaseVersionID     string              `json:"base_version_id"`
+		PreviewDigest     string              `json:"preview_digest"`
+		InventoryRevision string              `json:"inventory_revision"`
+		YAML              string              `json:"yaml"`
+		Variables         map[string]string   `json:"variables"`
+		ConfirmedRemoval  RemovalConfirmation `json:"confirmed_removal"`
+		AcceptWarnings    bool                `json:"accept_warnings"`
 	}{
-		AppID:                   req.AppID,
-		BaseVersionID:           req.BaseVersionID,
-		PreviewDigest:           req.PreviewDigest,
-		InventoryRevision:       req.InventoryRevision,
-		YAML:                    req.Config.YAML,
-		Variables:               req.Config.Variables,
-		ConfirmedRemovedService: sortServices(req.ConfirmedRemovedServices),
-		AcceptWarnings:          req.AcceptWarnings,
+		AppID:             req.AppID,
+		BaseVersionID:     req.BaseVersionID,
+		PreviewDigest:     req.PreviewDigest,
+		InventoryRevision: req.InventoryRevision,
+		YAML:              req.Config.YAML,
+		Variables:         req.Config.Variables,
+		ConfirmedRemoval:  confirmation,
+		AcceptWarnings:    req.AcceptWarnings,
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {

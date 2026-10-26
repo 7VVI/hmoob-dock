@@ -24,6 +24,7 @@ func TestTheHistoryHoldsNoConfiguration(t *testing.T) {
 		AppID:          app.ID,
 		IdempotencyKey: "request-1",
 		Config:         cfg,
+		PreviewDigest:  env.preview(app, "", cfg).Digest,
 	}); err != nil {
 		t.Fatalf("submit the deployment: %v", err)
 	}
@@ -55,6 +56,7 @@ func TestTheHistoryVersionHoldsTheConfiguration(t *testing.T) {
 		AppID:          app.ID,
 		IdempotencyKey: "request-1",
 		Config:         cfg,
+		PreviewDigest:  env.preview(app, "", cfg).Digest,
 	})
 	if err != nil {
 		t.Fatalf("submit the deployment: %v", err)
@@ -81,6 +83,7 @@ func TestTheVersionOfAnotherApplicationIsUnknown(t *testing.T) {
 		AppID:          app.ID,
 		IdempotencyKey: "request-1",
 		Config:         composeConfig("nginx:alpine"),
+		PreviewDigest:  env.preview(app, "", composeConfig("nginx:alpine")).Digest,
 	})
 	if err != nil {
 		t.Fatalf("submit the deployment: %v", err)
@@ -99,6 +102,7 @@ func TestTheHistoryKeepsTheContentOfAVersion(t *testing.T) {
 		AppID:          app.ID,
 		IdempotencyKey: "request-1",
 		Config:         composeConfig("nginx:alpine"),
+		PreviewDigest:  env.preview(app, "", composeConfig("nginx:alpine")).Digest,
 	})
 	if err != nil {
 		t.Fatalf("submit the deployment: %v", err)
@@ -110,6 +114,7 @@ func TestTheHistoryKeepsTheContentOfAVersion(t *testing.T) {
 		IdempotencyKey: "request-2",
 		BaseVersionID:  first.VersionID,
 		Config:         composeConfig("nginx:1.27"),
+		PreviewDigest:  env.preview(app, first.VersionID, composeConfig("nginx:1.27")).Digest,
 	}); err != nil {
 		t.Fatalf("submit the second deployment: %v", err)
 	}
@@ -135,6 +140,7 @@ func TestTheHistoryRedeployCreatesANewVersionAndANewTask(t *testing.T) {
 		AppID:          app.ID,
 		IdempotencyKey: "request-1",
 		Config:         composeConfig("nginx:alpine"),
+		PreviewDigest:  env.preview(app, "", composeConfig("nginx:alpine")).Digest,
 	})
 	if err != nil {
 		t.Fatalf("submit the deployment: %v", err)
@@ -234,6 +240,7 @@ func TestTheCommandOfATaskHoldsTheConfiguration(t *testing.T) {
 		AppID:          app.ID,
 		IdempotencyKey: "request-1",
 		Config:         cfg,
+		PreviewDigest:  env.preview(app, "", cfg).Digest,
 	})
 	if err != nil {
 		t.Fatalf("submit the deployment: %v", err)

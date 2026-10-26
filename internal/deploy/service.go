@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"hmoob-dock/internal/config"
 	"hmoob-dock/internal/model"
 	"hmoob-dock/internal/protocol"
 	"hmoob-dock/internal/secret"
@@ -107,13 +108,6 @@ const (
 	swarmServiceLabel = "com.docker.swarm.service.name"
 )
 
-// platformImagePrefix marks the images of the platform itself.
-//
-// The control端 and the agent run the images of the platform. A container
-// of such an image never belongs to a managed application: the platform
-// does not take over its own containers.
-const platformImagePrefix = "hmoob-dock-"
-
 // Service owns the applications of the control端.
 type Service struct {
 	db  *sql.DB
@@ -122,6 +116,9 @@ type Service struct {
 	inventory InventoryReader
 	// now provides the timestamps of the records.
 	now func() time.Time
+	// platformImages are the repositories of the images of the platform
+	// itself.
+	platformImages map[string]bool
 }
 
 // New builds the deployment service.
@@ -130,13 +127,33 @@ type Service struct {
 // tasks of a deployment are written in one transaction, so they need the
 // same connection. The inventory reader is the source of the state of the
 // targets; the hub of the agents implements it.
+//
+// The images of the platform itself are read from the configuration, so a
+// rename of them does not turn the containers of the platform into managed
+// resources.
 func New(db *sql.DB, box *secret.Box, inventory InventoryReader) *Service {
 	return &Service{
-		db:        db,
-		box:       box,
-		inventory: inventory,
-		now:       time.Now,
+		db:             db,
+		box:            box,
+		inventory:      inventory,
+		now:            time.Now,
+		platformImages: platformImageSet(config.PlatformImages()),
 	}
+}
+
+// platformImageSet returns the repositories of the given images.
+//
+// The images are normalized the same way the images of the containers are,
+// so an image of the list may be written with a registry, with a tag or
+// with a digest.
+func platformImageSet(images []string) map[string]bool {
+	set := make(map[string]bool, len(images))
+	for _, image := range images {
+		if repository := imageRepository(image); repository != "" {
+			set[repository] = true
+		}
+	}
+	return set
 }
 
 // CreateApp creates an application.
@@ -178,7 +195,7 @@ func (s *Service) CreateApp(ctx context.Context, app model.App, adopt bool) (mod
 	}
 	existing := namespaceContainers(inventory, app.Mode, app.Namespace)
 	for _, container := range existing {
-		if isPlatformContainer(container) {
+		if s.isPlatformContainer(container) {
 			return model.App{}, fmt.Errorf("%w: the container %s", ErrPlatformResource, container.Name)
 		}
 	}
@@ -407,8 +424,49 @@ func containerService(container protocol.Container, mode, namespace string) stri
 
 // isPlatformContainer reports whether a container belongs to the platform
 // itself.
-func isPlatformContainer(container protocol.Container) bool {
-	return strings.HasPrefix(container.Image, platformImagePrefix)
+//
+// The container is told by the repository of its image, so the image of the
+// platform is recognized with a registry, with a tag and with a digest. The
+// comparison is exact: an image of the user that starts with the name of
+// the platform is no container of the platform.
+func (s *Service) isPlatformContainer(container protocol.Container) bool {
+	return s.platformImages[imageRepository(container.Image)]
+}
+
+// imageRepository returns the repository of an image reference.
+//
+// A reference may name a registry, a tag and a digest. The registry is
+// recognized by the rule of Docker: the first part of the path names a
+// registry when it holds a dot or a colon or when it is "localhost". The
+// result is the name of the repository alone, so "hmoob-dock-control",
+// "hmoob-dock-control:local" and
+// "registry.example.com/hmoob-dock-control@sha256:..." name the same
+// repository.
+func imageRepository(image string) string {
+	reference := strings.TrimSpace(image)
+	if reference == "" {
+		return ""
+	}
+	// The digest comes last.
+	if at := strings.Index(reference, "@"); at >= 0 {
+		reference = reference[:at]
+	}
+	parts := strings.Split(reference, "/")
+	// The tag belongs to the last part of the path.
+	last := len(parts) - 1
+	if colon := strings.LastIndex(parts[last], ":"); colon >= 0 {
+		parts[last] = parts[last][:colon]
+	}
+	if len(parts) > 1 && registryHost(parts[0]) {
+		parts = parts[1:]
+	}
+	return strings.Join(parts, "/")
+}
+
+// registryHost reports whether the first part of the path of an image
+// reference names a registry.
+func registryHost(part string) bool {
+	return part == "localhost" || strings.ContainsAny(part, ".:")
 }
 
 // validNamespace reports whether a namespace may be used as the name of a

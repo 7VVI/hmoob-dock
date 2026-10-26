@@ -95,7 +95,7 @@ func scanVariables(document map[string]any, index map[string]int, variables map[
 	sort.Strings(names)
 	warnings := make([]string, 0, len(names))
 	for _, name := range names {
-		warnings = append(warnings, fmt.Sprintf("变量 %s 没有提供，将按空字符串处理", name))
+		warnings = append(warnings, fmt.Sprintf(warningVariableTemplate, name))
 	}
 	return warnings, nil
 }

@@ -600,7 +600,7 @@ func checkServiceImage(service map[string]any, name, path string, index map[stri
 	}
 	return &Error{
 		Code:    CodeInvalidConfig,
-		Message: fmt.Sprintf("服务 %s 必须指定 image", name),
+		Message: fmt.Sprintf(warningMissingImageTemplate, name),
 		Fields:  []FieldError{{Path: path, Line: index[path], Message: "服务必须指定 image"}},
 	}
 }
@@ -704,21 +704,21 @@ func collectWarnings(document map[string]any) []string {
 			continue
 		}
 		if privileged, ok := service["privileged"].(bool); ok && privileged {
-			warnings = append(warnings, fmt.Sprintf("服务 %s 以特权模式运行", name))
+			warnings = append(warnings, fmt.Sprintf(warningPrivilegedTemplate, name))
 		}
 		if pid, ok := service["pid"].(string); ok && pid == "host" {
-			warnings = append(warnings, fmt.Sprintf("服务 %s 共享宿主机的 PID 命名空间", name))
+			warnings = append(warnings, fmt.Sprintf(warningPIDTemplate, name))
 		}
 		if network, ok := service["network_mode"].(string); ok && network == "host" {
-			warnings = append(warnings, fmt.Sprintf("服务 %s 共享宿主机网络命名空间", name))
+			warnings = append(warnings, fmt.Sprintf(warningNetworkTemplate, name))
 		}
 		for _, source := range volumeSources(service) {
 			if strings.HasSuffix(source, "docker.sock") {
-				warnings = append(warnings, fmt.Sprintf("服务 %s 挂载了 Docker socket", name))
+				warnings = append(warnings, fmt.Sprintf(warningSocketTemplate, name))
 				continue
 			}
 			if sensitiveHostPath(source) {
-				warnings = append(warnings, fmt.Sprintf("服务 %s 挂载了敏感的宿主机路径 %s", name, source))
+				warnings = append(warnings, fmt.Sprintf(warningHostPathTemplate, name, source))
 			}
 		}
 	}

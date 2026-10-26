@@ -22,6 +22,35 @@ import (
 // MasterKeySize is the length of the master key file in bytes.
 const MasterKeySize = secret.KeySize
 
+// PlatformImagesEnv names the environment variable that holds the images of
+// the platform itself.
+//
+// The list is configurable, so a rename of the images of the platform does
+// not silently turn the containers of the platform into managed resources.
+const PlatformImagesEnv = "HMOOB_PLATFORM_IMAGES"
+
+// DefaultPlatformImages are the images of the platform itself.
+//
+// The control端 and the agent run these images. A container of such an image
+// never belongs to a managed application: the platform does not take over
+// its own containers.
+var DefaultPlatformImages = []string{"hmoob-dock-control", "hmoob-dock-agent"}
+
+// PlatformImages returns the images of the platform itself.
+//
+// The list is read from the environment. It names the repository of an
+// image, the way the registry writes it: "hmoob-dock-control" names the
+// image of the control端, "registry.example.com/hmoob-dock-control" names
+// the same image in a registry. An empty list falls back to the images the
+// platform ships with.
+func PlatformImages() []string {
+	images := envList(PlatformImagesEnv)
+	if len(images) == 0 {
+		return append([]string(nil), DefaultPlatformImages...)
+	}
+	return images
+}
+
 // Control holds the configuration of the control端.
 type Control struct {
 	// DBPath is the SQLite database file.

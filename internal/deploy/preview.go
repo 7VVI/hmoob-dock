@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"hmoob-dock/internal/model"
 	"hmoob-dock/internal/protocol"
@@ -27,40 +26,33 @@ type Preview struct {
 	InventoryRevision string `json:"inventory_revision"`
 }
 
-// The classes of the warnings of a configuration.
+// RemovalConfirmation returns the confirmation of the removal of the
+// preview.
 //
-// The warnings of yamlspec carry two different kinds of notice: a risk of
-// the configuration that the administrator has to confirm and a variable
-// that was not provided. The two are told apart by their prefix, so a
-// variable that was left empty does not open a confirmation dialog.
-const (
-	// VariableWarningPrefix marks the warnings of the variables that were
-	// not provided. yamlspec writes them as
-	// "变量 X 没有提供，将按空字符串处理".
-	VariableWarningPrefix = "变量 "
-
-	// RiskWarningPrefix marks the warnings of a risky configuration.
-	// yamlspec writes them as "服务 X ...".
-	RiskWarningPrefix = "服务 "
-)
+// The confirmation names the configuration of the preview, the services the
+// deployment removes and the state of the target the preview was computed
+// from. A deployment sends it back, so the server can tell whether the
+// administrator confirmed this very impact.
+func (p Preview) RemovalConfirmation() RemovalConfirmation {
+	return RemovalConfirmation{
+		Digest:            p.Digest,
+		Services:          p.RemovedServices,
+		InventoryRevision: p.InventoryRevision,
+	}
+}
 
 // IsRiskWarning reports whether a warning describes a risk that the
 // administrator has to confirm.
 //
-// The notice of a variable that was not provided is not a risk: the value
-// becomes an empty string, and the administrator confirms the risks of a
-// configuration, not the values of its variables. Every other warning is a
-// risk, so a warning the platform does not know yet asks for a
-// confirmation as well.
+// The kind of a warning belongs to the platform that writes it, so the
+// deploy package asks the yamlspec package instead of guessing by the text
+// of the warning. The notice of a variable that was not provided is no
+// risk: the value becomes an empty string, and the administrator confirms
+// the risks of a configuration, not the values of its variables. A warning
+// the platform does not know is a risk, so a risk that is not described
+// yet asks for a confirmation as well.
 func IsRiskWarning(warning string) bool {
-	switch {
-	case strings.HasPrefix(warning, VariableWarningPrefix):
-		return false
-	case strings.HasPrefix(warning, RiskWarningPrefix):
-		return true
-	default:
-		return true
-	}
+	return yamlspec.WarningKindOf(warning) == yamlspec.WarningRisk
 }
 
 // RiskWarnings returns the warnings of a configuration that the
@@ -104,7 +96,7 @@ func (s *Service) Preview(ctx context.Context, appID, baseVersionID string, cfg 
 	if err != nil {
 		return Preview{}, err
 	}
-	running := runningServices(inventory, app.Mode, app.Namespace)
+	running := s.runningServices(inventory, app.Mode, app.Namespace)
 	revision, err := inventoryRevision(inventory, app.Mode, app.Namespace)
 	if err != nil {
 		return Preview{}, err
@@ -123,11 +115,11 @@ func (s *Service) Preview(ctx context.Context, appID, baseVersionID string, cfg 
 //
 // The containers of the platform itself are left out: they never belong to
 // a managed application, so they are never removed by a deployment.
-func runningServices(inventory protocol.Inventory, mode, namespace string) []string {
+func (s *Service) runningServices(inventory protocol.Inventory, mode, namespace string) []string {
 	seen := make(map[string]bool)
 	var names []string
 	for _, container := range namespaceContainers(inventory, mode, namespace) {
-		if isPlatformContainer(container) {
+		if s.isPlatformContainer(container) {
 			continue
 		}
 		service := containerService(container, mode, namespace)

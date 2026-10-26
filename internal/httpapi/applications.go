@@ -246,13 +246,13 @@ func (s *Server) handleApplicationDeploy(w http.ResponseWriter, r *http.Request)
 	}
 
 	var body struct {
-		IdempotencyKey           string       `json:"idempotency_key"`
-		BaseVersionID            string       `json:"base_version_id"`
-		PreviewDigest            string       `json:"preview_digest"`
-		InventoryRevision        string       `json:"inventory_revision"`
-		Config                   model.Config `json:"config"`
-		ConfirmedRemovedServices []string     `json:"confirmed_removed_services"`
-		AcceptWarnings           bool         `json:"accept_warnings"`
+		IdempotencyKey    string                     `json:"idempotency_key"`
+		BaseVersionID     string                     `json:"base_version_id"`
+		PreviewDigest     string                     `json:"preview_digest"`
+		InventoryRevision string                     `json:"inventory_revision"`
+		Config            model.Config               `json:"config"`
+		ConfirmedRemoval  deploy.RemovalConfirmation `json:"confirmed_removal"`
+		AcceptWarnings    bool                       `json:"accept_warnings"`
 	}
 	if err := decodeDeploymentRequest(w, r, &body); err != nil {
 		writeDeploymentRequestError(w, err)
@@ -261,14 +261,14 @@ func (s *Server) handleApplicationDeploy(w http.ResponseWriter, r *http.Request)
 
 	appID := strings.TrimSpace(r.PathValue("id"))
 	task, err := s.apps.Submit(r.Context(), deploy.SubmitRequest{
-		AppID:                    appID,
-		BaseVersionID:            body.BaseVersionID,
-		IdempotencyKey:           body.IdempotencyKey,
-		PreviewDigest:            body.PreviewDigest,
-		InventoryRevision:        body.InventoryRevision,
-		Config:                   body.Config,
-		ConfirmedRemovedServices: body.ConfirmedRemovedServices,
-		AcceptWarnings:           body.AcceptWarnings,
+		AppID:             appID,
+		BaseVersionID:     body.BaseVersionID,
+		IdempotencyKey:    body.IdempotencyKey,
+		PreviewDigest:     body.PreviewDigest,
+		InventoryRevision: body.InventoryRevision,
+		Config:            body.Config,
+		ConfirmedRemoval:  body.ConfirmedRemoval,
+		AcceptWarnings:    body.AcceptWarnings,
 	})
 	if err != nil {
 		writeDeployError(w, err)

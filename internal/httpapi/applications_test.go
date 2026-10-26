@@ -155,10 +155,17 @@ func (s *authServer) finishDeployment(t *testing.T, taskID string) {
 func (s *authServer) previewDeployment(t *testing.T, csrf, appID, baseVersionID string) map[string]any {
 	t.Helper()
 
+	return s.previewDocument(t, csrf, appID, baseVersionID, deploymentYAML)
+}
+
+// previewDocument asks the control端 for the impact of a document.
+func (s *authServer) previewDocument(t *testing.T, csrf, appID, baseVersionID, document string) map[string]any {
+	t.Helper()
+
 	response := s.post("/api/v1/applications/"+appID+"/preview", map[string]any{
 		"base_version_id": baseVersionID,
 		"config": map[string]any{
-			"yaml":      deploymentYAML,
+			"yaml":      document,
 			"variables": map[string]string{},
 		},
 	}, withHeader("X-CSRF-Token", csrf))
@@ -408,14 +415,50 @@ func TestAnOutdatedPageAnswersAConflict(t *testing.T) {
 		t.Fatalf("the deployment returned %d, want %d", response.StatusCode, http.StatusCreated)
 	}
 	taskID, _ := task["id"].(string)
+	versionID, _ := task["version_id"].(string)
 	server.finishDeployment(t, taskID)
 
 	// The page was opened before the deployment, so it names no version.
+	// The administrator looks at the impact of the new configuration on the
+	// version the application has now.
+	changed := "services:\n  api:\n    image: nginx:1.27\n"
+	current := server.previewDocument(t, csrf, appID, versionID, changed)
+
 	response = server.post("/api/v1/applications/"+appID+"/deployments", map[string]any{
-		"idempotency_key": "request-2",
-		"base_version_id": "",
+		"idempotency_key":    "request-2",
+		"base_version_id":    "",
+		"preview_digest":     current["digest"],
+		"inventory_revision": current["inventory_revision"],
 		"config": map[string]any{
-			"yaml":      "services:\n  api:\n    image: nginx:1.27\n",
+			"yaml":      changed,
+			"variables": map[string]string{},
+		},
+	}, withHeader("X-CSRF-Token", csrf))
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusConflict)
+	}
+	payload := server.decode(response)
+	if payload["code"] != "conflict" {
+		t.Fatalf("error code = %v, want conflict", payload["code"])
+	}
+}
+
+func TestADeploymentWithoutAPreviewAnswersAConflict(t *testing.T) {
+	server := newAuthServer(t)
+	server.initialize()
+	csrf := server.login()
+	nodeID := server.connectAgent(t, csrf, nil)
+
+	application := server.createApplication(t, csrf, nodeID)
+	appID, _ := application["id"].(string)
+
+	// Nobody looked at the impact of the configuration, so the deployment
+	// is refused.
+	response := server.post("/api/v1/applications/"+appID+"/deployments", map[string]any{
+		"idempotency_key": "request-1",
+		"config": map[string]any{
+			"yaml":      deploymentYAML,
 			"variables": map[string]string{},
 		},
 	}, withHeader("X-CSRF-Token", csrf))
@@ -469,6 +512,81 @@ func TestTheRemovalOfAServiceNeedsAConfirmation(t *testing.T) {
 	payload := server.decode(response)
 	if payload["code"] != "confirmation_required" {
 		t.Fatalf("error code = %v, want confirmation_required", payload["code"])
+	}
+
+	// The confirmation names the configuration, the services and the state
+	// of the target, so the deployment goes through.
+	response = server.post("/api/v1/applications/"+appID+"/deployments", map[string]any{
+		"idempotency_key":    "request-2",
+		"preview_digest":     digest,
+		"inventory_revision": revision,
+		"confirmed_removal": map[string]any{
+			"digest":             digest,
+			"services":           removed,
+			"inventory_revision": revision,
+		},
+		"config": map[string]any{
+			"yaml":      deploymentYAML,
+			"variables": map[string]string{},
+		},
+	}, withHeader("X-CSRF-Token", csrf))
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusCreated)
+	}
+}
+
+func TestTheConfirmationOfAnotherConfigurationAnswersAConflict(t *testing.T) {
+	server := newAuthServer(t)
+	server.initialize()
+	csrf := server.login()
+	nodeID := server.connectAgent(t, csrf, []protocol.Container{{
+		ID:    "container-db",
+		Name:  "demo-db-1",
+		Image: "postgres:16",
+		Labels: map[string]string{
+			"com.docker.compose.project": "demo",
+			"com.docker.compose.service": "db",
+		},
+	}})
+
+	application := server.createAdoptedApplication(t, csrf, nodeID)
+	appID, _ := application["id"].(string)
+
+	// The administrator looks at the impact of the first configuration.
+	first := server.previewDeployment(t, csrf, appID, "")
+	removed, _ := first["removed_services"].([]any)
+	if len(removed) != 1 {
+		t.Fatalf("removed services = %v, want the service db", first["removed_services"])
+	}
+
+	// The configuration changes, but the removed service is the same.
+	changed := "services:\n  api:\n    image: nginx:1.27\n"
+	second := server.previewDocument(t, csrf, appID, "", changed)
+
+	// The confirmation of the first preview does not fit the second
+	// configuration.
+	response := server.post("/api/v1/applications/"+appID+"/deployments", map[string]any{
+		"idempotency_key":    "request-1",
+		"preview_digest":     second["digest"],
+		"inventory_revision": second["inventory_revision"],
+		"confirmed_removal": map[string]any{
+			"digest":             first["digest"],
+			"services":           removed,
+			"inventory_revision": first["inventory_revision"],
+		},
+		"config": map[string]any{
+			"yaml":      changed,
+			"variables": map[string]string{},
+		},
+	}, withHeader("X-CSRF-Token", csrf))
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusConflict)
+	}
+	payload := server.decode(response)
+	if payload["code"] != "conflict" {
+		t.Fatalf("error code = %v, want conflict", payload["code"])
 	}
 }
 

@@ -197,7 +197,7 @@ func checkSwarmResources(document map[string]any, services map[string]any, names
 			for _, reference := range references {
 				if !declared[kind][reference] {
 					return unsupportedField("services."+name+"."+kind, index,
-						fmt.Sprintf("服务 %s 引用了未声明的 %s %s", name, kind, reference))
+						fmt.Sprintf(warningUndeclaredTemplate, name, kind, reference))
 				}
 			}
 		}
