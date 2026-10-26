@@ -255,3 +255,34 @@ func TestOpenFailsForUnusablePath(t *testing.T) {
 		t.Fatal("Open succeeded for a database inside a missing directory")
 	}
 }
+
+// TestMigrateRefusesTwoMigrationsWithTheSameVersion proves that two
+// migrations with the same version number are an error and not a migration
+// that is silently skipped.
+func TestMigrateRefusesTwoMigrationsWithTheSameVersion(t *testing.T) {
+	db := openTestDB(t)
+
+	fsys := fstest.MapFS{
+		"901_first.sql":  &fstest.MapFile{Data: []byte("CREATE TABLE first_table (id TEXT PRIMARY KEY);\n")},
+		"901_second.sql": &fstest.MapFile{Data: []byte("CREATE TABLE second_table (id TEXT PRIMARY KEY);\n")},
+	}
+	err := migrate(db, fsys)
+	if err == nil {
+		t.Fatal("migrate accepted two migrations with the same version number")
+	}
+	if !strings.Contains(err.Error(), "901") {
+		t.Fatalf("the error = %q, want the version number", err)
+	}
+
+	// The refusal happens before any migration runs, so the schema of the
+	// database does not hold the table of the first migration.
+	var name string
+	query := db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'first_table'`)
+	scanErr := query.Scan(&name)
+	if scanErr == nil {
+		t.Fatal("a migration ran even though the version numbers were not unique")
+	}
+	if scanErr != sql.ErrNoRows {
+		t.Fatalf("unexpected error while inspecting the schema: %v", scanErr)
+	}
+}

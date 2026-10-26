@@ -14,11 +14,23 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/system"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
 
 	"hmoob-dock/internal/protocol"
+)
+
+// The labels Compose puts on the resources of a project.
+//
+// The label of the project names the resources of the application, and the
+// label of the service names the container of a service of it.
+const (
+	// ComposeProjectLabel is the label of the project of Compose.
+	ComposeProjectLabel = "com.docker.compose.project"
+	// ComposeServiceLabel is the label of the service of Compose.
+	ComposeServiceLabel = "com.docker.compose.service"
 )
 
 // Local reads the state of the local Docker engine.
@@ -119,6 +131,60 @@ func (l *Local) Inventory(ctx context.Context) (protocol.Inventory, error) {
 	}, nil
 }
 
+// Host returns the address of the Docker engine the client talks to.
+//
+// The address belongs to the command line of Docker as well: the command
+// line has to reach the same engine as the client of the node.
+func (l *Local) Host() string {
+	return l.client.DaemonHost()
+}
+
+// ContainerMounts returns the mounts of a container.
+//
+// The mounts of the container of the agent itself prove that the work root
+// of the agent is the same path on the host as it is in the container.
+func (l *Local) ContainerMounts(ctx context.Context, id string) ([]Mount, error) {
+	details, err := l.client.ContainerInspect(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("dockerops: inspect the container %s: %w", id, err)
+	}
+	mounts := make([]Mount, 0, len(details.Mounts))
+	for _, mount := range details.Mounts {
+		mounts = append(mounts, Mount{
+			Type:        string(mount.Type),
+			Source:      mount.Source,
+			Destination: mount.Destination,
+		})
+	}
+	return mounts, nil
+}
+
+// ProjectContainers returns the containers of a Compose project.
+//
+// The containers are selected by the label of the project, so a container of
+// another project is never part of the answer.
+func (l *Local) ProjectContainers(ctx context.Context, namespace string) ([]protocol.Container, error) {
+	filter := filters.NewArgs(filters.Arg("label", ComposeProjectLabel+"="+namespace))
+	listed, err := l.client.ContainerList(ctx, container.ListOptions{All: true, Filters: filter})
+	if err != nil {
+		return nil, fmt.Errorf("dockerops: list the containers of the project %s: %w", namespace, err)
+	}
+
+	containers := make([]protocol.Container, 0, len(listed))
+	for _, summary := range listed {
+		details, err := l.client.ContainerInspect(ctx, summary.ID)
+		if err != nil {
+			if errdefs.IsNotFound(err) {
+				// The container was removed while the list was read.
+				continue
+			}
+			return nil, fmt.Errorf("dockerops: inspect the container %s: %w", summary.ID, err)
+		}
+		containers = append(containers, containerOf(summary, details))
+	}
+	return containers, nil
+}
+
 // identityOf turns the info of the engine into the identity of a node.
 func identityOf(info system.Info) protocol.NodeIdentity {
 	identity := protocol.NodeIdentity{
@@ -158,6 +224,8 @@ func containerOf(summary container.Summary, details container.InspectResponse) p
 	state := summary.State
 	labels := map[string]string{}
 	health := ""
+	restarts := 0
+	var exitCode *int
 	if details.Config != nil {
 		if details.Config.Image != "" {
 			image = details.Config.Image
@@ -171,14 +239,26 @@ func containerOf(summary container.Summary, details container.InspectResponse) p
 		if details.State.Health != nil {
 			health = details.State.Health.Status
 		}
+		if state == "exited" || state == "dead" {
+			// The exit code only means something when the container
+			// ended.
+			code := details.State.ExitCode
+			exitCode = &code
+		}
+	}
+	if details.ContainerJSONBase != nil {
+		restarts = details.RestartCount
 	}
 
 	return protocol.Container{
-		ID:     summary.ID,
-		Name:   name,
-		Image:  image,
-		State:  state,
-		Health: health,
-		Labels: labels,
+		ID:           summary.ID,
+		Name:         name,
+		Image:        image,
+		State:        state,
+		Health:       health,
+		Labels:       labels,
+		Service:      labels[ComposeServiceLabel],
+		ExitCode:     exitCode,
+		RestartCount: restarts,
 	}
 }

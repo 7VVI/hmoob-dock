@@ -46,6 +46,14 @@ type Container struct {
 	Health string `json:"health,omitempty"`
 	// Labels are the labels of the container.
 	Labels map[string]string `json:"labels,omitempty"`
+	// Service is the name of the Compose service the container belongs to.
+	// It is empty when the container does not belong to a Compose project.
+	Service string `json:"service,omitempty"`
+	// ExitCode is the exit code of a container that ended. It is empty
+	// while the container runs.
+	ExitCode *int `json:"exit_code,omitempty"`
+	// RestartCount is the number of times the container was restarted.
+	RestartCount int `json:"restart_count,omitempty"`
 }
 
 // Inventory is the state of a node at a point in time.

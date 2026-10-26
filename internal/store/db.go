@@ -48,6 +48,13 @@ func Open(path string) (*sql.DB, error) {
 	}
 	// A single connection serializes the writes and removes any chance of
 	// a write transaction deadlocking against another one.
+	//
+	// The pool holds one connection only, so a query that walks a row set
+	// must not run another query on this pool before it closed its rows:
+	// the second query would wait for the connection the first one holds,
+	// and the first one waits for the rows to be read. A query that needs
+	// rows of another query reads them before it starts and holds them in
+	// memory.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)
@@ -131,6 +138,9 @@ func migrate(db *sql.DB, fsys fs.FS) error {
 	if err != nil {
 		return err
 	}
+	if err := checkVersions(migrations); err != nil {
+		return err
+	}
 	for _, m := range migrations {
 		if applied[m.version] {
 			continue
@@ -138,6 +148,26 @@ func migrate(db *sql.DB, fsys fs.FS) error {
 		if err := applyMigration(db, m); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// checkVersions reports two migrations that carry the same version number.
+//
+// The version number is the key of the table of the applied migrations, so
+// the second migration of a number would be skipped without a word and its
+// schema would never reach the database. The refusal is explicit, so the
+// mistake is found when the platform starts and not when a table is missing.
+func checkVersions(migrations []migration) error {
+	names := make(map[int]string, len(migrations))
+	for _, m := range migrations {
+		name, ok := names[m.version]
+		if ok {
+			return fmt.Errorf(
+				"store: the migrations %s and %s carry the same version number %d",
+				name, m.name, m.version)
+		}
+		names[m.version] = m.name
 	}
 	return nil
 }
