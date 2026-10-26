@@ -36,10 +36,10 @@ const (
 // CheckComposeReadiness reports whether the services of an application
 // reached the expected state.
 //
-// The check reads the actual state of the containers: every expected service
-// needs a container, a service that runs forever has to run, a service with
-// a health check has to be healthy, and a service that runs once has to have
-// ended with the exit code 0.
+// The check reads the actual state of the containers: a service without a
+// container is not ready yet, a service that runs forever has to run, a
+// service with a health check has to be healthy, and a service that runs
+// once has to have ended with the exit code 0.
 //
 // A service without a health check is only reported as running: the platform
 // never claims that a service is healthy when nothing checks it.
@@ -64,8 +64,15 @@ func CheckComposeReadiness(expected []string, oneShot []string, containers []pro
 	for _, name := range expected {
 		list := byService[name]
 		if len(list) == 0 {
-			failure = CodeComposeFailed
+			// Compose creates the container of a service after the services
+			// it depends on are healthy, even in a detached project. A
+			// service without a container is therefore not a failure yet:
+			// the executor waits for it and gives up when the deadline of
+			// the task is over.
 			messages = append(messages, fmt.Sprintf("服务 %s 没有容器", name))
+			if failure == "" {
+				failure = CodeComposeNotReady
+			}
 			continue
 		}
 		for _, item := range list {

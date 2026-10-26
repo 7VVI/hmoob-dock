@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -50,6 +52,9 @@ const (
 	// The daemon may still work on the change, so the outcome of the task
 	// cannot be proven.
 	CodeExecutionUncertain = "execution_uncertain"
+	// CodeMappingAsserted marks a deployment that ran on a node whose work
+	// root was asserted and not proven.
+	CodeMappingAsserted = "mapping_asserted"
 )
 
 // namespacePattern matches the names of the projects of Compose.
@@ -190,12 +195,25 @@ func (c *Compose) Execute(ctx context.Context, cmd model.Command, output io.Writ
 	// changes: the relative path of a configuration is resolved against the
 	// directory of the application, and the directory of the host has to be
 	// the one the agent works in.
-	if err := c.proveMapping(ctx); err != nil {
+	proof, err := c.proveMapping(ctx)
+	if err != nil {
 		return model.Result{
 			State:   model.Failed,
 			Code:    CodePreflightFailed,
 			Message: err.Error(),
 		}, nil
+	}
+	if proof.asserted {
+		// The mapping of the work root is only asserted and not proven, so
+		// the place of the host a relative bind points at is unknown. The
+		// configuration is refused before a single command runs.
+		if err := CheckRelativeBinds(checked.RenderedYAML); err != nil {
+			return model.Result{
+				State:   model.Failed,
+				Code:    CodePreflightFailed,
+				Message: err.Error() + "；工作目录的路径映射只有断言，没有自证，不能使用相对绑定",
+			}, nil
+		}
 	}
 
 	workspace, err := PrepareWorkspace(c.root, cmd.App.ID)
@@ -221,9 +239,11 @@ func (c *Compose) Execute(ctx context.Context, cmd model.Command, output io.Writ
 		}, nil
 	}
 
-	// The removals are checked against the configuration of this run: a
-	// service that the configuration still holds is never removed.
-	removeOrphans, err := removalsConfirmed(cmd, checked)
+	// The removals are checked against the configuration of this run and
+	// against the containers of the project: a service that the
+	// configuration still holds is never removed, and a container that
+	// nobody confirmed is never removed either.
+	removeOrphans, err := c.removalsConfirmed(ctx, cmd, checked)
 	if err != nil {
 		return model.Result{
 			State:   model.Failed,
@@ -238,12 +258,12 @@ func (c *Compose) Execute(ctx context.Context, cmd model.Command, output io.Writ
 	// The Docker CLI validates the configuration itself before anything is
 	// pulled or started.
 	if err := c.run(execution, cmd.App.Namespace, workspace, ActionConfig, false, output); err != nil {
-		return failureOf(execution, CodeConfigInvalid, "Compose 配置校验未通过", err), nil
+		return mappingTrace(failureOf(execution, CodeConfigInvalid, "Compose 配置校验未通过", err), proof), nil
 	}
 	// The images are pulled before the project starts: an image that cannot
 	// be pulled is found before the containers of the application change.
 	if err := c.run(execution, cmd.App.Namespace, workspace, ActionPull, false, output); err != nil {
-		return failureOf(execution, CodePullFailed, "镜像拉取失败", err), nil
+		return mappingTrace(failureOf(execution, CodePullFailed, "镜像拉取失败", err), proof), nil
 	}
 	startErr := c.run(execution, cmd.App.Namespace, workspace, ActionUp, removeOrphans, output)
 
@@ -253,11 +273,11 @@ func (c *Compose) Execute(ctx context.Context, cmd model.Command, output io.Writ
 	result := c.verify(ctx, cmd, checked)
 	if startErr != nil {
 		if interrupted(execution, startErr) {
-			return model.Result{
+			return mappingTrace(model.Result{
 				State:   model.Uncertain,
 				Code:    CodeExecutionUncertain,
 				Message: "命令没有在期限内结束，目标可能仍在变更",
-			}, nil
+			}, proof), nil
 		}
 		result.State = model.Failed
 		result.Code = CodeUpFailed
@@ -266,26 +286,86 @@ func (c *Compose) Execute(ctx context.Context, cmd model.Command, output io.Writ
 		// application may be in a mixed state. The platform never stops the
 		// project to undo the change: the update is not a transaction.
 		result.PartialUpdate = true
-		return result, nil
+		return mappingTrace(result, proof), nil
 	}
 	if result.State != model.Succeeded {
 		// The project started, so the target changed even when a service of
 		// it did not reach the expected state.
 		result.PartialUpdate = true
 	}
-	return result, nil
+	return mappingTrace(result, proof), nil
+}
+
+// mappingProof is the proof of the mapping of the work root of the agent.
+type mappingProof struct {
+	// asserted reports that the operator of the node asserted the mapping
+	// instead of proving it.
+	asserted bool
+	// hostPath is the path of the work root on the host as the operator
+	// stated it.
+	hostPath string
+}
+
+// mappingTrace writes the assertion of the operator of the node into the
+// outcome of the deployment.
+//
+// The deployment ran on a work root whose mapping was asserted and not
+// proven, so the outcome carries a code of its own: the history of the
+// deployments and the audit show that the mapping of this deployment was
+// never proven. A failed deployment keeps the code of its failure, the note
+// names the assertion anyway.
+func mappingTrace(result model.Result, proof mappingProof) model.Result {
+	if !proof.asserted {
+		return result
+	}
+	note := fmt.Sprintf("工作目录的路径映射由节点运维方断言（宿主机路径 %s），没有自证", proof.hostPath)
+	if result.Message == "" {
+		result.Message = note
+	} else {
+		result.Message = result.Message + "；" + note
+	}
+	if result.State == model.Succeeded {
+		result.Code = CodeMappingAsserted
+	}
+	return result
 }
 
 // proveMapping proves that the work root of the agent is the same path on
 // the host as it is in the container of the agent.
-func (c *Compose) proveMapping(ctx context.Context) error {
-	if strings.TrimSpace(os.Getenv(MappingEnv)) == MappingAsserted {
-		// The operator of the node asserts the mapping. The assertion is
-		// the decision of the operator and not of the administrator of the
-		// platform.
-		return nil
+//
+// The proof reads the mounts of the container of the agent. When the agent
+// does not run in a container there is no container to inspect, so the
+// operator of the node may assert the mapping instead. The assertion has to
+// name the path of the work root on the host, and it is only accepted when
+// the agent really runs outside of a container: an agent in a container has
+// to prove the mapping by itself.
+func (c *Compose) proveMapping(ctx context.Context) (mappingProof, error) {
+	assertion, asserted, err := ParseMappingAssertion(os.Getenv(MappingEnv))
+	if err != nil {
+		return mappingProof{}, err
 	}
-	return ProveMapping(ctx, c.engine, SelfContainerID(), c.root)
+	if !asserted {
+		if err := ProveMapping(ctx, c.engine, SelfContainerID(), c.root); err != nil {
+			return mappingProof{}, err
+		}
+		return mappingProof{}, nil
+	}
+
+	// The assertion has to name the path the agent works in. An assertion
+	// about another path proves nothing.
+	if !samePath(filepath.Clean(assertion.HostPath), filepath.Clean(c.root)) {
+		return mappingProof{}, fmt.Errorf(
+			"dockerops: 断言的路径 %q 与工作目录 %q 不一致，变更操作已禁用",
+			assertion.HostPath, c.root)
+	}
+	// An agent that runs in a container can inspect itself, so it proves
+	// the mapping by itself. The assertion is only for the nodes whose
+	// agent runs outside of a container.
+	if SelfContainerID() != "" {
+		return mappingProof{}, errors.New(
+			"dockerops: Agent 在容器内必须自证映射，不能用断言，变更操作已禁用")
+	}
+	return mappingProof{asserted: true, hostPath: assertion.HostPath}, nil
 }
 
 // run runs one command of the Docker CLI.
@@ -396,14 +476,27 @@ func interrupted(ctx context.Context, err error) bool {
 // A service is only removed when the administrator confirmed the removal,
 // and the confirmation is checked against the configuration of this run: a
 // service that the configuration still holds is never removed.
-func removalsConfirmed(cmd model.Command, checked model.CheckedConfig) (bool, error) {
+//
+// The scope of the removal is checked against the containers of the project.
+// The Docker CLI removes every container of the project that the new
+// configuration does not hold, so the orphans of the project have to be
+// exactly the services the administrator confirmed. An orphan that nobody
+// confirmed -- the remains of a failed deployment, a container that was
+// started by hand with the label of the project or a replica of a scaled
+// service -- would be deleted without a word, so the deployment is refused
+// before a single command runs.
+func (c *Compose) removalsConfirmed(ctx context.Context, cmd model.Command, checked model.CheckedConfig) (bool, error) {
 	if len(cmd.RemovedServices) == 0 {
+		// Nothing was confirmed, so nothing is removed: the command line of
+		// Compose does not ask for the removal of the orphans and the
+		// containers of the project stay where they are.
 		return false, nil
 	}
 	current := make(map[string]bool, len(checked.Services))
 	for _, name := range checked.Services {
 		current[name] = true
 	}
+	confirmed := make(map[string]bool, len(cmd.RemovedServices))
 	for _, name := range cmd.RemovedServices {
 		if !servicePattern.MatchString(name) {
 			return false, fmt.Errorf("dockerops: 被删除的服务名 %q 不合法", name)
@@ -411,8 +504,104 @@ func removalsConfirmed(cmd model.Command, checked model.CheckedConfig) (bool, er
 		if current[name] {
 			return false, fmt.Errorf("dockerops: 服务 %q 仍在本次配置中，不能删除", name)
 		}
+		confirmed[name] = true
+	}
+
+	orphans, err := c.orphanServices(ctx, cmd.App.Namespace, checked.Services)
+	if err != nil {
+		return false, err
+	}
+	if err := sameRemovals(orphans, confirmed); err != nil {
+		return false, err
 	}
 	return true, nil
+}
+
+// orphanServices returns the services of the project that the configuration
+// of this run does not hold.
+//
+// The containers are the ones that carry the label of the project, and the
+// service of a container is named by the label of the service, so both sides
+// speak about the names of the services of Compose.
+func (c *Compose) orphanServices(ctx context.Context, namespace string, services []string) ([]string, error) {
+	containers, err := c.engine.ProjectContainers(ctx, namespace)
+	if err != nil {
+		return nil, fmt.Errorf("dockerops: 读取项目 %s 的容器失败: %w", namespace, err)
+	}
+	current := make(map[string]bool, len(services))
+	for _, name := range services {
+		current[name] = true
+	}
+	seen := map[string]bool{}
+	var orphans []string
+	for _, item := range containers {
+		if current[item.Service] || seen[item.Service] {
+			continue
+		}
+		seen[item.Service] = true
+		orphans = append(orphans, item.Service)
+	}
+	sort.Strings(orphans)
+	return orphans, nil
+}
+
+// sameRemovals compares the orphans of the project with the removals the
+// administrator confirmed.
+//
+// The comparison does not care about the order of the two sets, but the two
+// sets have to be the same: an orphan that nobody confirmed and a confirmed
+// service without a container are both a mismatch.
+func sameRemovals(orphans []string, confirmed map[string]bool) error {
+	orphanSet := make(map[string]bool, len(orphans))
+	for _, name := range orphans {
+		orphanSet[name] = true
+	}
+
+	var unconfirmed []string
+	for _, name := range orphans {
+		if !confirmed[name] {
+			unconfirmed = append(unconfirmed, name)
+		}
+	}
+	var missing []string
+	for name := range confirmed {
+		if !orphanSet[name] {
+			missing = append(missing, name)
+		}
+	}
+	sort.Strings(missing)
+
+	switch {
+	case len(unconfirmed) > 0 && len(missing) > 0:
+		return fmt.Errorf(
+			"dockerops: 项目的孤儿服务 %s 没有经过确认，已确认的删除服务 %s 在项目里没有容器，拒绝删除",
+			namesOf(unconfirmed), namesOf(missing))
+	case len(unconfirmed) > 0:
+		return fmt.Errorf(
+			"dockerops: 项目的孤儿服务 %s 没有经过确认，拒绝删除",
+			namesOf(unconfirmed))
+	case len(missing) > 0:
+		return fmt.Errorf(
+			"dockerops: 已确认的删除服务 %s 在项目里没有容器，拒绝删除",
+			namesOf(missing))
+	}
+	return nil
+}
+
+// namesOf formats the names of the services for a message.
+//
+// A container of the project that belongs to no service has no name, so it
+// is told apart from a service of the configuration.
+func namesOf(names []string) string {
+	formatted := make([]string, 0, len(names))
+	for _, name := range names {
+		if name == "" {
+			formatted = append(formatted, "(没有服务名的容器)")
+			continue
+		}
+		formatted = append(formatted, name)
+	}
+	return strings.Join(formatted, ", ")
 }
 
 // configErrorCode returns the code of a failed check.

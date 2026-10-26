@@ -11,6 +11,10 @@ import (
 
 // TestTheReadinessCheckNeedsEveryService proves that a service of the
 // configuration without a container keeps the deployment from being ready.
+//
+// The service is not a failure yet: Compose creates the container of a
+// service after the services it depends on are healthy, so the executor
+// waits for it.
 func TestTheReadinessCheckNeedsEveryService(t *testing.T) {
 	result := dockerops.CheckComposeReadiness(
 		[]string{"api", "worker"},
@@ -19,6 +23,9 @@ func TestTheReadinessCheckNeedsEveryService(t *testing.T) {
 	)
 	if result.State != model.Failed {
 		t.Fatalf("the state = %q, want %q", result.State, model.Failed)
+	}
+	if result.Code != dockerops.CodeComposeNotReady {
+		t.Fatalf("the code = %q, want %q", result.Code, dockerops.CodeComposeNotReady)
 	}
 	if !strings.Contains(result.Message, "worker") {
 		t.Fatalf("the message = %q, want the missing service", result.Message)

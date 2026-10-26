@@ -57,16 +57,17 @@ func TestComposeDeployment(t *testing.T) {
 	// path is named here.
 	program := dockerProgram(t)
 	t.Setenv(dockerops.DockerProgramEnv, program)
-	// The agent of the test does not run in a container, so there is no
-	// container of the agent to inspect. The operator of the test asserts
-	// that the work root is the same path on the host as it is in the
-	// container of the agent.
-	t.Setenv(dockerops.MappingEnv, dockerops.MappingAsserted)
 
 	suffix := randomSuffix(t)
 	namespace := "hmoobtest" + suffix
 	appID := "apptest" + suffix
 	root := t.TempDir()
+	// The agent of the test does not run in a container, so there is no
+	// container of the agent to inspect. The operator of the test asserts
+	// that the work root is the same path on the host as it is in the
+	// container of the agent. The assertion has to name the path of the
+	// work root on the host.
+	t.Setenv(dockerops.MappingEnv, dockerops.MappingAsserted+":"+root)
 	executor := dockerops.NewCompose(root, dockerops.ExecRunner{}, local)
 
 	t.Cleanup(func() {
@@ -82,8 +83,13 @@ func TestComposeDeployment(t *testing.T) {
 	if result.State != model.Succeeded {
 		t.Fatalf("the state of the first deployment = %q (%s), want %q", result.State, result.Message, model.Succeeded)
 	}
-	if result.Code != dockerops.CodeComposeReady {
-		t.Fatalf("the code of the first deployment = %q, want %q", result.Code, dockerops.CodeComposeReady)
+	// The mapping of the work root was asserted and not proven, so the
+	// outcome of the deployment carries the trace of the assertion.
+	if result.Code != dockerops.CodeMappingAsserted {
+		t.Fatalf("the code of the first deployment = %q, want %q", result.Code, dockerops.CodeMappingAsserted)
+	}
+	if !strings.Contains(result.Message, "断言") {
+		t.Fatalf("the message of the first deployment = %q, want the trace of the assertion", result.Message)
 	}
 
 	containers := projectContainers(t, ctx, local, namespace)

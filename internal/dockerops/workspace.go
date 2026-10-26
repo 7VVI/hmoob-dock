@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -54,7 +55,151 @@ const (
 	// MappingAsserted is the value of MappingEnv that accepts the work
 	// root without a proof.
 	MappingAsserted = "asserted"
+	// MappingAssertedPrefix is the prefix of the assertion of the operator.
+	MappingAssertedPrefix = MappingAsserted + ":"
 )
+
+// MappingAssertion is the assertion of the operator of a node.
+type MappingAssertion struct {
+	// HostPath is the absolute path of the work root on the host.
+	HostPath string
+}
+
+// ParseMappingAssertion reads the assertion of the operator of the node.
+//
+// The assertion has to name the path of the work root on the host: an
+// assertion without a path proves nothing, so it is refused. The value of
+// the variable is empty when the operator says nothing, and that is not an
+// assertion but the absence of one.
+//
+// The value of the assertion is "asserted:<absolute path of the work root on
+// the host>". A value that names another assertion is refused as well, so a
+// misspelling never passes for the absence of an assertion.
+func ParseMappingAssertion(value string) (MappingAssertion, bool, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		// The operator says nothing: there is no assertion.
+		return MappingAssertion{}, false, nil
+	}
+	if trimmed == MappingAsserted {
+		return MappingAssertion{}, false, fmt.Errorf(
+			"dockerops: 路径映射的断言必须带上宿主机上的工作目录，格式是 %s<绝对路径>",
+			MappingAssertedPrefix)
+	}
+	if !strings.HasPrefix(trimmed, MappingAssertedPrefix) {
+		return MappingAssertion{}, false, fmt.Errorf(
+			"dockerops: %q 不是路径映射的断言，格式是 %s<绝对路径>",
+			value, MappingAssertedPrefix)
+	}
+	host := strings.TrimSpace(strings.TrimPrefix(trimmed, MappingAssertedPrefix))
+	if host == "" {
+		return MappingAssertion{}, false, fmt.Errorf(
+			"dockerops: 路径映射的断言必须带上宿主机上的工作目录，格式是 %s<绝对路径>",
+			MappingAssertedPrefix)
+	}
+	if !isAbsolutePath(host) {
+		return MappingAssertion{}, false, fmt.Errorf(
+			"dockerops: 断言的路径 %q 不是绝对路径", host)
+	}
+	return MappingAssertion{HostPath: host}, true, nil
+}
+
+// CheckRelativeBinds refuses a configuration that binds a relative path.
+//
+// A relative bind is resolved against the directory of the application, so it
+// points at another place when the mapping of the work root is not proven.
+// The platform only accepts such a bind when it proved the mapping itself.
+func CheckRelativeBinds(payload []byte) error {
+	document := map[string]any{}
+	if err := yaml.Unmarshal(payload, &document); err != nil {
+		return fmt.Errorf("dockerops: 读取配置失败: %w", err)
+	}
+
+	services, _ := document["services"].(map[string]any)
+	for _, name := range sortedNames(services) {
+		service, ok := services[name].(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, source := range relativeBindSources(service["volumes"]) {
+			return fmt.Errorf("dockerops: 服务 %s 的绑定 %q 是相对路径", name, source)
+		}
+	}
+	return nil
+}
+
+// relativeBindSources returns the sources of the binds of a service that are
+// relative paths.
+//
+// A named volume has no path: its source is a name. A source that starts
+// with a point or that holds a separator is a path, and a path that is not
+// absolute is relative.
+func relativeBindSources(value any) []string {
+	items, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	var relative []string
+	for _, item := range items {
+		switch typed := item.(type) {
+		case string:
+			// The short syntax of a volume is "source:target:mode".
+			source, _, _ := strings.Cut(typed, ":")
+			if isRelativePath(source) {
+				relative = append(relative, source)
+			}
+		case map[string]any:
+			kind, _ := typed["type"].(string)
+			if kind == "volume" {
+				// The source of a volume is a name, not a path.
+				continue
+			}
+			source, _ := typed["source"].(string)
+			if isRelativePath(source) {
+				relative = append(relative, source)
+			}
+		}
+	}
+	return relative
+}
+
+// isRelativePath reports whether the source of a bind is a relative path.
+func isRelativePath(source string) bool {
+	if source == "" || isAbsolutePath(source) {
+		return false
+	}
+	return strings.HasPrefix(source, ".") || strings.ContainsAny(source, `/\`)
+}
+
+// isAbsolutePath reports whether a path is absolute.
+//
+// The rule of the platform the agent runs on is not enough: a configuration
+// is written on one machine and read on another one, so a path of Windows is
+// absolute as well.
+func isAbsolutePath(path string) bool {
+	if strings.HasPrefix(path, "/") {
+		return true
+	}
+	if len(path) >= 2 && path[1] == ':' {
+		// A drive of Windows, for example "C:\data".
+		return true
+	}
+	return filepath.IsAbs(path)
+}
+
+// sortedNames returns the keys of a mapping in a stable order.
+//
+// The order of a Go map is random, so a check that walks a mapping has to
+// sort its keys. Otherwise the same configuration would report a different
+// field on every run.
+func sortedNames(mapping map[string]any) []string {
+	names := make([]string, 0, len(mapping))
+	for name := range mapping {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
 
 // appIDPattern matches the identifiers of the applications.
 //
@@ -325,21 +470,40 @@ func checkBindSource(dir, source string) error {
 }
 
 // envFiles returns the files of an env_file field.
+//
+// The field holds the short syntax (a path or a list of paths) and the long
+// syntax (a list of entries that name a path). The Docker CLI reads both of
+// them from the file system of the agent, so both of them have to be checked.
 func envFiles(value any) []string {
 	switch typed := value.(type) {
 	case string:
 		return []string{typed}
+	case map[string]any:
+		return envFilePaths(typed)
 	case []any:
 		var paths []string
 		for _, item := range typed {
-			if path, ok := item.(string); ok {
-				paths = append(paths, path)
+			switch entry := item.(type) {
+			case string:
+				paths = append(paths, entry)
+			case map[string]any:
+				paths = append(paths, envFilePaths(entry)...)
 			}
 		}
 		return paths
 	default:
 		return nil
 	}
+}
+
+// envFilePaths returns the path of an entry of the long syntax of an
+// env_file.
+func envFilePaths(entry map[string]any) []string {
+	path, _ := entry["path"].(string)
+	if path == "" {
+		return nil
+	}
+	return []string{path}
 }
 
 // filePaths returns the files of a configs or a secrets field.

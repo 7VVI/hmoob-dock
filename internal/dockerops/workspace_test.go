@@ -223,6 +223,117 @@ func TestASymbolicLinkMayNotLeadOutOfTheApplicationDirectory(t *testing.T) {
 	}
 }
 
+// TestTheLongSyntaxOfAnEnvFileStaysInsideTheApplicationDirectory proves that
+// the long syntax of an env_file is checked like the short one: the Docker
+// CLI reads the file from the file system of the agent, so the file may not
+// lie outside of the directory of the application.
+func TestTheLongSyntaxOfAnEnvFileStaysInsideTheApplicationDirectory(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "apps", "app-1")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("create the directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "app.env"), []byte("A=1\n"), 0o600); err != nil {
+		t.Fatalf("write the file: %v", err)
+	}
+
+	inside := []byte("services:\n  api:\n    image: nginx:alpine\n" +
+		"    env_file:\n      - path: app.env\n        required: false\n")
+	if err := dockerops.CheckExternalFiles(inside, dir); err != nil {
+		t.Fatalf("the file of the application was refused: %v", err)
+	}
+
+	outside := []byte("services:\n  api:\n    image: nginx:alpine\n" +
+		"    env_file:\n      - path: ../../secret.env\n        required: false\n")
+	if err := dockerops.CheckExternalFiles(outside, dir); err == nil {
+		t.Fatal("a file outside of the directory of the application was accepted")
+	}
+
+	absolute := []byte("services:\n  api:\n    image: nginx:alpine\n" +
+		"    env_file:\n      - path: /etc/passwd\n")
+	if err := dockerops.CheckExternalFiles(absolute, dir); err == nil {
+		t.Fatal("a file of the host was accepted")
+	}
+}
+
+// TestASymbolicLinkOfTheLongSyntaxMayNotLeadOutOfTheApplicationDirectory
+// proves that a symbolic link of the long syntax of an env_file may not point
+// out of the directory of the application.
+func TestASymbolicLinkOfTheLongSyntaxMayNotLeadOutOfTheApplicationDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a symbolic link needs a privilege on Windows")
+	}
+	root := t.TempDir()
+	dir := filepath.Join(root, "apps", "app-1")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("create the directory: %v", err)
+	}
+	secret := filepath.Join(root, "secret.env")
+	if err := os.WriteFile(secret, []byte("SECRET=1\n"), 0o600); err != nil {
+		t.Fatalf("write the file: %v", err)
+	}
+	if err := os.Symlink(secret, filepath.Join(dir, "app.env")); err != nil {
+		t.Fatalf("create the symbolic link: %v", err)
+	}
+
+	payload := []byte("services:\n  api:\n    image: nginx:alpine\n" +
+		"    env_file:\n      - path: app.env\n        required: false\n")
+	if err := dockerops.CheckExternalFiles(payload, dir); err == nil {
+		t.Fatal("a symbolic link out of the directory of the application was accepted")
+	}
+}
+
+// TestTheMappingAssertionNeedsThePathOfTheHost proves that an assertion
+// without the path of the work root proves nothing and is refused.
+func TestTheMappingAssertionNeedsThePathOfTheHost(t *testing.T) {
+	if _, _, err := dockerops.ParseMappingAssertion(dockerops.MappingAsserted); err == nil {
+		t.Fatal("an assertion without a path was accepted")
+	}
+	if _, _, err := dockerops.ParseMappingAssertion(dockerops.MappingAsserted + ":relative/path"); err == nil {
+		t.Fatal("an assertion with a relative path was accepted")
+	}
+	if _, asserted, err := dockerops.ParseMappingAssertion(""); err != nil || asserted {
+		t.Fatalf("an empty value = (%v, %v), want no assertion", err, asserted)
+	}
+
+	host := filepath.Join(t.TempDir(), "hmoob-dock")
+	assertion, asserted, err := dockerops.ParseMappingAssertion(dockerops.MappingAsserted + ":" + host)
+	if err != nil {
+		t.Fatalf("read the assertion: %v", err)
+	}
+	if !asserted {
+		t.Fatal("the assertion was not recognized")
+	}
+	if assertion.HostPath != host {
+		t.Fatalf("the path = %q, want %q", assertion.HostPath, host)
+	}
+}
+
+// TestARelativeBindIsFound proves that a bind of a relative path of the host
+// is told apart from the name of a volume.
+func TestARelativeBindIsFound(t *testing.T) {
+	relative := []byte("services:\n  api:\n    image: nginx:alpine\n    volumes:\n      - ./data:/data\n")
+	if err := dockerops.CheckRelativeBinds(relative); err == nil {
+		t.Fatal("a relative bind was accepted")
+	}
+
+	long := []byte("services:\n  api:\n    image: nginx:alpine\n" +
+		"    volumes:\n      - type: bind\n        source: ../data\n        target: /data\n")
+	if err := dockerops.CheckRelativeBinds(long); err == nil {
+		t.Fatal("a relative bind of the long syntax was accepted")
+	}
+
+	named := []byte("services:\n  api:\n    image: nginx:alpine\n    volumes:\n      - data:/data\n")
+	if err := dockerops.CheckRelativeBinds(named); err != nil {
+		t.Fatalf("a named volume was refused: %v", err)
+	}
+
+	absolute := []byte("services:\n  api:\n    image: nginx:alpine\n    volumes:\n      - /var/lib/data:/data\n")
+	if err := dockerops.CheckRelativeBinds(absolute); err != nil {
+		t.Fatalf("an absolute bind of the host was refused: %v", err)
+	}
+}
+
 // TestAnAbsoluteBindOfTheHostIsNotAFileOfTheAgent proves that a bind mount
 // of an absolute path of the host is not a file the agent reads: the daemon
 // reads it.

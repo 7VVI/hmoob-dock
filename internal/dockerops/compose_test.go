@@ -91,16 +91,22 @@ func actionOf(spec RunSpec) string {
 //
 // The engine holds the mounts of the container of the agent and the
 // containers of the project, so a test can prove what the executor does with
-// them.
+// them. The containers may be a sequence, so a test can prove that the
+// executor waits for a container that does not exist yet.
 type fakeEngine struct {
+	mu            sync.Mutex
 	mounts        []Mount
 	containers    []protocol.Container
+	sequences     [][]protocol.Container
 	mountErr      error
 	containersErr error
 }
 
 // ContainerMounts returns the mounts of the container of the agent.
 func (f *fakeEngine) ContainerMounts(ctx context.Context, id string) ([]Mount, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	if f.mountErr != nil {
 		return nil, f.mountErr
 	}
@@ -108,9 +114,20 @@ func (f *fakeEngine) ContainerMounts(ctx context.Context, id string) ([]Mount, e
 }
 
 // ProjectContainers returns the containers of the project.
+//
+// The first call returns the first set of the sequence, so a test can let a
+// container of a service appear while the executor waits for it.
 func (f *fakeEngine) ProjectContainers(ctx context.Context, namespace string) ([]protocol.Container, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	if f.containersErr != nil {
 		return nil, f.containersErr
+	}
+	if len(f.sequences) > 0 {
+		first := f.sequences[0]
+		f.sequences = f.sequences[1:]
+		return first, nil
 	}
 	return f.containers, nil
 }
@@ -136,6 +153,25 @@ func newTestExecutor(t *testing.T, runner Runner, engine *fakeEngine) (*Compose,
 		engine.mounts = []Mount{{Type: "bind", Source: root, Destination: root}}
 	}
 	return &Compose{root: root, runner: runner, engine: engine}, root
+}
+
+// newAssertedExecutor builds the executor of a node whose operator asserts
+// the mapping of the work root.
+//
+// The agent of the test does not run in a container, so it has no container
+// to inspect: the assertion of the operator is the only way to deploy. The
+// assertion names the path of the work root on the host.
+func newAssertedExecutor(t *testing.T, runner Runner, engine *fakeEngine) (*Compose, string) {
+	t.Helper()
+
+	executor, root := newTestExecutor(t, runner, engine)
+	// The agent of the test knows no container of its own.
+	t.Setenv(ContainerIDEnv, "")
+	if SelfContainerID() != "" {
+		t.Skip("the test runs in a container: the agent has a container to prove the mapping with")
+	}
+	t.Setenv(MappingEnv, MappingAsserted+":"+root)
+	return executor, root
 }
 
 // testCommand builds the command of the tests.
@@ -320,6 +356,31 @@ func TestTheComposeExecutorWritesTheOutputIntoTheWriterOfTheCaller(t *testing.T)
 	}
 }
 
+// TestTheComposeExecutorRefusesAnEnvFileOfTheLongSyntaxOutsideTheDirectory
+// proves that the long syntax of an env_file is checked like the short one:
+// the agent may not read a file outside of the directory of the application.
+func TestTheComposeExecutorRefusesAnEnvFileOfTheLongSyntaxOutsideTheDirectory(t *testing.T) {
+	runner := &fakeRunner{}
+	executor, _ := newTestExecutor(t, runner, nil)
+
+	cmd := testCommand()
+	cmd.Config.YAML = "services:\n  api:\n    image: nginx:alpine\n" +
+		"    env_file:\n      - path: ../../secret.env\n        required: false\n"
+	result, err := executor.Execute(context.Background(), cmd, io.Discard)
+	if err != nil {
+		t.Fatalf("execute the command: %v", err)
+	}
+	if result.State != model.Failed {
+		t.Fatalf("the state = %q, want %q", result.State, model.Failed)
+	}
+	if result.Code != CodeExternalFile {
+		t.Fatalf("the code = %q, want %q", result.Code, CodeExternalFile)
+	}
+	if runner.count() != 0 {
+		t.Fatalf("the runner received %d commands, want none", runner.count())
+	}
+}
+
 // TestTheComposeExecutorChangesNothingWithoutAProofOfTheMapping proves that
 // a work root the platform cannot prove runs no command at all.
 func TestTheComposeExecutorChangesNothingWithoutAProofOfTheMapping(t *testing.T) {
@@ -342,12 +403,141 @@ func TestTheComposeExecutorChangesNothingWithoutAProofOfTheMapping(t *testing.T)
 	}
 }
 
+// TestTheMappingAssertionLeavesATrace proves that a deployment that ran on a
+// node whose work root was asserted and not proven is visible in the history
+// of the deployments.
+//
+// The engine of the test holds the container of the service, so the
+// deployment reaches the expected state and the outcome of the deployment is
+// the one that carries the trace of the assertion.
+func TestTheMappingAssertionLeavesATrace(t *testing.T) {
+	runner := &fakeRunner{}
+	engine := &fakeEngine{containers: []protocol.Container{
+		{Service: "api", State: "running"},
+	}}
+	executor, _ := newAssertedExecutor(t, runner, engine)
+
+	result, err := executor.Execute(context.Background(), testCommand(), io.Discard)
+	if err != nil {
+		t.Fatalf("execute the command: %v", err)
+	}
+	if result.State != model.Succeeded {
+		t.Fatalf("the state = %q, want %q (%s)", result.State, model.Succeeded, result.Message)
+	}
+	if result.Code != CodeMappingAsserted {
+		t.Fatalf("the code = %q, want %q", result.Code, CodeMappingAsserted)
+	}
+	if !strings.Contains(result.Message, "断言") {
+		t.Fatalf("the message = %q, want the trace of the assertion", result.Message)
+	}
+}
+
+// TestTheMappingAssertionIsRefusedInsideAContainer proves that an agent that
+// runs in a container may not assert the mapping: it can prove it by itself.
+func TestTheMappingAssertionIsRefusedInsideAContainer(t *testing.T) {
+	runner := &fakeRunner{}
+	executor, root := newTestExecutor(t, runner, nil)
+	t.Setenv(MappingEnv, MappingAsserted+":"+root)
+
+	result, err := executor.Execute(context.Background(), testCommand(), io.Discard)
+	if err != nil {
+		t.Fatalf("execute the command: %v", err)
+	}
+	if result.State != model.Failed {
+		t.Fatalf("the state = %q, want %q", result.State, model.Failed)
+	}
+	if result.Code != CodePreflightFailed {
+		t.Fatalf("the code = %q, want %q", result.Code, CodePreflightFailed)
+	}
+	if !strings.Contains(result.Message, "容器内必须自证映射") {
+		t.Fatalf("the message = %q, want a report that the container has to prove the mapping", result.Message)
+	}
+	if runner.count() != 0 {
+		t.Fatalf("the runner received %d commands, want none", runner.count())
+	}
+}
+
+// TestTheMappingAssertionIsRefusedWhenThePathDiffers proves that an
+// assertion has to name the path of the work root on the host.
+func TestTheMappingAssertionIsRefusedWhenThePathDiffers(t *testing.T) {
+	runner := &fakeRunner{}
+	executor, root := newTestExecutor(t, runner, nil)
+	t.Setenv(MappingEnv, MappingAsserted+":"+filepath.Join(root, "other"))
+
+	result, err := executor.Execute(context.Background(), testCommand(), io.Discard)
+	if err != nil {
+		t.Fatalf("execute the command: %v", err)
+	}
+	if result.State != model.Failed {
+		t.Fatalf("the state = %q, want %q", result.State, model.Failed)
+	}
+	if result.Code != CodePreflightFailed {
+		t.Fatalf("the code = %q, want %q", result.Code, CodePreflightFailed)
+	}
+	if runner.count() != 0 {
+		t.Fatalf("the runner received %d commands, want none", runner.count())
+	}
+}
+
+// TestTheBareMappingAssertionIsRefused proves that an assertion without a
+// path proves nothing and is refused.
+func TestTheBareMappingAssertionIsRefused(t *testing.T) {
+	runner := &fakeRunner{}
+	executor, _ := newTestExecutor(t, runner, nil)
+	t.Setenv(MappingEnv, MappingAsserted)
+
+	result, err := executor.Execute(context.Background(), testCommand(), io.Discard)
+	if err != nil {
+		t.Fatalf("execute the command: %v", err)
+	}
+	if result.State != model.Failed {
+		t.Fatalf("the state = %q, want %q", result.State, model.Failed)
+	}
+	if result.Code != CodePreflightFailed {
+		t.Fatalf("the code = %q, want %q", result.Code, CodePreflightFailed)
+	}
+	if !strings.Contains(result.Message, MappingAssertedPrefix) {
+		t.Fatalf("the message = %q, want the format of the assertion", result.Message)
+	}
+	if runner.count() != 0 {
+		t.Fatalf("the runner received %d commands, want none", runner.count())
+	}
+}
+
+// TestTheMappingAssertionRefusesARelativeBind proves that a configuration
+// with a relative bind is refused when the mapping is only asserted: the
+// bind would point at another directory on the host.
+func TestTheMappingAssertionRefusesARelativeBind(t *testing.T) {
+	runner := &fakeRunner{}
+	executor, _ := newAssertedExecutor(t, runner, nil)
+
+	cmd := testCommand()
+	cmd.Config.YAML = "services:\n  api:\n    image: nginx:alpine\n    volumes:\n      - ./data:/data\n"
+	result, err := executor.Execute(context.Background(), cmd, io.Discard)
+	if err != nil {
+		t.Fatalf("execute the command: %v", err)
+	}
+	if result.State != model.Failed {
+		t.Fatalf("the state = %q, want %q", result.State, model.Failed)
+	}
+	if result.Code != CodePreflightFailed {
+		t.Fatalf("the code = %q, want %q", result.Code, CodePreflightFailed)
+	}
+	if runner.count() != 0 {
+		t.Fatalf("the runner received %d commands, want none", runner.count())
+	}
+}
+
 // TestTheComposeExecutorRemovesTheConfirmedServices proves that the
 // confirmed removals reach the up and that the scope of the removal is
 // checked again.
 func TestTheComposeExecutorRemovesTheConfirmedServices(t *testing.T) {
 	runner := &fakeRunner{}
-	executor, _ := newTestExecutor(t, runner, nil)
+	engine := &fakeEngine{containers: []protocol.Container{
+		{Service: "api", State: "running"},
+		{Service: "cache", State: "running"},
+	}}
+	executor, _ := newTestExecutor(t, runner, engine)
 
 	cmd := testCommand()
 	cmd.RemovedServices = []string{"cache"}
@@ -356,6 +546,87 @@ func TestTheComposeExecutorRemovesTheConfirmedServices(t *testing.T) {
 	}
 	if !contains(runner.last(t).Args, "--remove-orphans") {
 		t.Fatalf("the arguments = %q, want the removal of the orphans", runner.last(t).Args)
+	}
+}
+
+// TestTheComposeExecutorRefusesToRemoveAnOrphanNobodyConfirmed proves that
+// the scope of the removal is compared with the containers of the project: a
+// container that nobody confirmed is never removed.
+func TestTheComposeExecutorRefusesToRemoveAnOrphanNobodyConfirmed(t *testing.T) {
+	runner := &fakeRunner{}
+	engine := &fakeEngine{containers: []protocol.Container{
+		{Service: "api", State: "running"},
+		{Service: "cache", State: "running"},
+		{Service: "leftover", State: "running"},
+	}}
+	executor, _ := newTestExecutor(t, runner, engine)
+
+	cmd := testCommand()
+	cmd.RemovedServices = []string{"cache"}
+	result, err := executor.Execute(context.Background(), cmd, io.Discard)
+	if err != nil {
+		t.Fatalf("execute the command: %v", err)
+	}
+	if result.State != model.Failed {
+		t.Fatalf("the state = %q, want %q", result.State, model.Failed)
+	}
+	if result.Code != CodePreflightFailed {
+		t.Fatalf("the code = %q, want %q", result.Code, CodePreflightFailed)
+	}
+	if !strings.Contains(result.Message, "leftover") {
+		t.Fatalf("the message = %q, want the orphan nobody confirmed", result.Message)
+	}
+	if runner.count() != 0 {
+		t.Fatalf("the runner received %d commands, want none", runner.count())
+	}
+}
+
+// TestTheComposeExecutorRemovesExactlyTheConfirmedOrphans proves that the
+// removal runs when the orphans of the project are exactly the services the
+// administrator confirmed. The order of the two sets does not matter.
+func TestTheComposeExecutorRemovesExactlyTheConfirmedOrphans(t *testing.T) {
+	runner := &fakeRunner{}
+	engine := &fakeEngine{containers: []protocol.Container{
+		{Service: "api", State: "running"},
+		{Service: "cache", State: "running"},
+		{Service: "worker", State: "running"},
+	}}
+	executor, _ := newTestExecutor(t, runner, engine)
+
+	cmd := testCommand()
+	cmd.RemovedServices = []string{"worker", "cache"}
+	if _, err := executor.Execute(context.Background(), cmd, io.Discard); err != nil {
+		t.Fatalf("execute the command: %v", err)
+	}
+	if !contains(runner.last(t).Args, "--remove-orphans") {
+		t.Fatalf("the arguments = %q, want the removal of the orphans", runner.last(t).Args)
+	}
+}
+
+// TestTheComposeExecutorRefusesToRemoveAServiceThatDoesNotRun proves that
+// the confirmation of a removal has to match the containers of the project:
+// a service that does not run is never removed.
+func TestTheComposeExecutorRefusesToRemoveAServiceThatDoesNotRun(t *testing.T) {
+	runner := &fakeRunner{}
+	engine := &fakeEngine{containers: []protocol.Container{
+		{Service: "api", State: "running"},
+	}}
+	executor, _ := newTestExecutor(t, runner, engine)
+
+	cmd := testCommand()
+	cmd.RemovedServices = []string{"cache"}
+	result, err := executor.Execute(context.Background(), cmd, io.Discard)
+	if err != nil {
+		t.Fatalf("execute the command: %v", err)
+	}
+	if result.State != model.Failed {
+		t.Fatalf("the state = %q, want %q", result.State, model.Failed)
+	}
+	if result.Code != CodePreflightFailed {
+		t.Fatalf("the code = %q, want %q", result.Code, CodePreflightFailed)
+	}
+	if runner.count() != 0 {
+		t.Fatalf("the runner received %d commands, want none", runner.count())
 	}
 }
 
@@ -459,6 +730,10 @@ func TestTheComposeExecutorReportsAnUncertainOutcomeWhenTheCommandRunsOutOfTime(
 
 // TestTheComposeExecutorFailsWhenAServiceIsMissing proves that the number of
 // the services of the configuration decides whether the deployment is ready.
+//
+// A service without a container is not a failure right away: Compose creates
+// the container of a service after the services it depends on are healthy, so
+// the executor waits for it and gives up when the deadline is over.
 func TestTheComposeExecutorFailsWhenAServiceIsMissing(t *testing.T) {
 	runner := &fakeRunner{}
 	engine := &fakeEngine{containers: []protocol.Container{
@@ -468,6 +743,7 @@ func TestTheComposeExecutorFailsWhenAServiceIsMissing(t *testing.T) {
 
 	cmd := testCommand()
 	cmd.Config.YAML = "services:\n  api:\n    image: nginx:alpine\n  worker:\n    image: nginx:alpine\n"
+	cmd.VerifyTimeout = 100 * time.Millisecond
 	result, err := executor.Execute(context.Background(), cmd, io.Discard)
 	if err != nil {
 		t.Fatalf("execute the command: %v", err)
@@ -475,8 +751,37 @@ func TestTheComposeExecutorFailsWhenAServiceIsMissing(t *testing.T) {
 	if result.State != model.Failed {
 		t.Fatalf("the state = %q, want %q", result.State, model.Failed)
 	}
+	if result.Code != CodeComposeNotReady {
+		t.Fatalf("the code = %q, want %q", result.Code, CodeComposeNotReady)
+	}
 	if !strings.Contains(result.Message, "worker") {
 		t.Fatalf("the message = %q, want the missing service", result.Message)
+	}
+}
+
+// TestTheComposeExecutorWaitsForTheContainerOfAService proves that the
+// executor waits for a container that Compose has not created yet: the
+// service depends on a service that has to become healthy first.
+func TestTheComposeExecutorWaitsForTheContainerOfAService(t *testing.T) {
+	runner := &fakeRunner{}
+	engine := &fakeEngine{sequences: [][]protocol.Container{
+		{{Service: "api", State: "running"}},
+		{{Service: "api", State: "running"}, {Service: "worker", State: "running"}},
+	}}
+	executor, _ := newTestExecutor(t, runner, engine)
+
+	cmd := testCommand()
+	cmd.Config.YAML = "services:\n  api:\n    image: nginx:alpine\n  worker:\n    image: nginx:alpine\n"
+	cmd.VerifyTimeout = 10 * time.Second
+	result, err := executor.Execute(context.Background(), cmd, io.Discard)
+	if err != nil {
+		t.Fatalf("execute the command: %v", err)
+	}
+	if result.State != model.Succeeded {
+		t.Fatalf("the state = %q, want %q (%s)", result.State, model.Succeeded, result.Message)
+	}
+	if result.Code != CodeComposeReady {
+		t.Fatalf("the code = %q, want %q", result.Code, CodeComposeReady)
 	}
 }
 
