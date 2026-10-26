@@ -1,0 +1,30 @@
+name: demo
+services:
+  api:
+    image: nginx:1.27-alpine
+    command: ["nginx", "-g", "daemon off;"]
+    environment:
+      LOG_LEVEL: info
+      API_TOKEN: ${API_TOKEN:-changeme}
+    ports:
+      - "8080:80"
+    volumes:
+      - api-data:/var/lib/api
+    networks:
+      - demo
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    labels:
+      app: demo
+  migrate:
+    image: busybox:1.36
+    command: ["sh", "-c", "echo migrated"]
+    x-hmoob-lifecycle: oneshot
+volumes:
+  api-data:
+networks:
+  demo:
