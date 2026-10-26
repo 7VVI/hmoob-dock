@@ -18,6 +18,7 @@ import (
 	"hmoob-dock/internal/agentlink"
 	"hmoob-dock/internal/auth"
 	"hmoob-dock/internal/config"
+	"hmoob-dock/internal/deploy"
 	"hmoob-dock/internal/secret"
 	"hmoob-dock/internal/store"
 )
@@ -63,6 +64,8 @@ type Server struct {
 	enrollment *agentlink.Enrollment
 	// hub keeps the live connections of the agents.
 	hub *agentlink.Hub
+	// apps owns the applications of the control端 and their deployments.
+	apps *deploy.Service
 }
 
 // NewServer assembles the control端 HTTP handler.
@@ -141,10 +144,15 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 	server.loginLimiter = auth.NewLimiter(loginMaxAttempts, loginRateWindow, time.Now)
 	server.preInitLimiter = auth.NewLimiter(loginMaxAttempts, loginRateWindow, time.Now)
 	server.enrollLimiter = auth.NewLimiter(enrollMaxAttempts, enrollRateWindow, time.Now)
+	// The deployment service reads the state of the targets through the
+	// hub, so a preview and a submission see the state that the agents
+	// report.
+	server.apps = deploy.New(db, box, server.hub)
 	server.mux.HandleFunc("/healthz", server.handleHealth)
 	server.mux.HandleFunc("/readyz", server.handleReady)
 	server.registerAuthRoutes()
 	server.registerAgentRoutes()
+	server.registerApplicationRoutes()
 	server.mux.HandleFunc("/", server.handleNotFound)
 
 	// A revoked credential closes the connection of its node, so a revoked
