@@ -73,6 +73,9 @@ type nodeTransport struct {
 	queries int
 	// connected reports whether the node answers.
 	connected bool
+	// drop reports that the node loses the commands of the control端: the
+	// connection breaks or the queue of the node is full.
+	drop bool
 	// nodeID is the node the transport serves.
 	nodeID string
 	// dispatcher receives the answers of the node.
@@ -102,7 +105,11 @@ func (t *nodeTransport) Send(ctx context.Context, nodeID string, envelope protoc
 			t.mu.Unlock()
 			return err
 		}
-		t.commands = append(t.commands, message.Command)
+		// The node loses the command: it never reaches the ledger of the
+		// node.
+		if !t.drop {
+			t.commands = append(t.commands, message.Command)
+		}
 	case protocol.TypeDeployQuery:
 		var query protocol.DeployQuery
 		if err := json.Unmarshal(envelope.Payload, &query); err != nil {
@@ -299,6 +306,115 @@ func TestDeploymentRecovery(t *testing.T) {
 	}
 	if current.State != model.Succeeded {
 		t.Fatalf("the task is in the phase %q, want succeeded", current.State)
+	}
+}
+
+// TestTheCommandThatNeverReachedTheNodeRunsOnce proves that a command that
+// never reached the node is sent again and that the deployment runs once.
+//
+// The command may be lost between the binding of the task and the delivery:
+// the connection may break, or the queue of the node may be full. The task
+// holds its application until it ends, so the control端 sends the command
+// again instead of leaving the application blocked for ever.
+func TestTheCommandThatNeverReachedTheNodeRunsOnce(t *testing.T) {
+	control := newRecoveryControl(t, filepath.Join(t.TempDir(), "control.db"))
+
+	ledger, err := agent.OpenLedger(filepath.Join(t.TempDir(), "ledger.db"))
+	if err != nil {
+		t.Fatalf("open the ledger: %v", err)
+	}
+	t.Cleanup(func() { ledger.Close() })
+
+	executor := &countingExecutor{}
+	worker := agent.NewWorker(ledger, executor).UseRootContext(context.Background())
+
+	transport := &nodeTransport{ledger: ledger, connected: true, nodeID: control.nodeID, drop: true}
+	dispatcher := deployment.NewDispatcher(control.service, transport)
+	transport.dispatcher = dispatcher
+
+	app, err := control.service.CreateApp(context.Background(), model.App{
+		Name:      "demo",
+		Mode:      "compose",
+		TargetID:  control.nodeID,
+		Namespace: "demo",
+	}, false)
+	if err != nil {
+		t.Fatalf("create the application: %v", err)
+	}
+	config := model.Config{YAML: "services:\n  api:\n    image: nginx:alpine\n"}
+	preview, err := control.service.Preview(context.Background(), app.ID, "", config)
+	if err != nil {
+		t.Fatalf("preview the deployment: %v", err)
+	}
+	task, err := control.service.Submit(context.Background(), deployment.SubmitRequest{
+		AppID:          app.ID,
+		IdempotencyKey: "request-1",
+		Config:         config,
+		PreviewDigest:  preview.Digest,
+	})
+	if err != nil {
+		t.Fatalf("submit the deployment: %v", err)
+	}
+
+	// The command is lost: the node never receives it.
+	if err := dispatcher.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("dispatch the task: %v", err)
+	}
+	if len(transport.sentCommands()) != 0 {
+		t.Fatal("the node received the command")
+	}
+
+	// The connection is back and the control端 recovers its tasks. The node
+	// does not know the task, so the command is sent again.
+	transport.mu.Lock()
+	transport.drop = false
+	transport.mu.Unlock()
+	restarted := deployment.NewDispatcher(control.service, transport)
+	transport.dispatcher = restarted
+	if err := restarted.Recover(context.Background()); err != nil {
+		t.Fatalf("recover the deployments: %v", err)
+	}
+	commands := transport.sentCommands()
+	if len(commands) != 1 {
+		t.Fatalf("commands = %d, want 1: the command was not sent again", len(commands))
+	}
+	if commands[0].Task.ID != task.ID {
+		t.Fatalf("the command carries the task %s, want %s", commands[0].Task.ID, task.ID)
+	}
+
+	// The node runs the command and reports its outcome.
+	receipt, err := worker.Handle(context.Background(), commands[0], io.Discard)
+	if err != nil {
+		t.Fatalf("run the deployment: %v", err)
+	}
+	if err := restarted.ApplyReceipt(context.Background(), control.nodeID, receipt); err != nil {
+		t.Fatalf("apply the report: %v", err)
+	}
+	if executor.count() != 1 {
+		t.Fatalf("executions = %d, want 1: the deployment ran a second time", executor.count())
+	}
+
+	// The control端 knows the outcome and the application is free again.
+	current, err := control.service.Task(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("read the task: %v", err)
+	}
+	if current.State != model.Succeeded {
+		t.Fatalf("the task is in the phase %q, want succeeded", current.State)
+	}
+	next := model.Config{YAML: "services:\n  api:\n    image: nginx:1.27\n"}
+	preview, err = control.service.Preview(context.Background(), app.ID, task.VersionID, next)
+	if err != nil {
+		t.Fatalf("preview the next deployment: %v", err)
+	}
+	if _, err := control.service.Submit(context.Background(), deployment.SubmitRequest{
+		AppID:          app.ID,
+		BaseVersionID:  task.VersionID,
+		IdempotencyKey: "request-2",
+		Config:         next,
+		PreviewDigest:  preview.Digest,
+	}); err != nil {
+		t.Fatalf("deploy the application again: %v", err)
 	}
 }
 

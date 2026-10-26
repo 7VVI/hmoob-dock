@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"hmoob-dock/internal/dockerops"
 	"hmoob-dock/internal/model"
 	"hmoob-dock/internal/protocol"
 )
@@ -46,6 +48,78 @@ func (c *countingExecutor) count() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.calls
+}
+
+// blockingExecutor holds the tasks of the test until the test releases them.
+//
+// The executor replaces the Docker engine in the tests: it counts the tasks
+// that run at the same time, so the test proves that the node keeps the
+// limit of its concurrency.
+type blockingExecutor struct {
+	mu sync.Mutex
+	// running counts the tasks that run at the moment.
+	running int
+	// maximum is the largest number of tasks that ran at the same time.
+	maximum int
+	// started counts the tasks that began.
+	started int
+	// release frees the tasks when it is closed.
+	release chan struct{}
+}
+
+// newBlockingExecutor builds an executor that holds its tasks.
+func newBlockingExecutor() *blockingExecutor {
+	return &blockingExecutor{release: make(chan struct{})}
+}
+
+// Execute waits until the test releases the tasks.
+func (b *blockingExecutor) Execute(ctx context.Context, cmd model.Command, output io.Writer) (model.Result, error) {
+	b.mu.Lock()
+	b.running++
+	b.started++
+	if b.running > b.maximum {
+		b.maximum = b.running
+	}
+	b.mu.Unlock()
+
+	defer func() {
+		b.mu.Lock()
+		b.running--
+		b.mu.Unlock()
+	}()
+
+	select {
+	case <-b.release:
+	case <-ctx.Done():
+		return model.Result{}, ctx.Err()
+	}
+	return model.Result{State: model.Succeeded, Code: "compose_ready"}, nil
+}
+
+// startedTasks returns the number of the tasks that began.
+func (b *blockingExecutor) startedTasks() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.started
+}
+
+// maximumTasks returns the largest number of tasks that ran at the same
+// time.
+func (b *blockingExecutor) maximumTasks() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.maximum
+}
+
+// releaseAll frees the tasks of the executor.
+func (b *blockingExecutor) releaseAll() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	select {
+	case <-b.release:
+	default:
+		close(b.release)
+	}
 }
 
 // recordedFrame is a frame the agent sent.
@@ -111,14 +185,14 @@ func waitForAgent(t *testing.T, what string, condition func() bool) {
 
 // newTestAgent builds an agent with a ledger and a handler of the
 // deployments.
-func newTestAgent(t *testing.T, executor *countingExecutor) (*Ledger, *deployments) {
+func newTestAgent(t *testing.T, executor dockerops.Executor) (*Ledger, *deployments) {
 	t.Helper()
 
 	return newTestAgentAt(t, executor, filepath.Join(t.TempDir(), "ledger.db"))
 }
 
 // newTestAgentAt builds an agent with a ledger at the given path.
-func newTestAgentAt(t *testing.T, executor *countingExecutor, path string) (*Ledger, *deployments) {
+func newTestAgentAt(t *testing.T, executor dockerops.Executor, path string) (*Ledger, *deployments) {
 	t.Helper()
 
 	ledger, err := OpenLedger(path)
@@ -498,6 +572,184 @@ func TestTheWorkerUsesTheContextOfTheProcess(t *testing.T) {
 		App:  model.App{ID: "app-1", Mode: "compose"},
 	}, io.Discard); err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("handle the command: %v", err)
+	}
+}
+
+// TestTheResolutionOfAnUnknownTaskIsAnswered proves that the node answers a
+// resolution of a task it does not know instead of staying silent.
+//
+// The silence of the node would leave the release of the administrator
+// pending for ever: the control端 would wait for a confirmation that never
+// comes and the application would stay blocked.
+func TestTheResolutionOfAnUnknownTaskIsAnswered(t *testing.T) {
+	executor := &countingExecutor{}
+	_, handler := newTestAgent(t, executor)
+	sender := &recordingSender{}
+
+	payload, err := json.Marshal(protocol.DeployResolve{
+		TaskID:      "task-that-never-arrived",
+		Digest:      "digest-1",
+		ExpectedSeq: 0,
+		Reason:      "the executor of the task was stopped by hand",
+	})
+	if err != nil {
+		t.Fatalf("encode the resolution: %v", err)
+	}
+	handler.handle(context.Background(), protocol.Envelope{
+		Version: protocol.WireVersion, Type: protocol.TypeDeployResolve, Payload: payload,
+	}, sender)
+
+	waitForAgent(t, "the answer of the node", func() bool {
+		return len(sender.of(protocol.TypeDeployQueryResult)) == 1
+	})
+	var answer protocol.DeployQueryResult
+	if err := json.Unmarshal(mustJSON(t, sender.of(protocol.TypeDeployQueryResult)[0].payload), &answer); err != nil {
+		t.Fatalf("decode the answer: %v", err)
+	}
+	if answer.Found {
+		t.Fatal("the node knows a task it never received")
+	}
+	if answer.TaskID != "task-that-never-arrived" {
+		t.Fatalf("the answer holds the task %s, want task-that-never-arrived", answer.TaskID)
+	}
+	if len(sender.of(protocol.TypeDeployReceipt)) != 0 {
+		t.Fatal("the node reported a resolution of a task it does not know")
+	}
+}
+
+// TestTheBusyApplicationDoesNotBlockTheOtherApplications proves that a
+// command of an application that holds another task does not stop the
+// commands of the other applications of the node.
+func TestTheBusyApplicationDoesNotBlockTheOtherApplications(t *testing.T) {
+	previous := busyRetryInterval
+	busyRetryInterval = 10 * time.Millisecond
+	t.Cleanup(func() { busyRetryInterval = previous })
+
+	executor := &countingExecutor{}
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	uncertainTask(t, path, "task-1", "app-1")
+	_, handler := newTestAgentAt(t, executor, path)
+	sender := &recordingSender{}
+
+	// The command of the control端 waits for the busy application.
+	waiting := model.Command{
+		Task: model.Task{ID: "task-2", AppID: "app-1", Digest: "digest-2"},
+		App:  model.App{ID: "app-1", Mode: "compose"},
+	}
+	handler.handle(context.Background(), commandFrame(t, waiting), sender)
+
+	// The command of another application runs: the busy application waits
+	// for itself alone.
+	other := model.Command{
+		Task: model.Task{ID: "task-3", AppID: "app-2", Digest: "digest-3"},
+		App:  model.App{ID: "app-2", Mode: "compose"},
+	}
+	handler.handle(context.Background(), commandFrame(t, other), sender)
+
+	waitForAgent(t, "the report of the other application", func() bool {
+		return len(sender.of(protocol.TypeDeployReceipt)) == 1
+	})
+	var message protocol.DeployReceipt
+	if err := json.Unmarshal(mustJSON(t, sender.of(protocol.TypeDeployReceipt)[0].payload), &message); err != nil {
+		t.Fatalf("decode the report: %v", err)
+	}
+	if message.Receipt.TaskID != "task-3" {
+		t.Fatalf("the report holds the task %s, want task-3", message.Receipt.TaskID)
+	}
+	if executor.count() != 1 {
+		t.Fatalf("executions = %d, want 1", executor.count())
+	}
+}
+
+// TestTheNodeRunsOnlyABoundedNumberOfTasks proves that the node does not run
+// more tasks at the same time than it may.
+func TestTheNodeRunsOnlyABoundedNumberOfTasks(t *testing.T) {
+	executor := newBlockingExecutor()
+	t.Cleanup(executor.releaseAll)
+	_, handler := newTestAgent(t, executor)
+	sender := &recordingSender{}
+
+	for index := 1; index <= 4; index++ {
+		command := model.Command{
+			Task: model.Task{
+				ID:        fmt.Sprintf("task-%d", index),
+				AppID:     fmt.Sprintf("app-%d", index),
+				Digest:    fmt.Sprintf("digest-%d", index),
+				VersionID: fmt.Sprintf("version-%d", index),
+			},
+			App: model.App{ID: fmt.Sprintf("app-%d", index), Mode: "compose"},
+		}
+		handler.handle(context.Background(), commandFrame(t, command), sender)
+	}
+
+	// The node runs a bounded number of tasks at the same time.
+	waitForAgent(t, "the first tasks of the node", func() bool {
+		return executor.startedTasks() >= maxConcurrentDeployments
+	})
+	time.Sleep(200 * time.Millisecond)
+	if got := executor.startedTasks(); got != maxConcurrentDeployments {
+		t.Fatalf("tasks = %d, want %d: the node runs more tasks at the same time than it may",
+			got, maxConcurrentDeployments)
+	}
+
+	// The tasks that wait for a free slot run after the first ones end.
+	executor.releaseAll()
+	waitForAgent(t, "all the tasks of the node", func() bool {
+		return executor.startedTasks() == 4
+	})
+	if got := executor.maximumTasks(); got > maxConcurrentDeployments {
+		t.Fatalf("the node ran %d tasks at the same time, want at most %d", got, maxConcurrentDeployments)
+	}
+}
+
+// TestTheRetryOfABusyApplicationHoldsNoSlotOfTheNode proves that a command
+// that waits for a busy application holds no slot of the node.
+//
+// The slot belongs to a task that runs. A command that waits for its
+// application waits in the queue of the node, so the other applications keep
+// their own slots.
+func TestTheRetryOfABusyApplicationHoldsNoSlotOfTheNode(t *testing.T) {
+	previous := busyRetryInterval
+	busyRetryInterval = 20 * time.Millisecond
+	t.Cleanup(func() { busyRetryInterval = previous })
+
+	executor := newBlockingExecutor()
+	t.Cleanup(executor.releaseAll)
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	uncertainTask(t, path, "task-busy", "app-busy")
+	_, handler := newTestAgentAt(t, executor, path)
+	sender := &recordingSender{}
+
+	// The first task occupies a slot of the node.
+	first := model.Command{
+		Task: model.Task{ID: "task-1", AppID: "app-1", Digest: "digest-1"},
+		App:  model.App{ID: "app-1", Mode: "compose"},
+	}
+	handler.handle(context.Background(), commandFrame(t, first), sender)
+	waitForAgent(t, "the first task of the node", func() bool {
+		return executor.startedTasks() == 1
+	})
+
+	// The command of the busy application waits for its application.
+	busy := model.Command{
+		Task: model.Task{ID: "task-2", AppID: "app-busy", Digest: "digest-2"},
+		App:  model.App{ID: "app-busy", Mode: "compose"},
+	}
+	handler.handle(context.Background(), commandFrame(t, busy), sender)
+
+	// The command of another application still starts: the waiting command
+	// holds no slot of the node.
+	other := model.Command{
+		Task: model.Task{ID: "task-3", AppID: "app-2", Digest: "digest-3"},
+		App:  model.App{ID: "app-2", Mode: "compose"},
+	}
+	handler.handle(context.Background(), commandFrame(t, other), sender)
+
+	waitForAgent(t, "the second task of the node", func() bool {
+		return executor.startedTasks() == 2
+	})
+	if got := executor.startedTasks(); got != 2 {
+		t.Fatalf("tasks = %d, want 2: the waiting command took a slot of the node", got)
 	}
 }
 

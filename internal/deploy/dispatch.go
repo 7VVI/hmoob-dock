@@ -354,7 +354,11 @@ func (d *Dispatcher) answer(ctx context.Context, nodeID string, result protocol.
 	}
 	if !result.Found {
 		// The ledger of the node does not know the task, so there is no
-		// report to apply.
+		// report to apply. A release of the administrator is confirmed by
+		// the answer of the node: the node has no executor for the task.
+		if _, _, err := d.confirmManualResolutionWithoutTask(ctx, record.task); err != nil {
+			return err
+		}
 		return nil
 	}
 	return d.ApplyReceipt(ctx, nodeID, result.Receipt)

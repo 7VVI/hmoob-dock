@@ -78,9 +78,29 @@ func (d *Dispatcher) Reconcile(ctx context.Context, taskID string) (model.Task, 
 		return task, err
 	}
 	if !answer.Found {
-		// The ledger of the node does not know the task. Nobody may prove
-		// that the target is untouched, so the task holds its application
-		// and the administrator has to release it by hand.
+		// The ledger of the node does not know the task.
+		confirmed, updated, err := d.confirmManualResolutionWithoutTask(ctx, task)
+		if err != nil {
+			return task, err
+		}
+		if confirmed {
+			// The node has no executor for the task, so the release of the
+			// administrator is complete and the application is free again.
+			return updated, nil
+		}
+		if task.LastSeq == 0 && task.State == model.Queued {
+			// The command never reached the node. It is sent again to the
+			// node that holds the task: the ledger of the node knows a
+			// command at most once, so the deployment runs at most once.
+			if err := d.send(ctx, taskID); err != nil {
+				return task, err
+			}
+			log.Printf("control: the command of the task %s was sent again to the node %s",
+				taskID, task.AgentID)
+			return d.service.Task(ctx, taskID)
+		}
+		// Nobody may prove that the target is untouched, so the task holds
+		// its application and the administrator has to release it by hand.
 		return task, fmt.Errorf("%w: the node %s does not know the task %s",
 			ErrDivergence, task.AgentID, task.ID)
 	}
@@ -177,6 +197,53 @@ func (d *Dispatcher) Resolve(ctx context.Context, taskID string, expectedSeq uin
 		return fmt.Errorf("%w: %v", ErrResolvePending, err)
 	}
 	return nil
+}
+
+// confirmManualResolutionWithoutTask ends a task that an administrator
+// released by hand and that the node does not know.
+//
+// The node answered that its ledger does not hold the task, so the node has
+// no executor for it: the release of the administrator is complete and the
+// application is free again. The node is the only side that watched the
+// target, so its answer ends the waiting.
+//
+// The first return value reports whether a release was confirmed. The second
+// one is the state of the task afterwards.
+func (d *Dispatcher) confirmManualResolutionWithoutTask(ctx context.Context, task model.Task) (bool, model.Task, error) {
+	deployment, err := d.service.Deployment(ctx, task.ID)
+	if err != nil {
+		return false, task, err
+	}
+	if deployment.ManualResolution == nil || !deployment.ManualResolution.Pending {
+		// Nobody asked for a release, so the answer of the node changes
+		// nothing.
+		return false, task, nil
+	}
+	if !CanTransition(task.State, model.Failed) {
+		// The task ended already, so its outcome stays.
+		return false, task, nil
+	}
+	// The outcome is the decision of the administrator and not a report of
+	// the node, so the reason of the administrator is the message of the
+	// outcome.
+	receipt := model.Receipt{
+		TaskID: task.ID,
+		Digest: task.Digest,
+		Seq:    task.LastSeq + 1,
+		Result: model.Result{
+			State:   model.Failed,
+			Code:    CodeManualResolution,
+			Message: deployment.ManualResolution.Reason,
+		},
+	}
+	if err := d.writeReceipt(ctx, task, receipt); err != nil {
+		return false, task, err
+	}
+	updated, err := d.service.Task(ctx, task.ID)
+	if err != nil {
+		return false, task, err
+	}
+	return updated.State == model.Failed, updated, nil
 }
 
 // Recover reconciles the deployments that did not finish.

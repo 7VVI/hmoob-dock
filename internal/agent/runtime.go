@@ -71,6 +71,16 @@ const (
 	// ledgerFileName is the name of the ledger of the agent inside of the
 	// work directory.
 	ledgerFileName = "ledger.db"
+	// maxConcurrentDeployments is the number of tasks the agent runs at the
+	// same time.
+	//
+	// The limit is a limit and not a promise: a node that runs two tasks
+	// at the same time still deploys the applications one after the other
+	// when they are many. The limit keeps a long deployment of one
+	// application from stopping the deployments of the other applications
+	// of the node, and it keeps a command that waits for a busy application
+	// from taking a place of a running task.
+	maxConcurrentDeployments = 2
 )
 
 // busyRetryInterval is the time the agent waits before it tries a command of
@@ -198,6 +208,11 @@ type deployments struct {
 	ledger *Ledger
 	// commands holds the commands that wait for their execution.
 	commands chan pendingCommand
+
+	// delayMu guards the delays of the applications.
+	delayMu sync.Mutex
+	// readyAt holds the time every application may be tried again.
+	readyAt map[string]time.Time
 }
 
 // pendingCommand is a command of the control端 that waits for its
@@ -215,21 +230,29 @@ func newDeployments(worker *Worker, ledger *Ledger) *deployments {
 		worker:   worker,
 		ledger:   ledger,
 		commands: make(chan pendingCommand, commandQueueSize),
+		readyAt:  make(map[string]time.Time),
 	}
 }
 
-// start runs the worker of the commands.
+// start runs the workers of the commands.
 //
-// The worker runs under the context of the process of the agent, so a
+// The workers run under the context of the process of the agent, so a
 // connection that ends does not cancel a command that already runs.
+//
+// The node runs a bounded number of tasks at the same time, so a long
+// deployment does not stop the deployments of the other applications.
 func (d *deployments) start(ctx context.Context) {
-	go d.run(ctx)
+	for index := 0; index < maxConcurrentDeployments; index++ {
+		go d.run(ctx)
+	}
 }
 
-// run executes the commands of the control端 one after the other.
+// run executes the commands of the control端.
 //
-// A node deploys one application at a time, and the ledger holds the
-// application of a task anyway.
+// The worker takes a command from the queue, runs it and takes the next
+// one. A command that waits for a busy application does not hold the worker:
+// it waits in the queue of the node, so the other applications keep
+// deploying.
 func (d *deployments) run(ctx context.Context) {
 	for {
 		select {
@@ -289,30 +312,68 @@ func (d *deployments) enqueue(ctx context.Context, envelope protocol.Envelope, o
 //
 // A command that the ledger refuses because the application holds another
 // task is not a failure: the application is still busy, so the command waits
-// and is tried again. That is the case of a deployment that follows a
-// manual release: the release is only complete when the node confirms it.
+// for it and is tried again later. That is the case of a deployment that
+// follows a manual release: the release is only complete when the node
+// confirms it.
+//
+// The waiting happens in the queue of the node and not in the worker, so a
+// busy application takes no place of a running task and does not stop the
+// deployments of the other applications.
 func (d *deployments) execute(ctx context.Context, pending pendingCommand) {
 	frames := &outputFrames{sender: pending.sender, taskID: pending.command.Task.ID}
-	for {
-		receipt, err := d.worker.Handle(ctx, pending.command, frames)
-		switch {
-		case errors.Is(err, ErrAppBusy):
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(busyRetryInterval):
-			}
-			continue
-		case err != nil:
-			// The ledger refused the command. The control端 learns the real
-			// state of the task from the ledger itself.
-			d.reportState(ctx, pending.command.Task.ID, pending.sender)
-			return
-		}
-		frames.close()
-		d.report(ctx, receipt, pending.sender)
+	receipt, err := d.worker.Handle(ctx, pending.command, frames)
+	switch {
+	case errors.Is(err, ErrAppBusy):
+		d.retry(ctx, pending)
+		return
+	case err != nil:
+		// The ledger refused the command. The control端 learns the real
+		// state of the task from the ledger itself.
+		d.reportState(ctx, pending.command.Task.ID, pending.sender)
 		return
 	}
+	frames.close()
+	d.report(ctx, receipt, pending.sender)
+}
+
+// retry hands a command back to the queue of the node after the delay of its
+// application.
+//
+// The delay belongs to the application: a command of a busy application waits
+// for that application alone, and the wait holds no worker of the node.
+func (d *deployments) retry(ctx context.Context, pending pendingCommand) {
+	delay := d.delayOf(pending.command.Task.AppID)
+	go func() {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		select {
+		case d.commands <- pending:
+		case <-ctx.Done():
+		}
+	}()
+}
+
+// delayOf returns the time an application may be tried again.
+//
+// The delay belongs to the application and not to the node: a busy
+// application waits for itself alone, and the other applications of the node
+// do not wait with it.
+func (d *deployments) delayOf(appID string) time.Duration {
+	d.delayMu.Lock()
+	defer d.delayMu.Unlock()
+
+	now := time.Now()
+	ready, known := d.readyAt[appID]
+	if !known || ready.Before(now) {
+		ready = now.Add(busyRetryInterval)
+		d.readyAt[appID] = ready
+	}
+	return ready.Sub(now)
 }
 
 // answer answers a question about the ledger of the node.
@@ -332,6 +393,11 @@ func (d *deployments) answer(ctx context.Context, envelope protocol.Envelope, ou
 // The resolution is refused when the ledger holds another sequence number:
 // the control端 learns the real state of the task from the answer of the
 // node instead of forcing its own outcome onto the node.
+//
+// A resolution of a task the ledger does not know is answered as well: the
+// node has no executor for such a task, and the control端 has to learn that
+// from the node. A silent node would leave the release of the administrator
+// pending for ever.
 func (d *deployments) resolve(ctx context.Context, envelope protocol.Envelope, out sender) {
 	message, err := protocol.DecodeDeployResolve(envelope.Payload)
 	if err != nil {
@@ -345,9 +411,9 @@ func (d *deployments) resolve(ctx context.Context, envelope protocol.Envelope, o
 	switch {
 	case err == nil:
 		d.report(ctx, receipt, out)
-	case errors.Is(err, ErrSeqConflict), errors.Is(err, ErrNotResolvable):
-		// The node knows another state of the task. The control端 learns it
-		// from the answer of the node.
+	case errors.Is(err, ErrSeqConflict), errors.Is(err, ErrNotResolvable), errors.Is(err, ErrTaskNotFound):
+		// The node knows another state of the task, or it does not know the
+		// task at all. The control端 learns it from the answer of the node.
 		d.reportState(ctx, message.TaskID, out)
 	default:
 		log.Printf("agent: resolve the task %s: %v", message.TaskID, err)

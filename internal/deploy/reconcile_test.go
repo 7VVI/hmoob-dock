@@ -486,3 +486,147 @@ func TestTheQueryThatNobodyAnswersIsReported(t *testing.T) {
 		t.Fatal("the reconcile of a silent node reported success")
 	}
 }
+
+// TestTheCommandThatNeverReachedTheNodeIsSentAgain proves that a task that
+// was bound to a node but whose command never arrived is sent again to that
+// node.
+//
+// The command may be lost between the binding of the task and the delivery:
+// the connection may break, or the queue of the node may be full. The task
+// holds its application until it ends, so the control端 sends the command
+// again instead of reporting a disagreement that nobody may resolve.
+func TestTheCommandThatNeverReachedTheNodeIsSentAgain(t *testing.T) {
+	env := newHarness(t, fixedInventory{})
+	app := env.createApp("demo")
+	task := env.submit(app, composeConfig("nginx:alpine"))
+	other := env.enrollNode(t, "engine-b")
+
+	transport := &recordingTransport{}
+	transport.connect(env.nodeID)
+	transport.connect(other)
+
+	// The task is bound to the node, but the delivery fails: the connection
+	// broke between the binding and the send.
+	transport.mu.Lock()
+	transport.err = errors.New("the connection broke")
+	transport.mu.Unlock()
+
+	dispatcher := deploy.NewDispatcher(env.service, transport)
+	if err := dispatcher.Dispatch(context.Background(), task.ID); err == nil {
+		t.Fatal("the dispatch of a broken connection reported success")
+	}
+	bound, err := env.service.Task(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("read the task: %v", err)
+	}
+	if bound.AgentID != env.nodeID {
+		t.Fatalf("the task is bound to the node %s, want %s", bound.AgentID, env.nodeID)
+	}
+	before := len(transport.commands())
+
+	// The connection is back and the node answers that it does not know the
+	// task: the command never arrived.
+	transport.mu.Lock()
+	transport.err = nil
+	transport.mu.Unlock()
+	answering := &answeringTransport{recordingTransport: transport}
+	answering.answer = protocol.DeployQueryResult{Found: false}
+	restarted := deploy.NewDispatcher(env.service, answering)
+	answering.dispatcher = restarted
+	if err := restarted.Recover(context.Background()); err != nil {
+		t.Fatalf("recover the deployments: %v", err)
+	}
+
+	// The command was sent again, and it went to the node that holds the
+	// task: another node would run the deployment a second time.
+	commands := 0
+	for _, frame := range answering.sent() {
+		if frame.envelope.Type != protocol.TypeDeployCommand {
+			continue
+		}
+		commands++
+		if frame.nodeID != env.nodeID {
+			t.Fatalf("the command went to the node %s, want the bound node %s", frame.nodeID, env.nodeID)
+		}
+	}
+	if commands != before+1 {
+		t.Fatalf("commands = %d, want %d: the command was not sent again", commands, before+1)
+	}
+
+	// The node runs the task and reports its outcome, so the application is
+	// free again.
+	report := model.Receipt{
+		TaskID: task.ID,
+		Digest: task.Digest,
+		Seq:    1,
+		Result: model.Result{State: model.Succeeded, Code: "compose_ready"},
+	}
+	if err := restarted.ApplyReceipt(context.Background(), env.nodeID, report); err != nil {
+		t.Fatalf("apply the report: %v", err)
+	}
+	if _, err := env.service.Submit(context.Background(), deploy.SubmitRequest{
+		AppID:          app.ID,
+		BaseVersionID:  task.VersionID,
+		IdempotencyKey: "another-request",
+		Config:         composeConfig("nginx:1.27"),
+		PreviewDigest:  env.preview(app, task.VersionID, composeConfig("nginx:1.27")).Digest,
+	}); err != nil {
+		t.Fatalf("deploy the application again: %v", err)
+	}
+}
+
+// TestTheManualReleaseIsConfirmedWhenTheNodeDoesNotKnowTheTask proves that a
+// release of the administrator ends the task when the node answers that it
+// does not know the task.
+//
+// The node is the truth about the target: a node that does not know the task
+// has no executor for it, so the release may end the task and the
+// application may be deployed again.
+func TestTheManualReleaseIsConfirmedWhenTheNodeDoesNotKnowTheTask(t *testing.T) {
+	env := newHarness(t, fixedInventory{})
+	app := env.createApp("demo")
+	task := env.submit(app, composeConfig("nginx:alpine"))
+
+	transport := &recordingTransport{}
+	transport.connect(env.nodeID)
+	dispatcher := deploy.NewDispatcher(env.service, transport)
+	if err := dispatcher.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("dispatch the task: %v", err)
+	}
+
+	// The administrator releases the task.
+	if err := dispatcher.Resolve(context.Background(), task.ID, 0, true, "the executor of the task was stopped by hand"); err != nil {
+		t.Fatalf("release the task: %v", err)
+	}
+
+	// The node answers that its ledger does not know the task.
+	answer := protocol.DeployQueryResult{TaskID: task.ID, Found: false}
+	if err := dispatcher.ApplyQueryResult(context.Background(), env.nodeID, answer); err != nil {
+		t.Fatalf("apply the answer of the node: %v", err)
+	}
+
+	deployment, err := env.service.Deployment(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("read the deployment: %v", err)
+	}
+	if deployment.State != model.Failed {
+		t.Fatalf("the task is in the phase %q, want failed", deployment.State)
+	}
+	if deployment.ResultCode != deploy.CodeManualResolution {
+		t.Fatalf("the result code = %q, want %q", deployment.ResultCode, deploy.CodeManualResolution)
+	}
+	if deployment.ManualResolution == nil || deployment.ManualResolution.Pending {
+		t.Fatalf("the deployment = %+v, want a confirmed release", deployment.ManualResolution)
+	}
+
+	// The application is free again.
+	if _, err := env.service.Submit(context.Background(), deploy.SubmitRequest{
+		AppID:          app.ID,
+		BaseVersionID:  task.VersionID,
+		IdempotencyKey: "another-request",
+		Config:         composeConfig("nginx:1.27"),
+		PreviewDigest:  env.preview(app, task.VersionID, composeConfig("nginx:1.27")).Digest,
+	}); err != nil {
+		t.Fatalf("deploy the application again: %v", err)
+	}
+}
