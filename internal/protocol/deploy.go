@@ -23,6 +23,14 @@ const (
 	TypeDeployQuery = "deploy.query"
 	// TypeDeployQueryResult answers a query about the ledger of an agent.
 	TypeDeployQueryResult = "deploy.query_result"
+	// TypeDeployResolve asks an agent to end a task whose outcome could
+	// not be proven.
+	//
+	// The resolution is a frame of its own and not a command: a command
+	// deploys an application, while a resolution ends a task that nobody
+	// may prove to be finished. A frame of its own keeps the two apart, so
+	// a resolution never reaches the executor of a deployment.
+	TypeDeployResolve = "deploy.resolve"
 )
 
 // The limits of the configuration of a command.
@@ -92,6 +100,23 @@ type DeployQueryResult struct {
 	Receipt model.Receipt `json:"receipt"`
 }
 
+// DeployResolve asks the ledger of an agent to end a task by hand.
+//
+// The resolution carries the sequence number the task holds, so a stale
+// resolution cannot cover a newer state of the task, and it carries the
+// reason of the administrator, so the node keeps the reason of the outcome
+// it writes.
+type DeployResolve struct {
+	// TaskID is the task the resolution ends.
+	TaskID string `json:"task_id"`
+	// Digest identifies the configuration of the task.
+	Digest string `json:"digest"`
+	// ExpectedSeq is the sequence number the task holds.
+	ExpectedSeq uint64 `json:"expected_seq"`
+	// Reason is the reason of the administrator.
+	Reason string `json:"reason"`
+}
+
 // DecodeDeployCommand reads the command of a frame.
 //
 // The identity of the command is checked before its limits: a command that
@@ -126,6 +151,29 @@ func DecodeDeployQuery(payload []byte) (DeployQuery, error) {
 		return DeployQuery{}, fmt.Errorf("%w: the query names no task", ErrPayloadInvalid)
 	}
 	return query, nil
+}
+
+// DecodeDeployResolve reads the resolution of a frame.
+//
+// The identity of the resolution is checked before it is used: a resolution
+// that names no task or no configuration cannot be compared with the task of
+// the ledger, and a resolution without a reason would end a task without
+// telling why.
+func DecodeDeployResolve(payload []byte) (DeployResolve, error) {
+	var message DeployResolve
+	if err := json.Unmarshal(payload, &message); err != nil {
+		return DeployResolve{}, fmt.Errorf("%w: decode the resolution: %v", ErrPayloadInvalid, err)
+	}
+	if strings.TrimSpace(message.TaskID) == "" {
+		return DeployResolve{}, fmt.Errorf("%w: the resolution names no task", ErrPayloadInvalid)
+	}
+	if strings.TrimSpace(message.Digest) == "" {
+		return DeployResolve{}, fmt.Errorf("%w: the resolution names no configuration", ErrPayloadInvalid)
+	}
+	if strings.TrimSpace(message.Reason) == "" {
+		return DeployResolve{}, fmt.Errorf("%w: the resolution names no reason", ErrPayloadInvalid)
+	}
+	return message, nil
 }
 
 // checkCommandIdentity refuses a command that does not name its task, its

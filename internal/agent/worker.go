@@ -58,6 +58,19 @@ func NewWorker(ledger *Ledger, executor dockerops.Executor) *Worker {
 	}
 }
 
+// UseRootContext sets the context of the process of the agent.
+//
+// The execution of a task runs under this context, so a connection that
+// ends does not cancel a command that already runs. The context of the
+// process is the one of the signal handling of the agent, so the command
+// stops when the agent stops.
+func (w *Worker) UseRootContext(ctx context.Context) *Worker {
+	if ctx != nil {
+		w.root = ctx
+	}
+	return w
+}
+
 // Handle executes a command of the control端.
 //
 // The command is written into the ledger before anything runs, so a command

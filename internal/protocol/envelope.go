@@ -106,6 +106,7 @@ var registeredTypes = map[string]bool{
 	TypeDeployOutput:      true,
 	TypeDeployQuery:       true,
 	TypeDeployQueryResult: true,
+	TypeDeployResolve:     true,
 }
 
 // IsRegisteredType reports whether the control端 accepts the given message
@@ -125,6 +126,7 @@ func RegisteredTypes() []string {
 		TypeDeployOutput,
 		TypeDeployQuery,
 		TypeDeployQueryResult,
+		TypeDeployResolve,
 	}
 }
 
@@ -139,7 +141,7 @@ func PayloadLimit(messageType string) int {
 		return MaxCommandPayloadSize
 	case TypeInventory:
 		return MaxInventoryPayloadSize
-	case TypeDeployReceipt, TypeDeployQuery, TypeDeployQueryResult:
+	case TypeDeployReceipt, TypeDeployQuery, TypeDeployQueryResult, TypeDeployResolve:
 		return MaxControlPayloadSize
 	case TypeDeployOutput:
 		return MaxOutputPayloadSize

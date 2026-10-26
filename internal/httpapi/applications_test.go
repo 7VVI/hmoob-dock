@@ -23,6 +23,15 @@ const deploymentYAML = "services:\n  api:\n    image: nginx:alpine\n"
 func (s *authServer) connectAgent(t *testing.T, csrf string, containers []protocol.Container) string {
 	t.Helper()
 
+	nodeID, _ := s.connectAgentWith(t, csrf, containers)
+	return nodeID
+}
+
+// connectAgentWith registers a node and connects its agent with an
+// inventory. It returns the node and the connection of its agent.
+func (s *authServer) connectAgentWith(t *testing.T, csrf string, containers []protocol.Container) (string, *websocket.Conn) {
+	t.Helper()
+
 	token := s.createAgentToken(t, csrf)
 	payload := s.enroll(t, token, nodeIdentity)
 	nodeID, _ := payload["node_id"].(string)
@@ -53,7 +62,7 @@ func (s *authServer) connectAgent(t *testing.T, csrf string, containers []protoc
 		CollectedAt: time.Now(),
 	})
 	s.waitForInventory(t, nodeID, len(containers))
-	return nodeID
+	return nodeID, conn
 }
 
 // sendFrame writes one frame of an agent to the control端.

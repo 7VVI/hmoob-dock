@@ -358,7 +358,7 @@ func TestTheAgentRegistersItselfAndReportsItsNode(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
-		if err := run(ctx, cfg, engine); err != nil {
+		if err := run(ctx, cfg, engine, nil); err != nil {
 			t.Errorf("the agent stopped: %v", err)
 		}
 	}()
@@ -407,7 +407,7 @@ func TestTheAgentRefusesACertificateOfAnotherAuthority(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	err := run(ctx, cfg, fakeEngine{})
+	err := run(ctx, cfg, fakeEngine{}, nil)
 	if err == nil {
 		t.Fatal("the agent talked to a control端 with a foreign certificate")
 	}
@@ -429,7 +429,7 @@ func TestTheAgentRefusesAHostNameThatTheCertificateDoesNotCover(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	err := run(ctx, cfg, fakeEngine{})
+	err := run(ctx, cfg, fakeEngine{}, nil)
 	if err == nil {
 		t.Fatal("the agent talked to a control端 with another host name")
 	}
@@ -482,7 +482,7 @@ func TestTheAgentReconnectsAfterADroppedConnection(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
-		if err := run(ctx, cfg, engine); err != nil {
+		if err := run(ctx, cfg, engine, nil); err != nil {
 			t.Errorf("the agent stopped: %v", err)
 		}
 	}()

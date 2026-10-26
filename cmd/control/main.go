@@ -296,6 +296,17 @@ func run(addr string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// The control端 asks the nodes about the deployments that did not
+	// finish, so a restart does not run a deployment a second time. The
+	// nodes that are not connected yet are asked again when they come back.
+	if server, ok := handler.(*httpapi.Server); ok {
+		go func() {
+			if err := server.Recover(ctx); err != nil {
+				log.Printf("control: the deployments were not recovered: %v", err)
+			}
+		}()
+	}
+
 	failures := make(chan error, 1)
 	go func() {
 		log.Printf("control: listening on %s, database %s", addr, cfg.DBPath)

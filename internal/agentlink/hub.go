@@ -127,6 +127,8 @@ type Hub struct {
 	connections map[string]*connection
 	// subscribers holds the callbacks per message type.
 	subscribers map[string][]subscriber
+	// onConnect holds the callbacks that run when a node connects.
+	onConnect []func(string)
 }
 
 // NewHub builds the hub of the agent connections.
@@ -149,6 +151,35 @@ func (h *Hub) Subscribe(kind string, fn func(context.Context, string, protocol.E
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.subscribers[kind] = append(h.subscribers[kind], subscriber{kind: kind, fn: fn})
+}
+
+// OnConnect registers a callback that runs when the agent of a node opens a
+// connection.
+//
+// The callback runs in the goroutine of the connection, so it has to be
+// quick: a slow callback delays the frames of its own connection only.
+func (h *Hub) OnConnect(fn func(nodeID string)) {
+	if fn == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.onConnect = append(h.onConnect, fn)
+}
+
+// connected tells the callbacks that the agent of a node is connected.
+//
+// A node that comes back may have lost the reports of its tasks, so the
+// control端 asks it about the tasks it holds.
+func (h *Hub) connected(nodeID string) {
+	h.mu.RLock()
+	callbacks := make([]func(string), len(h.onConnect))
+	copy(callbacks, h.onConnect)
+	h.mu.RUnlock()
+
+	for _, callback := range callbacks {
+		callback(nodeID)
+	}
 }
 
 // Send hands a frame to the agent of a node.
@@ -310,6 +341,7 @@ func (h *Hub) Serve(ctx context.Context, nodeID string, conn *websocket.Conn) er
 	// The hello proves that the agent is alive.
 	node.markSeen()
 	h.register(node)
+	h.connected(nodeID)
 	defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
 	defer node.stop()
 	defer h.unregister(node)

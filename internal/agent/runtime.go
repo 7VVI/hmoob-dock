@@ -21,10 +21,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	mathrand "math/rand/v2"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,7 +36,9 @@ import (
 
 	"hmoob-dock/internal/config"
 	"hmoob-dock/internal/dockerops"
+	"hmoob-dock/internal/model"
 	"hmoob-dock/internal/protocol"
+	"hmoob-dock/internal/yamlspec"
 )
 
 // The intervals and limits of the agent.
@@ -61,7 +65,22 @@ const (
 	dialTimeout = 30 * time.Second
 	// enrollmentTimeout bounds the registration of the node.
 	enrollmentTimeout = 30 * time.Second
+	// commandQueueSize is the number of commands that wait for their
+	// execution.
+	commandQueueSize = 16
+	// ledgerFileName is the name of the ledger of the agent inside of the
+	// work directory.
+	ledgerFileName = "ledger.db"
 )
+
+// busyRetryInterval is the time the agent waits before it tries a command of
+// the control端 again.
+//
+// A command of an application that holds another task is not a failure: the
+// task may be released by hand later, so the command waits instead of ending
+// the deployment with an error. The interval is a variable so that a test
+// does not have to wait for it.
+var busyRetryInterval = 5 * time.Second
 
 // errRejected reports that the control端 refused the credential of the
 // agent. Reconnecting does not help then, the node has to be registered
@@ -95,11 +114,353 @@ func Run(ctx context.Context, cfg config.Agent) error {
 		}
 	}()
 
-	return run(ctx, cfg, local)
+	// The ledger of the agent holds the tasks of the node. It is a database
+	// of its own, so the state of a node survives the state of the control端.
+	ledger, err := OpenLedger(filepath.Join(cfg.WorkRoot, ledgerFileName))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := ledger.Close(); err != nil {
+			log.Printf("agent: close the ledger: %v", err)
+		}
+	}()
+
+	// The executor of a deployment is chosen by the mode of its
+	// application, so a client may not name the program of the node. The
+	// execution runs under the context of the process of the agent, so a
+	// connection that ends does not cancel a command that already runs.
+	worker := NewWorker(ledger, &executors{
+		compose: dockerops.NewCompose(cfg.WorkRoot, dockerops.ExecRunner{}, local),
+		swarm:   dockerops.NewSwarm(cfg.WorkRoot, dockerops.ExecRunner{}, local),
+	}).UseRootContext(ctx)
+
+	handler := newDeployments(worker, ledger)
+	handler.start(ctx)
+
+	return run(ctx, cfg, local, handler)
+}
+
+// executors runs the deployments of the applications of a node.
+//
+// The executor is chosen by the mode of the application: a Compose
+// application runs with Compose, a Swarm application as a stack. The mode
+// belongs to the application of the control端, so neither a configuration nor
+// an API may name the program of the node.
+type executors struct {
+	// compose runs the applications of the Compose mode.
+	compose dockerops.Executor
+	// swarm runs the applications of the Swarm mode.
+	swarm dockerops.Executor
+}
+
+// Execute runs the command with the executor of the mode of the
+// application.
+func (e *executors) Execute(ctx context.Context, cmd model.Command, output io.Writer) (model.Result, error) {
+	switch cmd.App.Mode {
+	case yamlspec.ModeCompose:
+		return e.compose.Execute(ctx, cmd, output)
+	case yamlspec.ModeSwarm:
+		return e.swarm.Execute(ctx, cmd, output)
+	default:
+		return model.Result{
+			State:   model.Failed,
+			Code:    dockerops.CodePreflightFailed,
+			Message: fmt.Sprintf("应用模式 %q 不受支持", cmd.App.Mode),
+		}, nil
+	}
+}
+
+// sender hands the frames of the agent to the control端.
+//
+// The control frames answer the control端 and wait in the queue of the
+// connection. The log frames carry the output of a task and are dropped
+// when their queue is full.
+type sender interface {
+	// sendControl hands a control frame to the control端.
+	sendControl(messageType string, payload any) error
+	// sendLog hands a log frame to the control端.
+	sendLog(messageType string, payload any) error
+}
+
+// deployments serves the deployment frames of the control端.
+//
+// Every command reaches the worker of the agent, so the intent of the
+// execution is written into the ledger before the Docker command runs: a
+// command that arrives twice runs the Docker command at most once.
+//
+// The questions about the ledger are answered from the ledger itself: they
+// never run a command.
+type deployments struct {
+	// worker executes the commands of the control端.
+	worker *Worker
+	// ledger holds the tasks of the node.
+	ledger *Ledger
+	// commands holds the commands that wait for their execution.
+	commands chan pendingCommand
+}
+
+// pendingCommand is a command of the control端 that waits for its
+// execution.
+type pendingCommand struct {
+	// command is the command to execute.
+	command model.Command
+	// sender answers the frames of the command.
+	sender sender
+}
+
+// newDeployments builds the handler of the deployment frames.
+func newDeployments(worker *Worker, ledger *Ledger) *deployments {
+	return &deployments{
+		worker:   worker,
+		ledger:   ledger,
+		commands: make(chan pendingCommand, commandQueueSize),
+	}
+}
+
+// start runs the worker of the commands.
+//
+// The worker runs under the context of the process of the agent, so a
+// connection that ends does not cancel a command that already runs.
+func (d *deployments) start(ctx context.Context) {
+	go d.run(ctx)
+}
+
+// run executes the commands of the control端 one after the other.
+//
+// A node deploys one application at a time, and the ledger holds the
+// application of a task anyway.
+func (d *deployments) run(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case pending, ok := <-d.commands:
+			if !ok {
+				return
+			}
+			d.execute(ctx, pending)
+		}
+	}
+}
+
+// handle serves a frame of the control端.
+//
+// The frames of the deployments are answered by the agent: a command runs
+// the deployment, a question is answered from the ledger and a resolution
+// ends a task by hand.
+func (d *deployments) handle(ctx context.Context, envelope protocol.Envelope, out sender) {
+	if d == nil {
+		return
+	}
+	switch envelope.Type {
+	case protocol.TypeDeployCommand:
+		d.enqueue(ctx, envelope, out)
+	case protocol.TypeDeployQuery:
+		d.answer(ctx, envelope, out)
+	case protocol.TypeDeployResolve:
+		d.resolve(ctx, envelope, out)
+	default:
+		// The control端 sends nothing else to an agent.
+	}
+}
+
+// enqueue hands a command of the control端 to the worker of the commands.
+//
+// The command waits in the queue: the read loop of the connection has to
+// stay open, because the control端 asks the node about its tasks while a
+// deployment runs.
+func (d *deployments) enqueue(ctx context.Context, envelope protocol.Envelope, out sender) {
+	message, err := protocol.DecodeDeployCommand(envelope.Payload)
+	if err != nil {
+		log.Printf("agent: the command of the control端 is not valid: %v", err)
+		return
+	}
+	select {
+	case d.commands <- pendingCommand{command: message, sender: out}:
+	default:
+		// The queue is full. The command is dropped and the control端
+		// learns about it when it asks the node about the task again.
+		log.Printf("agent: the queue of the commands is full, a command was dropped")
+	}
+}
+
+// execute runs a command of the control端 and reports its outcome.
+//
+// A command that the ledger refuses because the application holds another
+// task is not a failure: the application is still busy, so the command waits
+// and is tried again. That is the case of a deployment that follows a
+// manual release: the release is only complete when the node confirms it.
+func (d *deployments) execute(ctx context.Context, pending pendingCommand) {
+	frames := &outputFrames{sender: pending.sender, taskID: pending.command.Task.ID}
+	for {
+		receipt, err := d.worker.Handle(ctx, pending.command, frames)
+		switch {
+		case errors.Is(err, ErrAppBusy):
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(busyRetryInterval):
+			}
+			continue
+		case err != nil:
+			// The ledger refused the command. The control端 learns the real
+			// state of the task from the ledger itself.
+			d.reportState(ctx, pending.command.Task.ID, pending.sender)
+			return
+		}
+		frames.close()
+		d.report(ctx, receipt, pending.sender)
+		return
+	}
+}
+
+// answer answers a question about the ledger of the node.
+//
+// The answer only reads the ledger: a question never runs a command.
+func (d *deployments) answer(ctx context.Context, envelope protocol.Envelope, out sender) {
+	query, err := protocol.DecodeDeployQuery(envelope.Payload)
+	if err != nil {
+		log.Printf("agent: the question of the control端 is not valid: %v", err)
+		return
+	}
+	d.reportState(ctx, query.TaskID, out)
+}
+
+// resolve ends a task whose outcome could not be proven.
+//
+// The resolution is refused when the ledger holds another sequence number:
+// the control端 learns the real state of the task from the answer of the
+// node instead of forcing its own outcome onto the node.
+func (d *deployments) resolve(ctx context.Context, envelope protocol.Envelope, out sender) {
+	message, err := protocol.DecodeDeployResolve(envelope.Payload)
+	if err != nil {
+		log.Printf("agent: the resolution of the control端 is not valid: %v", err)
+		return
+	}
+	receipt, err := d.ledger.Resolve(ctx, message.TaskID, message.ExpectedSeq, model.Result{
+		State:   model.Failed,
+		Message: message.Reason,
+	})
+	switch {
+	case err == nil:
+		d.report(ctx, receipt, out)
+	case errors.Is(err, ErrSeqConflict), errors.Is(err, ErrNotResolvable):
+		// The node knows another state of the task. The control端 learns it
+		// from the answer of the node.
+		d.reportState(ctx, message.TaskID, out)
+	default:
+		log.Printf("agent: resolve the task %s: %v", message.TaskID, err)
+	}
+}
+
+// report sends the report of a task to the control端.
+func (d *deployments) report(ctx context.Context, receipt model.Receipt, out sender) {
+	if err := out.sendControl(protocol.TypeDeployReceipt, protocol.DeployReceipt{Receipt: receipt}); err != nil {
+		log.Printf("agent: send the report of the task %s: %v", receipt.TaskID, err)
+	}
+}
+
+// reportState sends the state of a task in the ledger to the control端.
+//
+// The ledger is the truth about the task, so the control端 learns it even
+// when the command itself was refused.
+func (d *deployments) reportState(ctx context.Context, taskID string, out sender) {
+	answer := protocol.DeployQueryResult{TaskID: taskID}
+	receipt, err := d.ledger.Lookup(ctx, taskID)
+	switch {
+	case err == nil:
+		answer.Found = true
+		answer.Receipt = receipt
+	case errors.Is(err, ErrTaskNotFound):
+		// The node does not know the task. The answer says so.
+	default:
+		log.Printf("agent: read the task %s: %v", taskID, err)
+		return
+	}
+	if err := out.sendControl(protocol.TypeDeployQueryResult, answer); err != nil {
+		log.Printf("agent: send the state of the task %s: %v", taskID, err)
+	}
+}
+
+// outputFrames streams the output of a task to the control端.
+//
+// The fragments carry their offset, so the control端 stores every fragment
+// once and a reader skips the fragments it has already seen.
+//
+// The queue of the logs is bounded: a fragment that does not fit is
+// dropped. The ledger of the agent holds the cursor of the output and not
+// the output itself, so a dropped fragment cannot be fetched again. The
+// next fragment marks the output as truncated, so the administrator learns
+// that the output is incomplete.
+type outputFrames struct {
+	// sender hands the fragments to the control端.
+	sender sender
+	// taskID is the task the output belongs to.
+	taskID string
+
+	// mu guards the offset and the flag of the truncation.
+	mu sync.Mutex
+	// offset is the position of the next fragment.
+	offset int64
+	// dropped reports that a fragment was lost.
+	dropped bool
+}
+
+// Write forwards a piece of the output to the control端.
+func (w *outputFrames) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	total := len(p)
+	for len(p) > 0 {
+		size := len(p)
+		if size > protocol.MaxOutputPayloadSize {
+			size = protocol.MaxOutputPayloadSize
+		}
+		fragment := protocol.DeployOutput{
+			TaskID:    w.taskID,
+			Offset:    w.offset,
+			Data:      p[:size],
+			Truncated: w.dropped,
+		}
+		w.offset += int64(size)
+		if err := w.sender.sendLog(protocol.TypeDeployOutput, fragment); err != nil {
+			// The fragment is lost. The next one tells the control端 that
+			// the output is incomplete.
+			w.dropped = true
+		}
+		p = p[size:]
+	}
+	return total, nil
+}
+
+// close tells the control端 that the output of the task is incomplete.
+//
+// A fragment that did not fit into the queue of the logs is lost, and the
+// ledger of the agent holds the cursor of the output and not the output
+// itself, so the fragment cannot be fetched again. The empty fragment marks
+// the end of the output, so the administrator learns that the output of the
+// task is incomplete instead of believing that the command was quiet.
+func (w *outputFrames) close() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if !w.dropped {
+		return
+	}
+	fragment := protocol.DeployOutput{
+		TaskID:    w.taskID,
+		Offset:    w.offset,
+		Truncated: true,
+	}
+	if err := w.sender.sendLog(protocol.TypeDeployOutput, fragment); err != nil {
+		log.Printf("agent: mark the output of the task %s as truncated: %v", w.taskID, err)
+	}
 }
 
 // run starts the agent with the given source of the Docker state.
-func run(ctx context.Context, cfg config.Agent, engine source) error {
+func run(ctx context.Context, cfg config.Agent, engine source, handler *deployments) error {
 	client, err := newHTTPClient(cfg)
 	if err != nil {
 		return err
@@ -110,7 +471,7 @@ func run(ctx context.Context, cfg config.Agent, engine source) error {
 		return err
 	}
 
-	return connect(ctx, cfg, client, credential, engine)
+	return connect(ctx, cfg, client, credential, engine, handler)
 }
 
 // newHTTPClient builds the client of the agent.
@@ -231,14 +592,14 @@ func enroll(ctx context.Context, cfg config.Agent, client *http.Client, token st
 // A connection that ends is opened again after a delay that grows with
 // every attempt and that carries a jitter, so the agents of a fleet do not
 // reconnect at the same moment.
-func connect(ctx context.Context, cfg config.Agent, client *http.Client, credential Credential, engine source) error {
+func connect(ctx context.Context, cfg config.Agent, client *http.Client, credential Credential, engine source, handler *deployments) error {
 	attempt := 0
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
 
-		established, err := session(ctx, cfg, client, credential, engine)
+		established, err := session(ctx, cfg, client, credential, engine, handler)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -266,7 +627,7 @@ func connect(ctx context.Context, cfg config.Agent, client *http.Client, credent
 // session opens one connection to the control端 and serves it until the
 // connection ends. The second return value reports whether the connection
 // was established.
-func session(ctx context.Context, cfg config.Agent, client *http.Client, credential Credential, engine source) (bool, error) {
+func session(ctx context.Context, cfg config.Agent, client *http.Client, credential Credential, engine source, handler *deployments) (bool, error) {
 	conn, err := dialControl(ctx, cfg, client, credential)
 	if err != nil {
 		return false, err
@@ -312,7 +673,10 @@ func session(ctx context.Context, cfg config.Agent, client *http.Client, credent
 		reportInventory(ctx, frames, logs, done, engine)
 	}()
 
-	err = readControl(ctx, conn)
+	out := &sessionSender{ctx: ctx, frames: frames, control: control, logs: logs, done: done}
+	err = readControl(ctx, conn, func(ctx context.Context, envelope protocol.Envelope) {
+		handler.handle(ctx, envelope, out)
+	})
 
 	// The workers stop before the connection is closed, so no frame is
 	// written to a closed connection.
@@ -322,11 +686,71 @@ func session(ctx context.Context, cfg config.Agent, client *http.Client, credent
 }
 
 // readControl reads the frames of the control端 until the connection ends.
-func readControl(ctx context.Context, conn *websocket.Conn) error {
+func readControl(ctx context.Context, conn *websocket.Conn, handle func(context.Context, protocol.Envelope)) error {
 	for {
-		if _, _, err := conn.Read(ctx); err != nil {
+		_, data, err := conn.Read(ctx)
+		if err != nil {
 			return fmt.Errorf("agent: the connection ended: %w", err)
 		}
+		envelope, err := protocol.Decode(data)
+		if err != nil {
+			return fmt.Errorf("agent: the frame of the control端 is not valid: %w", err)
+		}
+		if err := envelope.Validate(); err != nil {
+			return fmt.Errorf("agent: the frame of the control端 is not accepted: %w", err)
+		}
+		handle(ctx, envelope)
+	}
+}
+
+// sessionSender hands the frames of the agent to the control端.
+//
+// The frames of the control端 wait in the queue of the connection. The
+// frames of the logs are dropped when their queue is full: the output of a
+// task may be long, and the deployment of the node may not wait for it.
+type sessionSender struct {
+	// ctx is the context of the connection.
+	ctx context.Context
+	// frames builds the frames of the agent.
+	frames *framer
+	// control carries the frames that answer the control端.
+	control chan []byte
+	// logs carries the fragments of the output.
+	logs chan []byte
+	// done closes when the connection ends.
+	done chan struct{}
+}
+
+// sendControl hands a control frame to the control端.
+func (s *sessionSender) sendControl(messageType string, payload any) error {
+	envelope, err := s.frames.envelope(messageType, payload)
+	if err != nil {
+		return err
+	}
+	return send(s.ctx, s.done, s.control, envelope)
+}
+
+// sendLog hands a log frame to the control端.
+//
+// The frame waits for room in the queue of the logs. A queue that is full
+// drops the frame: the output of a task is not the report of its outcome,
+// and the outcome of the task is never lost.
+func (s *sessionSender) sendLog(messageType string, payload any) error {
+	envelope, err := s.frames.envelope(messageType, payload)
+	if err != nil {
+		return err
+	}
+	frame, err := protocol.Encode(envelope)
+	if err != nil {
+		return err
+	}
+	select {
+	case s.logs <- frame:
+		return nil
+	case <-s.done:
+		return errors.New("agent: the connection ended")
+	default:
+		return errors.New("agent: the queue of the logs is full")
 	}
 }
 

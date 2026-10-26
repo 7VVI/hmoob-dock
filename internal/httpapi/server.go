@@ -66,6 +66,16 @@ type Server struct {
 	hub *agentlink.Hub
 	// apps owns the applications of the control端 and their deployments.
 	apps *deploy.Service
+	// dispatcher sends the deployments to the agents and applies their
+	// reports.
+	dispatcher *deploy.Dispatcher
+	// events hands the changes of the deployments to the browser.
+	events *eventBroker
+	// ctx is the context of the server. The background work of the server
+	// stops when it is canceled.
+	ctx context.Context
+	// cancel stops the background work of the server.
+	cancel context.CancelFunc
 }
 
 // NewServer assembles the control端 HTTP handler.
@@ -139,8 +149,10 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 		enrollment:     agentlink.NewEnrollment(db, time.Now),
 		// The hub only reads the records of the nodes, so it uses the read
 		// pool: a slow read never holds back a write.
-		hub: agentlink.NewHub(reads),
+		hub:    agentlink.NewHub(reads),
+		events: newEventBroker(),
 	}
+	server.ctx, server.cancel = context.WithCancel(context.Background())
 	server.loginLimiter = auth.NewLimiter(loginMaxAttempts, loginRateWindow, time.Now)
 	server.preInitLimiter = auth.NewLimiter(loginMaxAttempts, loginRateWindow, time.Now)
 	server.enrollLimiter = auth.NewLimiter(enrollMaxAttempts, enrollRateWindow, time.Now)
@@ -148,12 +160,21 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 	// hub, so a preview and a submission see the state that the agents
 	// report.
 	server.apps = deploy.New(db, box, server.hub)
+	// The dispatcher sends the deployments through the hub of the agents,
+	// so the control端 holds no connection of its own.
+	server.dispatcher = deploy.NewDispatcher(server.apps, server.hub)
 	server.mux.HandleFunc("/healthz", server.handleHealth)
 	server.mux.HandleFunc("/readyz", server.handleReady)
 	server.registerAuthRoutes()
 	server.registerAgentRoutes()
 	server.registerApplicationRoutes()
+	server.registerDeploymentRoutes()
+	server.registerEventRoutes()
 	server.mux.HandleFunc("/", server.handleNotFound)
+
+	// The reports of the agents reach the dispatcher, and the dispatcher
+	// tells the browser about the changes of the deployments.
+	server.subscribeDeployments()
 
 	// A revoked credential closes the connection of its node, so a revoked
 	// agent cannot keep talking to the control端.
@@ -162,6 +183,7 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 	// The bootstrap credential of the deployment opens the first
 	// initialization. It is only stored while no administrator exists.
 	if err := server.seedBootstrap(); err != nil {
+		server.cancel()
 		_ = reads.Close()
 		return nil, err
 	}
@@ -182,7 +204,20 @@ func (s *Server) Initialized(ctx context.Context) (bool, error) {
 
 // Close releases the read pool of the server.
 func (s *Server) Close() error {
+	// The background work of the server stops before the database is
+	// closed, so it does not write into a closed database.
+	s.cancel()
 	return s.reads.Close()
+}
+
+// Recover reconciles the deployments that did not finish.
+//
+// The control端 asks the nodes about the tasks it does not know the outcome
+// of, so a restart does not run a deployment a second time. The command
+// asks the server to do it after it started, because the nodes may not be
+// connected yet.
+func (s *Server) Recover(ctx context.Context) error {
+	return s.dispatcher.Recover(ctx)
 }
 
 // handleHealth reports that the control端 is alive. It answers without

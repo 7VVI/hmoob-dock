@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -273,6 +274,12 @@ func (s *Server) handleApplicationDeploy(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		writeDeployError(w, err)
 		return
+	}
+	// The command of the task is handed to the node that executes it. A
+	// node that does not answer leaves the task in the queue: the recovery
+	// of the control端 sends it when the node comes back.
+	if err := s.dispatcher.Dispatch(r.Context(), task.ID); err != nil {
+		log.Printf("control: the task %s was not sent: %v", task.ID, err)
 	}
 	writeJSON(w, http.StatusCreated, task)
 }
