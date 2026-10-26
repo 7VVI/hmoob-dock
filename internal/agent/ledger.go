@@ -58,6 +58,13 @@ var (
 	ErrAppBusy = errors.New("agent: the application holds a task that did not finish")
 	// ErrTaskNotFound reports a task that the ledger does not know.
 	ErrTaskNotFound = errors.New("agent: the task is not in the ledger")
+	// ErrManualConflict reports an outcome that arrived after an
+	// administrator resolved the task by hand. The two sides disagree, and
+	// the disagreement is reported instead of being dropped.
+	ErrManualConflict = errors.New("agent: the task was resolved by hand")
+	// ErrNotResolvable reports a task that may not be resolved by hand,
+	// because its outcome is not unknown.
+	ErrNotResolvable = errors.New("agent: the task may not be resolved by hand")
 )
 
 // The codes of the outcomes that the ledger itself produces.
@@ -399,6 +406,13 @@ func (l *Ledger) Record(ctx context.Context, taskID string, outcome model.Result
 		if err := tx.Commit(); err != nil {
 			return model.Receipt{}, fmt.Errorf("agent: commit the transaction of the task %s: %w", taskID, err)
 		}
+		// A manual resolution is a decision of the administrator, not an
+		// outcome of the task. A real outcome that arrives later does not
+		// replace it, but the disagreement is reported instead of being
+		// dropped, so the control端 can reconcile the two sides.
+		if existing.code == CodeManualResolution {
+			return model.Receipt{}, fmt.Errorf("%w: the task %s was resolved by hand", ErrManualConflict, taskID)
+		}
 		return existing.receipt(), nil
 	}
 
@@ -472,6 +486,13 @@ func (l *Ledger) Resolve(ctx context.Context, taskID string, expectedSeq uint64,
 			return model.Receipt{}, fmt.Errorf("agent: commit the transaction of the task %s: %w", taskID, err)
 		}
 		return existing.receipt(), nil
+	}
+	if existing.state != model.Uncertain {
+		// Only a task whose outcome is unknown may be resolved by hand. A
+		// task that is still running may change its target, and releasing
+		// its application would let a second task act on the same target.
+		return model.Receipt{}, fmt.Errorf("%w: the task %s is in the phase %q and its outcome is not unknown",
+			ErrNotResolvable, taskID, existing.state)
 	}
 
 	// The source of the outcome is the resolution of the administrator. The

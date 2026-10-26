@@ -719,3 +719,68 @@ func TestTheLedgerKeepsTheTraceOfAResolution(t *testing.T) {
 		t.Fatalf("the message in the ledger = %q, want the reason of the resolution", looked.Result.Message)
 	}
 }
+
+// TestTheLedgerReportsAnOutcomeThatArrivesAfterAResolution proves that a
+// real outcome that arrives after an administrator resolved the task by
+// hand is reported as a disagreement instead of being dropped.
+func TestTheLedgerReportsAnOutcomeThatArrivesAfterAResolution(t *testing.T) {
+	ledger := uncertainTask(t, ledgerPath(t))
+	ctx := context.Background()
+
+	current, err := ledger.Lookup(ctx, "task-1")
+	if err != nil {
+		t.Fatalf("look the task up: %v", err)
+	}
+	if _, err := ledger.Resolve(ctx, "task-1", current.Seq, model.Result{
+		State:   model.Failed,
+		Message: "管理员确认执行端已经停止",
+	}); err != nil {
+		t.Fatalf("resolve the task: %v", err)
+	}
+
+	// The task really succeeded, but the administrator resolved it by hand
+	// before the outcome arrived.
+	_, err = ledger.Record(ctx, "task-1", model.Result{
+		State:   model.Succeeded,
+		Message: "容器已经运行",
+	})
+	if !errors.Is(err, agent.ErrManualConflict) {
+		t.Fatalf("the disagreement was not reported: %v", err)
+	}
+}
+
+// TestTheLedgerRefusesToResolveATaskThatIsStillRunning proves that only a
+// task whose outcome is unknown may be resolved by hand. A running task may
+// still change its target, so its application must not be released.
+func TestTheLedgerRefusesToResolveATaskThatIsStillRunning(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	ledger, err := agent.OpenLedger(path)
+	if err != nil {
+		t.Fatalf("open the ledger: %v", err)
+	}
+	t.Cleanup(func() { _ = ledger.Close() })
+	ctx := context.Background()
+
+	if _, fresh, err := ledger.Accept(ctx, commandOf("task-1", "app-1", "digest-1")); err != nil || !fresh {
+		t.Fatalf("accept: %v", err)
+	}
+	if begin, err := ledger.Begin(ctx, "task-1"); err != nil || !begin {
+		t.Fatalf("begin: %v", err)
+	}
+
+	current, err := ledger.Lookup(ctx, "task-1")
+	if err != nil {
+		t.Fatalf("look the task up: %v", err)
+	}
+	if _, err := ledger.Resolve(ctx, "task-1", current.Seq, model.Result{
+		State:   model.Failed,
+		Message: "管理员确认执行端已经停止",
+	}); !errors.Is(err, agent.ErrNotResolvable) {
+		t.Fatalf("the running task was resolved: %v", err)
+	}
+
+	// The application still holds the task, so a second task is refused.
+	if _, _, err := ledger.Accept(ctx, commandOf("task-2", "app-1", "digest-2")); !errors.Is(err, agent.ErrAppBusy) {
+		t.Fatalf("the application of the running task was released: %v", err)
+	}
+}
