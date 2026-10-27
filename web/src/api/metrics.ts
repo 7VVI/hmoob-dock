@@ -198,3 +198,24 @@ export function isStale(points: MetricPoint[], now: number = Date.now()): boolea
   }
   return now - at > staleAfter
 }
+
+// ContainerSummary is one container of a node, as the page names it.
+export interface ContainerSummary {
+  id: string
+  name: string
+  image: string
+  state: string
+  health: string
+  service: string
+}
+
+// listContainers reads the containers of a node.
+//
+// The list comes from the last complete inventory of the node, so the page
+// can offer the containers by name instead of asking for an identifier.
+export async function listContainers(nodeID: string): Promise<ContainerSummary[]> {
+  const payload = await api<{ containers: ContainerSummary[] }>(
+    `/api/v1/nodes/${encodeURIComponent(nodeID)}/containers`,
+  )
+  return payload.containers ?? []
+}

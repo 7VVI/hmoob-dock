@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import AppShell from '../components/AppShell.vue'
 import NodeTable from '../components/NodeTable.vue'
 import MetricChart from '../components/MetricChart.vue'
@@ -18,6 +18,8 @@ import {
   metricScale,
   metricUnit,
   newestPoint,
+  listContainers,
+  type ContainerSummary,
   type MetricName,
 } from '../api/metrics'
 
@@ -37,6 +39,8 @@ const ranges = [
 
 const nodeID = ref('')
 const containerID = ref('')
+const containers = ref<ContainerSummary[]>([])
+const containersError = ref('')
 const metric = ref<MetricName>('cpu_percent')
 const range = ref(ranges[0].minutes)
 
@@ -126,6 +130,31 @@ async function loadCurve(): Promise<void> {
   }
 }
 
+// loadContainers reads the containers of the node of the curve.
+//
+// The list names the containers by their name, so the administrator picks
+// one instead of typing an identifier. A running container comes first,
+// because it is the one whose metrics tell something.
+async function loadContainers(): Promise<void> {
+  containersError.value = ''
+  if (nodeID.value === '') {
+    containers.value = []
+    containerID.value = ''
+    return
+  }
+  try {
+    const list = await listContainers(nodeID.value)
+    containers.value = list
+    if (!list.some((item) => item.id === containerID.value)) {
+      containerID.value = list.find((item) => item.state === 'running')?.id ?? list[0]?.id ?? ''
+    }
+  } catch (failure) {
+    containers.value = []
+    containerID.value = ''
+    containersError.value = describeError(failure)
+  }
+}
+
 // chooseNode shows the curve of the container of a node.
 //
 // The container is named by the administrator, so the page only prepares
@@ -137,6 +166,12 @@ function chooseNode(node: NodeSummary): void {
 }
 
 onMounted(load)
+
+// The containers belong to the node of the curve, so the list follows the
+// choice of the node.
+watch(nodeID, () => {
+  void loadContainers()
+})
 </script>
 
 <template>
@@ -191,15 +226,19 @@ onMounted(load)
 
         <div class="field">
           <label class="field__label" for="curve-container">容器</label>
-          <input
+          <select
             id="curve-container"
             v-model="containerID"
             class="field__input"
-            type="text"
             name="curve-container"
-            autocomplete="off"
-            placeholder="容器的 ID"
-          />
+            :disabled="containers.length === 0"
+          >
+            <option v-if="containers.length === 0" value="">这个节点还没有上报容器</option>
+            <option v-for="item in containers" :key="item.id" :value="item.id">
+              {{ item.name }} · {{ item.state }}{{ item.health ? ' · ' + item.health : '' }}
+            </option>
+          </select>
+          <p v-if="containersError" class="alert" role="alert">{{ containersError }}</p>
         </div>
 
         <div class="field">

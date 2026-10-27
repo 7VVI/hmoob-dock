@@ -55,6 +55,7 @@ func (s *Server) registerAgentRoutes() {
 	s.mux.HandleFunc("/api/v1/agent-tokens", s.handleAgentTokenCreate)
 	s.mux.HandleFunc("/api/v1/nodes", s.handleNodesList)
 	s.mux.HandleFunc("/api/v1/nodes/{id}/revoke", s.handleNodeRevoke)
+	s.registerContainerRoutes()
 	s.mux.HandleFunc("/api/v1/agent/enroll", s.handleAgentEnroll)
 	s.mux.HandleFunc("/api/v1/agent/connect", s.handleAgentConnect)
 }
