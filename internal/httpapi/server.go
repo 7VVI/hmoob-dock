@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"hmoob-dock/internal/agentlink"
+	"hmoob-dock/internal/alerts"
 	"hmoob-dock/internal/auth"
 	"hmoob-dock/internal/config"
 	"hmoob-dock/internal/deploy"
@@ -81,6 +82,9 @@ type Server struct {
 	// metricsHistory reads the stored minutes on the read-only pool, so a
 	// history query never waits for a deployment write.
 	metricsHistory *metrics.Store
+	// alerts decides when an observation becomes an alert and keeps the
+	// events of the alerts.
+	alerts *alerts.Engine
 	// metricsWorkers waits for the background writer of the metrics.
 	metricsWorkers sync.WaitGroup
 	// ctx is the context of the server. The background work of the server
@@ -174,6 +178,9 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 		hubContainers{hub: server.hub},
 	)
 	server.metricsHistory = metrics.NewStore(reads)
+	// The engine writes its events through the write pool: the events are
+	// the history of the alerts and have to survive a restart.
+	server.alerts = alerts.New(db)
 	server.loginLimiter = auth.NewLimiter(loginMaxAttempts, loginRateWindow, time.Now)
 	server.preInitLimiter = auth.NewLimiter(loginMaxAttempts, loginRateWindow, time.Now)
 	server.enrollLimiter = auth.NewLimiter(enrollMaxAttempts, enrollRateWindow, time.Now)
@@ -193,12 +200,21 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 	server.registerEventRoutes()
 	server.registerLogRoutes()
 	server.registerMetricsRoutes()
+	server.registerAlertRoutes()
 	server.mux.HandleFunc("/", server.handleNotFound)
 
 	// The samples of the agents become the live points and the minute
 	// history. The node of a sample is the node of the authenticated
 	// connection.
 	server.hub.Subscribe(protocol.TypeMetricsSample, server.handleMetricsSample)
+
+	// The samples of the containers become the alerts of the resources, the
+	// ends of the containers become the alerts of the exits and the
+	// heartbeats of the nodes become the alerts of the nodes that stayed
+	// away.
+	server.metricsIngest.OnPoint(server.watchMetrics)
+	server.hub.Subscribe(protocol.TypeContainerEvent, server.handleContainerEvent)
+	go server.watchHeartbeats(server.ctx)
 
 	// The pieces of the logs of the agents reach the subscriptions of the
 	// browser through the event stream.
