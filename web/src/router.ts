@@ -2,6 +2,8 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { api } from './api/client'
 import type { SessionPayload } from './api/types'
 import { restoreSession, sessionState, type SessionStatus } from './auth/session'
+import ApplicationDetailView from './views/ApplicationDetailView.vue'
+import ApplicationsView from './views/ApplicationsView.vue'
 import InitializeView from './views/InitializeView.vue'
 import LoginView from './views/LoginView.vue'
 import OverviewView from './views/OverviewView.vue'
@@ -14,6 +16,8 @@ export const router = createRouter({
     { path: '/initialize', name: 'initialize', component: InitializeView },
     { path: '/login', name: 'login', component: LoginView },
     { path: '/settings', name: 'settings', component: SettingsView },
+    { path: '/applications', name: 'applications', component: ApplicationsView },
+    { path: '/applications/:id', name: 'application', component: ApplicationDetailView },
   ],
 })
 
