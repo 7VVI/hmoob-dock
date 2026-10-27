@@ -264,6 +264,10 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 		return nil, err
 	}
 	server.startMetricsWriter()
+	// The history of the metrics, the finished deployments, the resolved
+	// alerts, the notifications and the audit events pass their limits
+	// slowly, so the cleaner runs in the background.
+	go server.startRetention()
 	server.startNotifyWorker()
 	return server, nil
 }
