@@ -117,6 +117,11 @@ type Notification struct {
 	ID string `json:"id"`
 	// EventID is the event the notification belongs to.
 	EventID string `json:"event_id"`
+	// Transition is the number of the transition of the event. The
+	// opening of an event and its recovery are two transitions, so a
+	// receiver that deduplicates by the event alone would drop the
+	// recovery.
+	Transition int64 `json:"transition"`
 	// State is the state the event reached.
 	State string `json:"state"`
 	// OccurredAt is the time of the transition.
@@ -138,6 +143,8 @@ type Engine struct {
 	db *sql.DB
 	// now reads the clock; the tests replace it.
 	now func() time.Time
+	// outbox is the queue of the notifications of the events.
+	outbox *Outbox
 }
 
 // New opens the engine on the database.
@@ -148,13 +155,31 @@ type Engine struct {
 // stays open.
 func New(db *sql.DB) *Engine {
 	e := &Engine{db: db, now: func() time.Time { return time.Now().UTC() }}
+	e.outbox = NewOutbox(db)
+	e.outbox.UseClock(e.now)
 	e.clearContinuity(context.Background())
 	return e
 }
 
 // UseClock replaces the clock of the engine. The tests use it to drive the
 // evaluation without waiting.
-func (e *Engine) UseClock(now func() time.Time) { e.now = now }
+func (e *Engine) UseClock(now func() time.Time) {
+	e.now = now
+	e.outbox.UseClock(now)
+}
+
+// PendingNotifications returns the notifications that wait for their
+// delivery, the oldest first.
+//
+// The sender of the notifications uses it to find the work that waits.
+func (e *Engine) PendingNotifications(ctx context.Context, limit int) ([]Notification, error) {
+	return e.outbox.PendingNotifications(ctx, limit)
+}
+
+// Counts returns the state of the queue of the notifications.
+func (e *Engine) Counts(ctx context.Context) (Counts, error) {
+	return e.outbox.Counts(ctx)
+}
 
 // clearContinuity removes the pending starts of every condition.
 func (e *Engine) clearContinuity(ctx context.Context) {

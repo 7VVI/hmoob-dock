@@ -111,9 +111,9 @@ func (s *Server) startMetricsWriter() {
 	if s.metricsIngest == nil {
 		return
 	}
-	s.metricsWorkers.Add(1)
+	s.backgroundWorkers.Add(1)
 	go func() {
-		defer s.metricsWorkers.Done()
+		defer s.backgroundWorkers.Done()
 		ticker := time.NewTicker(metricsFlushInterval)
 		defer ticker.Stop()
 		for {
@@ -136,7 +136,7 @@ func (s *Server) startMetricsWriter() {
 // completed minutes. The current partial minute stays open: it is not a
 // complete observation and would be written again after a restart.
 func (s *Server) closeMetricsWriter() {
-	s.metricsWorkers.Wait()
+	s.backgroundWorkers.Wait()
 	if s.metricsIngest == nil {
 		return
 	}

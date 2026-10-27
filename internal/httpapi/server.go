@@ -21,6 +21,7 @@ import (
 	"hmoob-dock/internal/config"
 	"hmoob-dock/internal/deploy"
 	"hmoob-dock/internal/metrics"
+	"hmoob-dock/internal/notify"
 	"hmoob-dock/internal/protocol"
 	"hmoob-dock/internal/secret"
 	"hmoob-dock/internal/store"
@@ -85,8 +86,17 @@ type Server struct {
 	// alerts decides when an observation becomes an alert and keeps the
 	// events of the alerts.
 	alerts *alerts.Engine
-	// metricsWorkers waits for the background writer of the metrics.
-	metricsWorkers sync.WaitGroup
+	// webhooks reads and writes the target of the notifications.
+	webhooks *notify.Store
+	// notifyWorker sends the notifications of the alerts to the target
+	// of the administrator.
+	notifyWorker *notify.Worker
+	// webhookClient sends the notifications. It is empty in the
+	// production path, which builds the client of the sender.
+	webhookClient *http.Client
+	// backgroundWorkers waits for the background work of the server:
+	// the writer of the metrics and the sender of the notifications.
+	backgroundWorkers sync.WaitGroup
 	// ctx is the context of the server. The background work of the server
 	// stops when it is canceled.
 	ctx context.Context
@@ -181,6 +191,12 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 	// The engine writes its events through the write pool: the events are
 	// the history of the alerts and have to survive a restart.
 	server.alerts = alerts.New(db)
+	// The target of the notifications is sealed with the master key, so
+	// the address of the target never reaches the database in the clear.
+	server.webhooks = notify.NewStore(db, box)
+	// The worker of the notifications reads the queue of the alerts and
+	// sends the notifications that wait for their delivery.
+	server.notifyWorker = notify.NewWorker(db, box, time.Now)
 	server.loginLimiter = auth.NewLimiter(loginMaxAttempts, loginRateWindow, time.Now)
 	server.preInitLimiter = auth.NewLimiter(loginMaxAttempts, loginRateWindow, time.Now)
 	server.enrollLimiter = auth.NewLimiter(enrollMaxAttempts, enrollRateWindow, time.Now)
@@ -201,6 +217,7 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 	server.registerLogRoutes()
 	server.registerMetricsRoutes()
 	server.registerAlertRoutes()
+	server.registerWebhookRoutes()
 	server.mux.HandleFunc("/", server.handleNotFound)
 
 	// The samples of the agents become the live points and the minute
@@ -247,6 +264,7 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 		return nil, err
 	}
 	server.startMetricsWriter()
+	server.startNotifyWorker()
 	return server, nil
 }
 

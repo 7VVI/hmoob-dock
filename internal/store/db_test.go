@@ -286,3 +286,69 @@ func TestMigrateRefusesTwoMigrationsWithTheSameVersion(t *testing.T) {
 		t.Fatalf("unexpected error while inspecting the schema: %v", scanErr)
 	}
 }
+
+// TestOpenAppliesTheWebhookMigrationToAnExistingDatabase proves that the
+// migration of the webhooks reaches a database that was created before.
+//
+// The control端 of an older deployment has no table of the targets and no
+// state of the delivery, so the migration has to add them to a database
+// that holds its events already.
+func TestOpenAppliesTheWebhookMigrationToAnExistingDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "control.db")
+
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// The database goes back to the state before the migration of the
+	// webhooks.
+	for _, statement := range []string{
+		`DROP INDEX notifications_to_deliver`,
+		`ALTER TABLE notification_outbox DROP COLUMN delivery_state`,
+		`ALTER TABLE notification_outbox DROP COLUMN lease_until`,
+		`DROP TABLE webhook_targets`,
+		`DELETE FROM schema_migrations WHERE version = 8`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatalf("prepare the old schema (%s): %v", statement, err)
+		}
+	}
+	if _, err := db.Exec(
+		`INSERT INTO notification_outbox
+		    (id, event_id, transition_seq, state, occurred_at, summary, environment, object, next_attempt_at)
+		 VALUES ('n1', 'e1', 1, 'active', 1700000000000, 'summary', 'environment', 'object', 1700000000000)`,
+	); err != nil {
+		t.Fatalf("write the notification: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+
+	var version int
+	if err := reopened.QueryRow(`SELECT version FROM schema_migrations WHERE version = 8`).Scan(&version); err != nil {
+		t.Fatalf("read schema_migrations: %v", err)
+	}
+	// The notification of the older deployment waits for its delivery.
+	var state string
+	if err := reopened.QueryRow(`SELECT delivery_state FROM notification_outbox WHERE id = 'n1'`).
+		Scan(&state); err != nil {
+		t.Fatalf("read the notification: %v", err)
+	}
+	if state != "pending" {
+		t.Fatalf("the delivery state = %q, want pending", state)
+	}
+	// The table of the targets is there.
+	if _, err := reopened.Exec(
+		`INSERT INTO webhook_targets
+		    (id, url_ciphertext, url_masked, allowed_private_cidrs, enabled, created_at, updated_at)
+		 VALUES ('default', x'00', 'https://hooks.example.com/***', '', 1, 1700000000000, 1700000000000)`,
+	); err != nil {
+		t.Fatalf("write the target: %v", err)
+	}
+}

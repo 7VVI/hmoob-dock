@@ -297,17 +297,43 @@ func (e *Engine) resolveEvent(ctx context.Context, rule Rule, active *Event, at 
 }
 
 // enqueue writes the notification of one transition.
+//
+// The queue of the notifications is bounded: when it is full, the event
+// stays in the platform and the notification is marked as one that was
+// not queued, so the queue never grows without a bound.
 func (e *Engine) enqueue(ctx context.Context, tx *sql.Tx, event Event, sequence int64, at time.Time) error {
+	pending, err := countPendingNotifications(ctx, tx)
+	if err != nil {
+		return err
+	}
+	state := DeliveryPending
+	failure := ""
+	if pending >= MaxPendingNotifications {
+		state = DeliverySkipped
+		failure = "the queue of the notifications is full, the notification was not queued"
+	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO notification_outbox
-		    (id, event_id, transition_seq, state, occurred_at, summary, environment, object, next_attempt_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		    (id, event_id, transition_seq, state, occurred_at, summary, environment, object, next_attempt_at, delivery_state, last_error)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (event_id, transition_seq) DO NOTHING`,
 		e.newID(), event.ID, sequence, event.State, store.TimeToMillis(at),
-		event.Summary, event.RuleID, event.ObjectID, store.TimeToMillis(at)); err != nil {
+		event.Summary, event.RuleID, event.ObjectID, store.TimeToMillis(at),
+		state, failure); err != nil {
 		return fmt.Errorf("alerts: record the notification of %s: %w", event.ID, err)
 	}
 	return nil
+}
+
+// countPendingNotifications counts the notifications that wait for their
+// delivery inside a transaction.
+func countPendingNotifications(ctx context.Context, tx *sql.Tx) (int, error) {
+	var count int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT count(*) FROM notification_outbox WHERE delivery_state = 'pending'`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("alerts: count the notifications: %w", err)
+	}
+	return count, nil
 }
 
 // touchEvent updates the last observation of an open event.

@@ -41,3 +41,29 @@ func MetricsLatestForTest(handler http.Handler, nodeID, containerID string) (met
 	}
 	return server.metricsIngest.Latest(nodeID, containerID)
 }
+
+// UseWebhookClientForTest replaces the client of the notifications of a
+// server. The tests use it to receive the notifications without an
+// outbound connection.
+func UseWebhookClientForTest(handler http.Handler, client *http.Client) error {
+	server, ok := handler.(*Server)
+	if !ok {
+		return errors.New("httpapi: the handler is not a server")
+	}
+	server.webhookClient = client
+	return nil
+}
+
+// RunNotifyWorkerForTest runs the sender of the notifications once. The
+// test controls the queue of the notifications, so it does not wait for
+// the background sender.
+func RunNotifyWorkerForTest(handler http.Handler) error {
+	server, ok := handler.(*Server)
+	if !ok {
+		return errors.New("httpapi: the handler is not a server")
+	}
+	if server.notifyWorker == nil {
+		return errors.New("httpapi: the server has no notification worker")
+	}
+	return server.notifyWorker.RunOnce(context.Background())
+}

@@ -170,11 +170,12 @@ func (e *Engine) NotificationOf(ctx context.Context, eventID string, transition 
 	var notification Notification
 	var occurredAt int64
 	err := e.db.QueryRowContext(ctx, `
-		SELECT id, event_id, state, occurred_at, summary, environment, object
+		SELECT id, event_id, transition_seq, state, occurred_at, summary, environment, object
 		  FROM notification_outbox
 		 WHERE event_id = ? AND transition_seq = ?`, eventID, transition).
-		Scan(&notification.ID, &notification.EventID, &notification.State,
-			&occurredAt, &notification.Summary, &notification.Environment, &notification.Object)
+		Scan(&notification.ID, &notification.EventID, &notification.Transition,
+			&notification.State, &occurredAt, &notification.Summary,
+			&notification.Environment, &notification.Object)
 	if err != nil {
 		return Notification{}, fmt.Errorf("alerts: read the notification of %s: %w", eventID, err)
 	}
