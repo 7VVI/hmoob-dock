@@ -40,6 +40,8 @@ import {
   metricScale,
   metricUnit,
   newestPoint,
+  listContainers,
+  type ContainerSummary,
   type MetricName,
 } from '../api/metrics'
 import {
@@ -143,6 +145,10 @@ const curveRanges = [
 // The control端 names a container by its identifier, so the administrator
 // writes it down.
 const containerID = ref('')
+// The containers of the application. The page names them by their Compose
+// service, so the administrator picks one instead of typing an identifier.
+const appContainers = ref<ContainerSummary[]>([])
+const appContainersError = ref('')
 const metric = ref<MetricName>('cpu_percent')
 const range = ref(curveRanges[0].minutes)
 const points = ref<MetricPoint[]>([])
@@ -294,6 +300,31 @@ async function loadNodes(): Promise<void> {
   }
 }
 
+// loadAppContainers reads the containers of the application.
+//
+// The containers belong to the Compose project of the application, so the
+// page asks for them by the namespace of the application. A container is
+// named by its Compose service, so the administrator picks one instead of
+// typing an identifier.
+async function loadAppContainers(): Promise<void> {
+  appContainersError.value = ''
+  const current = app.value
+  if (!current) {
+    appContainers.value = []
+    return
+  }
+  try {
+    const list = await listContainers(current.target_id, current.namespace)
+    appContainers.value = list
+    if (!list.some((item) => item.id === containerID.value)) {
+      containerID.value = list.find((item) => item.state === 'running')?.id ?? list[0]?.id ?? ''
+    }
+  } catch (failure) {
+    appContainers.value = []
+    appContainersError.value = describeError(failure)
+  }
+}
+
 // load reads everything the page shows.
 async function load(): Promise<void> {
   loading.value = true
@@ -301,6 +332,7 @@ async function load(): Promise<void> {
   try {
     await loadApplication()
     await loadVersions()
+    await loadAppContainers()
     const taskID = typeof route.query.deployment === 'string' ? route.query.deployment : ''
     if (taskID !== '') {
       await loadDeployment(taskID)
@@ -1000,11 +1032,30 @@ onBeforeUnmount(() => {
         <h2 class="panel__title">
           {{ app.mode === 'swarm' ? '服务、副本与任务' : '容器' }}
         </h2>
-        <p class="muted">运行状态来自最近一次部署的观测结果。</p>
+        <p class="muted">运行状态来自节点的最近一次清单。</p>
 
-        <p v-if="!deployment" class="empty">还没有部署过这个应用，没有可以展示的运行状态。</p>
-        <p v-else-if="observations.length === 0" class="empty">最近一次部署没有报告运行状态。</p>
-        <ul v-else class="observations">
+        <p v-if="appContainersError" class="alert" role="alert">{{ appContainersError }}</p>
+        <p v-else-if="appContainers.length === 0" class="empty">这个应用在目标节点上还没有容器。</p>
+        <table v-else class="nodes">
+          <thead>
+            <tr>
+              <th scope="col">服务</th>
+              <th scope="col">容器</th>
+              <th scope="col">镜像</th>
+              <th scope="col">状态</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="item in appContainers" :key="item.id">
+              <th scope="row">{{ item.service === '' ? '—' : item.service }}</th>
+              <td>{{ item.name }}</td>
+              <td>{{ item.image }}</td>
+              <td>{{ item.state }}{{ item.health === '' ? '' : ' · ' + item.health }}</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <ul v-if="observations.length > 0" class="observations">
           <li v-for="observation in observations" :key="observation">{{ observation }}</li>
         </ul>
 
@@ -1014,15 +1065,18 @@ onBeforeUnmount(() => {
         <form class="form form--inline" novalidate @submit.prevent="loadCurve">
           <div class="field">
             <label class="field__label" for="detail-container">容器</label>
-            <input
+            <select
               id="detail-container"
               v-model="containerID"
               class="field__input"
-              type="text"
               name="detail-container"
-              autocomplete="off"
-              placeholder="容器的 ID"
-            />
+              :disabled="appContainers.length === 0"
+            >
+              <option v-if="appContainers.length === 0" value="">这个应用还没有容器</option>
+              <option v-for="item in appContainers" :key="item.id" :value="item.id">
+                {{ item.name }} · {{ item.state }}{{ item.health === '' ? '' : ' · ' + item.health }}
+              </option>
+            </select>
           </div>
 
           <div class="field">
@@ -1063,7 +1117,7 @@ onBeforeUnmount(() => {
         </p>
 
         <p v-if="!curveLoaded && !curveLoading && curveError === ''" class="empty">
-          填写容器 ID 之后可以看到它的资源曲线。
+          选择一个容器之后可以看到它的资源曲线。
         </p>
 
         <MetricChart
@@ -1101,7 +1155,9 @@ onBeforeUnmount(() => {
       <section v-else-if="tab === 'logs'" class="panel">
         <h2 class="panel__title">日志</h2>
 
-        <p v-if="!deployment" class="empty">还没有部署过这个应用，没有可以展示的日志。</p>
+        <p v-if="!deployment" class="empty">
+          在部署记录里选择一次部署，查看它的执行输出。
+        </p>
         <template v-else>
           <p class="muted">
             部署 {{ deployment.id }} 的输出{{ deployment.finished_at ? `，结束于 ${formatTimestamp(deployment.finished_at)}` : '' }}。

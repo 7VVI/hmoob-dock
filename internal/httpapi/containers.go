@@ -29,6 +29,9 @@ type containerSummary struct {
 	Service string `json:"service"`
 }
 
+// composeProjectLabel names the Compose project of a container.
+const composeProjectLabel = "com.docker.compose.project"
+
 // registerContainerRoutes mounts the read of the containers of a node.
 func (s *Server) registerContainerRoutes() {
 	s.mux.HandleFunc("/api/v1/nodes/{id}/containers", s.handleNodeContainers)
@@ -56,6 +59,11 @@ func (s *Server) handleNodeContainers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A namespace filters the list to the containers of one Compose
+	// project, so a page of an application shows its own containers and
+	// not every container of the node.
+	namespace := strings.TrimSpace(r.URL.Query().Get("namespace"))
+
 	inventory, err := s.hub.ReadInventory(r.Context(), "compose", nodeID)
 	if err != nil {
 		writeError(w, http.StatusConflict, "target_unavailable", "这个节点当前的清单不可用，请稍后重试")
@@ -64,6 +72,9 @@ func (s *Server) handleNodeContainers(w http.ResponseWriter, r *http.Request) {
 
 	summaries := make([]containerSummary, 0, len(inventory.Containers))
 	for _, container := range inventory.Containers {
+		if namespace != "" && container.Labels[composeProjectLabel] != namespace {
+			continue
+		}
 		summaries = append(summaries, containerSummary{
 			ID:      container.ID,
 			Name:    container.Name,

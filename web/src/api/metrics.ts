@@ -213,9 +213,13 @@ export interface ContainerSummary {
 //
 // The list comes from the last complete inventory of the node, so the page
 // can offer the containers by name instead of asking for an identifier.
-export async function listContainers(nodeID: string): Promise<ContainerSummary[]> {
+export async function listContainers(
+  nodeID: string,
+  namespace = '',
+): Promise<ContainerSummary[]> {
+  const query = namespace === '' ? '' : `?namespace=${encodeURIComponent(namespace)}`
   const payload = await api<{ containers: ContainerSummary[] }>(
-    `/api/v1/nodes/${encodeURIComponent(nodeID)}/containers`,
+    `/api/v1/nodes/${encodeURIComponent(nodeID)}/containers${query}`,
   )
   return payload.containers ?? []
 }
