@@ -200,6 +200,11 @@ func (m *logSubscriptions) delete(sessionID, subscriptionID string, notify bool)
 }
 
 // expire ends a subscription whose session ended.
+//
+// No page can read the subscription any more, so the local state and every
+// timer end now. The unsubscribe is handed to the agent once (best effort):
+// a node that is gone lost its reads with the connection, and a full queue of
+// the node must not keep an expired subscription alive.
 func (m *logSubscriptions) expire(subscriptionID string) {
 	m.mu.Lock()
 	subscription, known := m.subs[subscriptionID]
@@ -208,15 +213,13 @@ func (m *logSubscriptions) expire(subscriptionID string) {
 		return
 	}
 	ending := subscription.ending
-	if ending {
-		// The session is over and the subscription already waits for the
-		// agent; no page reads it any more, so the state is dropped.
-		m.forgetLocked(subscription)
-	}
+	m.forgetLocked(subscription)
 	m.mu.Unlock()
 
 	if !ending {
-		m.delete("", subscriptionID, true)
+		if err := m.send(context.Background(), subscription, protocol.TypeLogsUnsubscribe); err != nil {
+			log.Printf("httpapi: end the expired log subscription %s: %v", subscriptionID, err)
+		}
 	}
 	log.Printf("httpapi: the log subscription %s ended with the session", subscriptionID)
 }

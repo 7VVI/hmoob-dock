@@ -107,10 +107,10 @@ func (s *eventSubscriber) signal() {
 // enqueue adds an event to the queue.
 //
 // A full queue loses its oldest event of the logs, so the events of the
-// deployments arrive even while a flood of the logs runs. Only a queue
-// without any event of the logs loses another event. The text of the logs is
-// bounded, so the queue of one stream stays within the limit of the
-// protocol.
+// deployments arrive even while a flood of the logs runs. A queue that holds
+// no event of the logs drops the new piece of the logs instead: the state of
+// a deployment cannot be fetched again. The text of the logs is bounded, so
+// the queue of one stream stays within the limit of the protocol.
 func (s *eventSubscriber) enqueue(event Event) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -156,8 +156,13 @@ func (s *eventSubscriber) enqueue(event Event) {
 	if len(s.queue) >= eventBufferSize {
 		if s.dropOldestLogLocked() {
 			trimmed = true
-		} else if len(s.queue) > 0 {
-			s.queue = s.queue[1:]
+		} else {
+			// The queue holds no log event to give up. The state of a
+			// deployment cannot be fetched again, so it stays and the new
+			// piece of the logs is dropped instead. The next piece carries
+			// the gap.
+			s.dropped = true
+			return
 		}
 	}
 	if len(s.queue) >= eventBufferSize {

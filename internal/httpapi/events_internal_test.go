@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -65,6 +66,41 @@ func TestALogFloodKeepsTheDeploymentEvents(t *testing.T) {
 	}
 	if logEvents > eventBufferSize {
 		t.Fatalf("the queue holds %d events of the logs, want at most %d", logEvents, eventBufferSize)
+	}
+}
+
+// TestALogEventDoesNotDisplaceADeploymentEvent proves that a full queue of
+// the state events keeps all of them: a log event that arrives without an
+// older log event to give up is dropped itself, and the next log event
+// carries the gap.
+func TestALogEventDoesNotDisplaceADeploymentEvent(t *testing.T) {
+	broker := newEventBroker()
+	subscriber, cancel := broker.subscribe("session-1")
+	defer cancel()
+
+	for index := 0; index < eventBufferSize; index++ {
+		broker.publish(Event{Type: EventDeployment, ObjectID: fmt.Sprintf("task-%d", index)})
+	}
+	broker.publish(Event{Type: EventLog, ObjectID: "sub-1", Text: "line\n", sessionID: "session-1"})
+
+	events := drainEvents(t, subscriber)
+	deployments := 0
+	for _, event := range events {
+		switch event.Type {
+		case EventDeployment:
+			deployments++
+		case EventLog:
+			t.Fatalf("the log event displaced the state event %q", event.ObjectID)
+		}
+	}
+	if deployments != eventBufferSize {
+		t.Fatalf("the queue holds %d state events, want %d", deployments, eventBufferSize)
+	}
+
+	broker.publish(Event{Type: EventLog, ObjectID: "sub-1", Text: "after the gap\n", sessionID: "session-1"})
+	drained := drainEvents(t, subscriber)
+	if len(drained) != 1 || !drained[0].Truncated {
+		t.Fatalf("the piece after the dropped log = %+v, want the gap marked", drained)
 	}
 }
 

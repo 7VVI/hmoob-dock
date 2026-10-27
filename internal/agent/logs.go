@@ -28,6 +28,11 @@ const (
 	// is opened, so a subscription that joins an open read is served from
 	// this buffer instead of from the engine.
 	maxLogHistoryBytes = 256 * 1024
+	// maxLogHistoryFrames bounds the number of the frames of the shared
+	// history as well. The subscription queue uses the same bound, so a
+	// stream of tiny lines cannot pile up the structures of the buffer and
+	// the replay never promises more frames than one page can hold.
+	maxLogHistoryFrames = maxLogQueueFrames
 )
 
 // The reasons a stream of the logs ended without its text.
@@ -78,7 +83,7 @@ type logReader struct {
 func (r *logReader) remember(frame protocol.LogFrame) {
 	r.history = append(r.history, frame)
 	r.historyBytes += len(frame.Text)
-	for r.historyBytes > maxLogHistoryBytes && len(r.history) > 1 {
+	for (r.historyBytes > maxLogHistoryBytes || len(r.history) > maxLogHistoryFrames) && len(r.history) > 1 {
 		r.historyBytes -= len(r.history[0].Text)
 		// The dropped frame may hold a large text; clearing it lets the
 		// garbage collector release the string before the buffer grows
@@ -149,13 +154,14 @@ func (m *logManager) subscribe(req protocol.LogRequest) error {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.closed {
+		m.mu.Unlock()
 		return errors.New("agent: the connection of the agent ended")
 	}
 	if _, exists := m.subs[id]; exists {
 		// A repeated subscription of the same ID reads the same stream
 		// once.
+		m.mu.Unlock()
 		return nil
 	}
 
@@ -174,22 +180,25 @@ func (m *logManager) subscribe(req protocol.LogRequest) error {
 	}
 
 	subscriber := newLogSubscriber(m, id, key)
-	reader.subscribers[id] = subscriber
-	m.subs[id] = subscriber
-
 	// The page that joins an open read starts with the recent tail of the
 	// read: Docker read the tail when the read was opened, so the engine
 	// does not hand it out a second time. A history that lost its oldest
 	// frames tells the page that the replayed tail has a gap.
-	if reader.historyDropped {
-		subscriber.noteDrop()
-	}
-	for _, frame := range reader.history {
-		frame.SubscriptionID = id
-		subscriber.enqueue(frame)
-	}
-
+	//
+	// The subscriber is marked as replaying before the lock is released, so
+	// a frame of the read that arrives meanwhile waits behind the snapshot
+	// instead of overtaking it. The snapshot itself is taken under the lock;
+	// the hand over of its frames happens outside, because the manager must
+	// not hold the other pages while a long tail is replayed.
+	subscriber.replaying = true
+	reader.subscribers[id] = subscriber
+	m.subs[id] = subscriber
+	history := append([]protocol.LogFrame(nil), reader.history...)
+	dropped := reader.historyDropped
 	m.wg.Add(1)
+	m.mu.Unlock()
+
+	subscriber.beginReplay(history, dropped)
 	go subscriber.run()
 	return nil
 }
@@ -379,6 +388,15 @@ type logSubscriber struct {
 	stopped bool
 	// dropped reports that a frame was lost before the next frame.
 	dropped bool
+	// replaying reports that the snapshot of the shared history is still
+	// being handed over. The frames of the live read wait in pending
+	// meanwhile, so the page reads the tail in order.
+	replaying bool
+	// pending holds the frames of the live read that arrived during the
+	// replay. They are already split into the frames of the protocol.
+	pending []protocol.LogFrame
+	// pendingBytes is the text that waits in pending.
+	pendingBytes int
 }
 
 // newLogSubscriber builds the subscription of one page.
@@ -423,6 +441,28 @@ func (s *logSubscriber) enqueue(frame protocol.LogFrame) {
 
 // pushLocked adds one frame that fits into a message.
 func (s *logSubscriber) pushLocked(frame protocol.LogFrame) {
+	if s.replaying {
+		// The live frames are newer than the snapshot and wait behind it.
+		// When they fill their room, the oldest of them leaves so the page
+		// keeps the newest pieces of the live read; the gap then lies
+		// before the first frame that stays.
+		dropped := false
+		for len(s.pending) > 0 && (len(s.pending) >= maxLogQueueFrames || s.pendingBytes+len(frame.Text) > maxLogQueueBytes) {
+			s.pendingBytes -= len(s.pending[0].Text)
+			s.pending = s.pending[1:]
+			dropped = true
+		}
+		if dropped {
+			if len(s.pending) > 0 {
+				s.pending[0].Truncated = true
+			} else {
+				frame.Truncated = true
+			}
+		}
+		s.pending = append(s.pending, frame)
+		s.pendingBytes += len(frame.Text)
+		return
+	}
 	if len(s.frames) >= maxLogQueueFrames || s.bytes+len(frame.Text) > maxLogQueueBytes {
 		s.dropped = true
 		return
@@ -430,6 +470,98 @@ func (s *logSubscriber) pushLocked(frame protocol.LogFrame) {
 	s.frames = append(s.frames, frame)
 	s.bytes += len(frame.Text)
 	s.cond.Signal()
+}
+
+// beginReplay hands the recent tail of the shared read to a page that joined
+// late. The newest frames have priority: the queue of the page is bounded, so
+// only the newest segment that fits is replayed and the gap before it is
+// marked on the oldest frame the page receives. The frames of the live read
+// that arrived during the replay follow the replayed tail.
+//
+// The caller takes the snapshot of the read under its lock; the hand over of
+// the frames holds no lock of the manager.
+func (s *logSubscriber) beginReplay(history []protocol.LogFrame, truncated bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.stopped {
+		s.pending = nil
+		s.pendingBytes = 0
+		return
+	}
+	pending := s.pending
+	pendingBytes := s.pendingBytes
+	s.pending = nil
+	s.pendingBytes = 0
+	s.replaying = false
+
+	maxFrames := maxLogQueueFrames - len(pending)
+	maxBytes := maxLogQueueBytes - pendingBytes
+	start := len(history)
+	framesUsed := 0
+	bytesUsed := 0
+	for start > 0 {
+		frame := history[start-1]
+		parts := logFrameParts(frame)
+		if framesUsed+parts > maxFrames || bytesUsed+len(frame.Text) > maxBytes {
+			break
+		}
+		framesUsed += parts
+		bytesUsed += len(frame.Text)
+		start--
+	}
+	if start > 0 {
+		// The oldest frames of the snapshot do not fit into the queue of
+		// the page.
+		truncated = true
+	}
+	if truncated {
+		// The first frame that the page receives carries the gap before it.
+		s.dropped = true
+	}
+	for _, frame := range history[start:] {
+		frame.SubscriptionID = s.id
+		s.appendReplayLocked(frame)
+	}
+	s.frames = append(s.frames, pending...)
+	s.bytes += pendingBytes
+	s.cond.Signal()
+}
+
+// appendReplayLocked adds one frame of the snapshot to the queue of the page.
+// The window of beginReplay already reserved the room.
+func (s *logSubscriber) appendReplayLocked(frame protocol.LogFrame) {
+	if len(frame.Text) <= protocol.MaxLogFrameTextSize {
+		s.frames = append(s.frames, frame)
+		s.bytes += len(frame.Text)
+		return
+	}
+	// The protocol bounds one frame; a source that hands over more is split
+	// here as well.
+	offset := frame.Offset
+	text := frame.Text
+	for len(text) > 0 {
+		size := len(text)
+		if size > protocol.MaxLogFrameTextSize {
+			size = protocol.MaxLogFrameTextSize
+		}
+		part := frame
+		part.Text = text[:size]
+		part.Offset = offset
+		s.frames = append(s.frames, part)
+		s.bytes += size
+		offset += uint64(size)
+		text = text[size:]
+	}
+}
+
+// logFrameParts tells how many frames of the protocol one frame of the
+// source needs.
+func logFrameParts(frame protocol.LogFrame) int {
+	if len(frame.Text) == 0 {
+		return 1
+	}
+	return (len(frame.Text) + protocol.MaxLogFrameTextSize - 1) / protocol.MaxLogFrameTextSize
 }
 
 // next hands the oldest frame to the writer.
@@ -490,6 +622,8 @@ func (s *logSubscriber) stop() {
 	s.stopped = true
 	s.frames = nil
 	s.bytes = 0
+	s.pending = nil
+	s.pendingBytes = 0
 	s.cond.Broadcast()
 }
 

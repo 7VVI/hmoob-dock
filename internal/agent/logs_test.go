@@ -292,6 +292,107 @@ func TestALateSubscriptionIsTruncatedWhenTheTailDoesNotFit(t *testing.T) {
 	}
 }
 
+// TestTheSharedHistoryIsBoundedByFrames proves that a stream of tiny lines
+// cannot pile up the structures of the history: the buffer keeps the newest
+// frames and drops the oldest ones even when their text stays small.
+func TestTheSharedHistoryIsBoundedByFrames(t *testing.T) {
+	reader := &logReader{}
+	total := maxLogQueueFrames + 200
+	for index := 0; index < total; index++ {
+		reader.remember(protocol.LogFrame{Offset: uint64(index), Text: fmt.Sprintf("%d\n", index)})
+	}
+	if len(reader.history) != maxLogQueueFrames {
+		t.Fatalf("the history holds %d frames, want %d", len(reader.history), maxLogQueueFrames)
+	}
+	if !reader.historyDropped {
+		t.Fatal("the history does not report the frames it dropped")
+	}
+	if first := reader.history[0].Offset; first != uint64(total-maxLogQueueFrames) {
+		t.Fatalf("the history starts at the offset %d, want %d", first, total-maxLogQueueFrames)
+	}
+	if last := reader.history[len(reader.history)-1].Offset; last != uint64(total-1) {
+		t.Fatalf("the history ends at the offset %d, want %d", last, total-1)
+	}
+}
+
+// TestAReplayKeepsTheNewestFrames proves that a page that joins a read with
+// more tail than its queue holds receives the newest lines, not the oldest
+// ones: the replay keeps the recent segment and marks the gap on the oldest
+// frame it sends.
+func TestAReplayKeepsTheNewestFrames(t *testing.T) {
+	const total = maxLogQueueFrames + 400
+	emitted := make(chan struct{})
+	source := &scriptedLogSource{}
+	source.run = func(ctx context.Context, _ protocol.LogRequest, emit func(protocol.LogFrame) error) error {
+		for index := 0; index < total; index++ {
+			if err := emit(protocol.LogFrame{Text: fmt.Sprintf("line-%04d\n", index)}); err != nil {
+				return err
+			}
+		}
+		close(emitted)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	sender := &gatedSender{}
+	manager := newLogManager(context.Background(), source, sender)
+	defer manager.Close()
+
+	if err := manager.subscribe(protocol.LogRequest{SubscriptionID: "sub-1", ContainerID: "c1", Tail: 2000, Follow: true}); err != nil {
+		t.Fatalf("subscribe sub-1: %v", err)
+	}
+	select {
+	case <-emitted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the source did not emit its frames")
+	}
+
+	if err := manager.subscribe(protocol.LogRequest{SubscriptionID: "sub-2", ContainerID: "c1", Tail: 2000, Follow: true}); err != nil {
+		t.Fatalf("subscribe sub-2: %v", err)
+	}
+	waitFor(t, "the late subscription to receive the newest tail", func() bool {
+		return len(logFramesFor(sender, "sub-2")) >= maxLogQueueFrames
+	})
+	frames := logFramesFor(sender, "sub-2")
+	if len(frames) != maxLogQueueFrames {
+		t.Fatalf("the late subscription received %d frames, want %d", len(frames), maxLogQueueFrames)
+	}
+	for index, frame := range frames {
+		want := fmt.Sprintf("line-%04d\n", total-len(frames)+index)
+		if frame.Text != want {
+			t.Fatalf("the frame %d = %q, want %q", index, frame.Text, want)
+		}
+		if index == 0 && !frame.Truncated {
+			t.Fatalf("the first frame of the late tail = %+v, want the gap marked", frame)
+		}
+		if index > 0 && frame.Truncated {
+			t.Fatalf("the frame %d = %+v, want only the first frame marked", index, frame)
+		}
+	}
+}
+
+// TestTheFramesThatArriveDuringAReplayFollowIt proves that a frame of the
+// live read that arrives while the snapshot is handed over neither overtakes
+// the snapshot nor repeats it.
+func TestTheFramesThatArriveDuringAReplayFollowIt(t *testing.T) {
+	subscriber := newLogSubscriber(nil, "sub-1", logKey{})
+	subscriber.replaying = true
+	subscriber.enqueue(protocol.LogFrame{Text: "live\n"})
+
+	subscriber.beginReplay([]protocol.LogFrame{{Text: "old\n"}}, false)
+
+	subscriber.mu.Lock()
+	frames := append([]protocol.LogFrame(nil), subscriber.frames...)
+	subscriber.mu.Unlock()
+	if len(frames) != 2 || frames[0].Text != "old\n" || frames[1].Text != "live\n" {
+		t.Fatalf("the queue = %+v, want the replay followed by the live frame", frames)
+	}
+	for _, frame := range frames {
+		if frame.Truncated {
+			t.Fatalf("the complete replay is marked truncated: %+v", frames)
+		}
+	}
+}
+
 // TestDifferentLogRequestsDoNotShareTheRead proves that a different tail or
 // follow belongs to a read of its own.
 func TestDifferentLogRequestsDoNotShareTheRead(t *testing.T) {

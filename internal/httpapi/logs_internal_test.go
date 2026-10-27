@@ -189,3 +189,70 @@ func TestACreationNeedsAStreamOfTheSession(t *testing.T) {
 		t.Fatalf("create = %v, want %v", err, errNoEventStream)
 	}
 }
+
+// TestAnExpiredSubscriptionEndsWhateverTheNodeDoes proves that the expiry of
+// the session terminates the subscription even when the agent cannot accept
+// the unsubscribe: the local state and every timer end, so an expired
+// subscription never waits for a node that does not come back.
+func TestAnExpiredSubscriptionEndsWhateverTheNodeDoes(t *testing.T) {
+	previous := logRetryInterval
+	logRetryInterval = 10 * time.Millisecond
+	t.Cleanup(func() { logRetryInterval = previous })
+
+	cases := []struct {
+		name      string
+		err       error
+		connected bool
+	}{
+		{name: "the node is gone", err: agentlink.ErrNodeNotConnected, connected: false},
+		{name: "the queue of the node is full", err: agentlink.ErrQueueFull, connected: true},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			sender := &fakeLogSender{connected: true}
+			manager := newLogSubscriptions(sender, newEventBroker())
+			session := auth.Session{ID: "session-1", ExpiresAt: time.Now().Add(20 * time.Millisecond)}
+			manager.attachStream(session)
+
+			subscription, err := manager.create(context.Background(), session, "node-1", "c1", 50, true)
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			sender.mu.Lock()
+			sender.err = testCase.err
+			sender.connected = testCase.connected
+			sender.mu.Unlock()
+
+			deadline := time.Now().Add(2 * time.Second)
+			for manager.count() != 0 {
+				if time.Now().After(deadline) {
+					t.Fatalf("the expired subscription is still held: %d subscriptions", manager.count())
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+
+			// A sender that accepts frames again sees no retry: every timer
+			// of the expired subscription ended with it.
+			sender.mu.Lock()
+			sends := len(sender.sends)
+			sender.err = nil
+			sender.connected = true
+			sender.mu.Unlock()
+			time.Sleep(5 * logRetryInterval)
+			if got := len(sender.frames()); got != sends {
+				t.Fatalf("the ended subscription sent %d frames after its end, want none", got-sends)
+			}
+
+			manager.mu.Lock()
+			held := manager.subs[subscription.id] != nil
+			timers := subscription.timer != nil || subscription.graceTimer != nil || subscription.retryTimer != nil
+			manager.mu.Unlock()
+			if held {
+				t.Fatal("the manager still holds the expired subscription")
+			}
+			if timers {
+				t.Fatal("a timer of the expired subscription is still armed")
+			}
+		})
+	}
+}
