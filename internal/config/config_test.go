@@ -341,3 +341,34 @@ func TestLoadAgentRefusesAMissingCertificateAuthority(t *testing.T) {
 		t.Fatal("LoadAgent accepted a missing certificate authority")
 	}
 }
+
+func TestLoadReadsTheMetricsQueueSize(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HMOOB_DB_PATH", filepath.Join(dir, "data", "control.db"))
+	t.Setenv("HMOOB_KEY_FILE", filepath.Join(dir, "secrets", "master.key"))
+	t.Setenv("HMOOB_METRICS_QUEUE_SIZE", "1200")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MetricsQueueSize != 1200 {
+		t.Fatalf("MetricsQueueSize = %d, want 1200", cfg.MetricsQueueSize)
+	}
+}
+
+func TestLoadRejectsAnInvalidMetricsQueueSize(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HMOOB_DB_PATH", filepath.Join(dir, "data", "control.db"))
+	t.Setenv("HMOOB_KEY_FILE", filepath.Join(dir, "secrets", "master.key"))
+	t.Setenv("HMOOB_METRICS_QUEUE_SIZE", "not-a-number")
+
+	if _, err := config.Load(); err == nil {
+		t.Fatal("Load accepted a malformed metrics queue size")
+	}
+
+	t.Setenv("HMOOB_METRICS_QUEUE_SIZE", "0")
+	if _, err := config.Load(); err == nil {
+		t.Fatal("Load accepted a zero metrics queue size")
+	}
+}

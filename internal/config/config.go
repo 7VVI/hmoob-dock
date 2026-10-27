@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"hmoob-dock/internal/secret"
@@ -83,6 +84,9 @@ type Control struct {
 	TLSKey  string
 	// WebDir is the directory holding the frontend build output.
 	WebDir string
+	// MetricsQueueSize bounds the unflushed minute buckets of the metrics.
+	// Zero keeps the default of the metrics package.
+	MetricsQueueSize int
 }
 
 // Agent holds the configuration of the agent.
@@ -157,6 +161,10 @@ func (a Agent) Validate() error {
 // Load reads the control端 configuration from the environment and validates
 // it.
 func Load() (Control, error) {
+	metricsQueueSize, err := envPositiveInt("HMOOB_METRICS_QUEUE_SIZE")
+	if err != nil {
+		return Control{}, err
+	}
 	cfg := Control{
 		DBPath:            envOrDefault("HMOOB_DB_PATH", filepath.Join("data", "hmoob.db")),
 		KeyFile:           envOrDefault("HMOOB_KEY_FILE", filepath.Join("secrets", "master.key")),
@@ -166,6 +174,7 @@ func Load() (Control, error) {
 		TLSCert:           os.Getenv("HMOOB_TLS_CERT"),
 		TLSKey:            os.Getenv("HMOOB_TLS_KEY"),
 		WebDir:            envOrDefault("HMOOB_WEB_DIR", filepath.Join("web", "dist")),
+		MetricsQueueSize:  metricsQueueSize,
 	}
 	if err := cfg.Validate(); err != nil {
 		return Control{}, err
@@ -325,6 +334,25 @@ func envOrDefault(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// envPositiveInt returns the positive integer of the environment variable.
+// An unset or empty variable returns zero, so the caller can apply its own
+// default; a malformed or non-positive value is an error, because silently
+// ignoring it would hide a configuration mistake.
+func envPositiveInt(name string) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return 0, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("config: the environment variable %s is not a number: %w", name, err)
+	}
+	if value <= 0 {
+		return 0, fmt.Errorf("config: the environment variable %s has to be positive", name)
+	}
+	return value, nil
 }
 
 // envList returns the comma separated values of the environment variable.

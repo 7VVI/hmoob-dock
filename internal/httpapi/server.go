@@ -19,6 +19,7 @@ import (
 	"hmoob-dock/internal/auth"
 	"hmoob-dock/internal/config"
 	"hmoob-dock/internal/deploy"
+	"hmoob-dock/internal/metrics"
 	"hmoob-dock/internal/protocol"
 	"hmoob-dock/internal/secret"
 	"hmoob-dock/internal/store"
@@ -74,6 +75,14 @@ type Server struct {
 	events *eventBroker
 	// logs owns the subscriptions of the logs of the containers.
 	logs *logSubscriptions
+	// metricsIngest turns the samples of the agents into live points and
+	// the minute history.
+	metricsIngest *metrics.Ingest
+	// metricsHistory reads the stored minutes on the read-only pool, so a
+	// history query never waits for a deployment write.
+	metricsHistory *metrics.Store
+	// metricsWorkers waits for the background writer of the metrics.
+	metricsWorkers sync.WaitGroup
 	// ctx is the context of the server. The background work of the server
 	// stops when it is canceled.
 	ctx context.Context
@@ -156,6 +165,15 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 		events: newEventBroker(),
 	}
 	server.ctx, server.cancel = context.WithCancel(context.Background())
+	// The ingestion writes the completed minutes through the write pool and
+	// the history endpoint reads them through the read-only pool, so a
+	// history request never waits for a deployment.
+	server.metricsIngest = metrics.NewIngest(
+		metrics.NewStore(db),
+		metrics.NewAggregatorWithOptions(metrics.AggregatorOptions{MaxBuckets: cfg.MetricsQueueSize}),
+		hubContainers{hub: server.hub},
+	)
+	server.metricsHistory = metrics.NewStore(reads)
 	server.loginLimiter = auth.NewLimiter(loginMaxAttempts, loginRateWindow, time.Now)
 	server.preInitLimiter = auth.NewLimiter(loginMaxAttempts, loginRateWindow, time.Now)
 	server.enrollLimiter = auth.NewLimiter(enrollMaxAttempts, enrollRateWindow, time.Now)
@@ -174,7 +192,13 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 	server.registerDeploymentRoutes()
 	server.registerEventRoutes()
 	server.registerLogRoutes()
+	server.registerMetricsRoutes()
 	server.mux.HandleFunc("/", server.handleNotFound)
+
+	// The samples of the agents become the live points and the minute
+	// history. The node of a sample is the node of the authenticated
+	// connection.
+	server.hub.Subscribe(protocol.TypeMetricsSample, server.handleMetricsSample)
 
 	// The pieces of the logs of the agents reach the subscriptions of the
 	// browser through the event stream.
@@ -186,6 +210,10 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 	server.hub.OnConnect(server.logs.handleConnect)
 	server.hub.OnDisconnect(server.logs.handleDisconnect)
 	server.enrollment.OnRevoke(server.logs.revokeNode)
+	// A node that lost its connection has no trustworthy live value any
+	// more. The next sample after a reconnect starts a new observation
+	// instead of a rate over the outage.
+	server.hub.OnDisconnect(server.metricsIngest.ForgetNode)
 
 	// The reports of the agents reach the dispatcher, and the dispatcher
 	// tells the browser about the changes of the deployments.
@@ -202,6 +230,7 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 		_ = reads.Close()
 		return nil, err
 	}
+	server.startMetricsWriter()
 	return server, nil
 }
 
@@ -222,6 +251,7 @@ func (s *Server) Close() error {
 	// The background work of the server stops before the database is
 	// closed, so it does not write into a closed database.
 	s.cancel()
+	s.closeMetricsWriter()
 	return s.reads.Close()
 }
 

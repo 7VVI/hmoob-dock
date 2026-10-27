@@ -294,6 +294,29 @@ func (h *Hub) ReadInventory(ctx context.Context, mode, targetID string) (protoco
 	}
 }
 
+// RecentContainer reports whether the recent inventory of a node holds a
+// container.
+//
+// The second return value reports whether the node has a recent inventory
+// at all. Without one the first value says nothing: a node that is away
+// cannot prove the ownership of a container.
+func (h *Hub) RecentContainer(nodeID, containerID string) (bool, bool) {
+	node, ok := h.connection(nodeID)
+	if !ok {
+		return false, false
+	}
+	inventory, err := node.currentInventory(h.now())
+	if err != nil {
+		return false, false
+	}
+	for _, container := range inventory.Containers {
+		if container.ID == containerID {
+			return true, true
+		}
+	}
+	return false, true
+}
+
 // swarmManager returns the connection of a manager of the given cluster.
 //
 // The manager is decided by the enrolled record of a node, not by the hello
