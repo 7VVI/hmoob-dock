@@ -40,6 +40,13 @@ const (
 // the queue returns.
 const defaultNotificationBatch = 100
 
+// exhaustedFailure is the reason of a notification that used all of its
+// tries.
+//
+// The reason carries no address and no secret: it ends up in the database
+// and in the log of the control端.
+const exhaustedFailure = "the notification used all of its tries"
+
 // Delivery is the result of one try to deliver a notification.
 type Delivery struct {
 	// Delivered reports whether the target accepted the notification.
@@ -94,6 +101,11 @@ func (o *Outbox) UseClock(now func() time.Time) {
 // of a notification is made at least once: a worker that died after it
 // sent the notification and before it recorded the result sends it again,
 // and the receiver deduplicates it by the identifier of the notification.
+//
+// A notification that used all of its tries is not returned: it cannot be
+// claimed again, so a queue that returns it fills the batch with
+// notifications that no worker can deliver and starves the notifications
+// that follow them.
 func (o *Outbox) PendingNotifications(ctx context.Context, limit int) ([]Notification, error) {
 	if limit <= 0 {
 		limit = defaultNotificationBatch
@@ -103,8 +115,9 @@ func (o *Outbox) PendingNotifications(ctx context.Context, limit int) ([]Notific
 		SELECT id, event_id, transition_seq, state, occurred_at, summary, environment, object
 		  FROM notification_outbox
 		 WHERE delivery_state = 'pending' AND next_attempt_at <= ? AND lease_until <= ?
+		   AND attempts < ?
 		 ORDER BY next_attempt_at, occurred_at, id
-		 LIMIT ?`, now, now, limit)
+		 LIMIT ?`, now, now, MaxNotificationAttempts, limit)
 	if err != nil {
 		return nil, fmt.Errorf("alerts: read the notifications: %w", err)
 	}
@@ -169,6 +182,34 @@ func (o *Outbox) ClaimNotification(ctx context.Context, id string, leaseUntil ti
 		return false, 0, fmt.Errorf("alerts: commit the claim of the notification %s: %w", id, err)
 	}
 	return true, attempt, nil
+}
+
+// FailTheExhaustedNotifications ends the notifications that used all of
+// their tries, and it returns the number of the notifications it ended.
+//
+// A worker that died after its last claim and before it wrote the result
+// leaves a notification behind that no worker can claim again. Such a
+// notification is the oldest one of the queue, so a batch that returns it
+// delivers nothing and starves the notifications that follow it.
+//
+// The sweep only touches the notifications whose lease ended: a worker
+// that is still at work keeps its notification. The sweep is idempotent:
+// a notification that already left the queue is not ended again.
+func (o *Outbox) FailTheExhaustedNotifications(ctx context.Context) (int, error) {
+	now := store.TimeToMillis(o.now())
+	result, err := o.db.ExecContext(ctx, `
+		UPDATE notification_outbox
+		   SET delivery_state = 'failed', lease_until = 0, last_error = ?, next_attempt_at = ?
+		 WHERE delivery_state = 'pending' AND attempts >= ? AND lease_until <= ?`,
+		exhaustedFailure, now, MaxNotificationAttempts, now)
+	if err != nil {
+		return 0, fmt.Errorf("alerts: end the notifications that used all of their tries: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("alerts: end the notifications that used all of their tries: %w", err)
+	}
+	return int(affected), nil
 }
 
 // CompleteNotification records the result of the delivery of one

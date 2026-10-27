@@ -219,6 +219,113 @@ func TestTheDeliveryLeavesTheQueue(t *testing.T) {
 	}
 }
 
+// TestPendingNotificationsIgnoresTheExhaustedOnes proves that a
+// notification that used all of its tries does not wait in the queue.
+//
+// Such a notification cannot be claimed again, so a queue that returns it
+// fills the batch with notifications that no worker can deliver: the
+// notifications that follow them wait forever.
+func TestPendingNotificationsIgnoresTheExhaustedOnes(t *testing.T) {
+	outbox, db, _ := newOutbox(t)
+	ctx := context.Background()
+
+	base := time.Unix(1800000000, 0).UTC()
+	insertNotification(t, db, "a", base)
+	if _, err := db.Exec(`UPDATE notification_outbox SET attempts = ? WHERE id = 'a'`,
+		alerts.MaxNotificationAttempts); err != nil {
+		t.Fatalf("exhaust the notification: %v", err)
+	}
+
+	pending, err := outbox.PendingNotifications(ctx, 10)
+	if err != nil {
+		t.Fatalf("read the notifications: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("notifications = %d, want none", len(pending))
+	}
+}
+
+// TestTheSweepEndsTheExhaustedNotifications proves that the notifications
+// that used all of their tries leave the queue.
+//
+// A worker that died after its last claim leaves a notification behind
+// that no worker can claim again. The sweep ends it, so it does not
+// starve the notifications that follow it. The sweep is idempotent: a
+// notification that already left the queue is not touched again.
+func TestTheSweepEndsTheExhaustedNotifications(t *testing.T) {
+	outbox, db, _ := newOutbox(t)
+	ctx := context.Background()
+
+	base := time.Unix(1800000000, 0).UTC()
+	insertNotification(t, db, "a", base)
+	insertNotification(t, db, "b", base)
+	insertNotification(t, db, "c", base)
+	if _, err := db.Exec(`UPDATE notification_outbox SET attempts = ?, lease_until = 0 WHERE id = 'a'`,
+		alerts.MaxNotificationAttempts); err != nil {
+		t.Fatalf("exhaust the notification: %v", err)
+	}
+	// The notification of a worker that is still at work keeps its lease,
+	// so the sweep does not end it.
+	if _, err := db.Exec(`UPDATE notification_outbox SET attempts = ?, lease_until = ? WHERE id = 'b'`,
+		alerts.MaxNotificationAttempts, base.Add(time.Minute).UnixMilli()); err != nil {
+		t.Fatalf("exhaust the notification: %v", err)
+	}
+
+	ended, err := outbox.FailTheExhaustedNotifications(ctx)
+	if err != nil {
+		t.Fatalf("sweep the notifications: %v", err)
+	}
+	if ended != 1 {
+		t.Fatalf("the ended notifications = %d, want 1", ended)
+	}
+
+	state, lastError := readDeliveryState(t, db, "a")
+	if state != "failed" {
+		t.Fatalf("the delivery state = %q, want failed", state)
+	}
+	if lastError == "" {
+		t.Fatal("the ended notification carries no reason")
+	}
+
+	// The sweep is idempotent: the notification that already left the
+	// queue is not ended a second time.
+	ended, err = outbox.FailTheExhaustedNotifications(ctx)
+	if err != nil {
+		t.Fatalf("sweep the notifications: %v", err)
+	}
+	if ended != 0 {
+		t.Fatalf("the ended notifications = %d, want none", ended)
+	}
+	state, _ = readDeliveryState(t, db, "a")
+	if state != "failed" {
+		t.Fatalf("the delivery state = %q, want failed", state)
+	}
+
+	// The notification that a live worker holds waits for its result.
+	state, _ = readDeliveryState(t, db, "b")
+	if state != "pending" {
+		t.Fatalf("the delivery state = %q, want pending", state)
+	}
+	// The notification that still has tries waits for its delivery.
+	state, _ = readDeliveryState(t, db, "c")
+	if state != "pending" {
+		t.Fatalf("the delivery state = %q, want pending", state)
+	}
+}
+
+// readDeliveryState reads the state of one notification of the outbox.
+func readDeliveryState(t *testing.T, db *sql.DB, id string) (string, string) {
+	t.Helper()
+
+	var state, lastError string
+	if err := db.QueryRow(
+		`SELECT delivery_state, last_error FROM notification_outbox WHERE id = ?`, id).
+		Scan(&state, &lastError); err != nil {
+		t.Fatalf("read the notification: %v", err)
+	}
+	return state, lastError
+}
+
 // TestTheUnfinishedNotificationsAreCounted proves that the queue of the
 // notifications is counted, so the bound of the queue can be kept.
 func TestTheUnfinishedNotificationsAreCounted(t *testing.T) {

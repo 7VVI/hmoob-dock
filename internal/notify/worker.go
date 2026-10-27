@@ -24,6 +24,14 @@ const (
 	LeaseDuration = 60 * time.Second
 	// MaxAttempts is the number of the tries of one notification.
 	MaxAttempts = alerts.MaxNotificationAttempts
+	// ResultTimeout is the time the result of a try needs to reach the
+	// database.
+	//
+	// The result of the last try of a notification is written with a
+	// context that the end of the run does not stop, so a run that ends
+	// while it writes the result does not leave a notification behind
+	// that waits for a try that never comes.
+	ResultTimeout = 5 * time.Second
 	// notificationBatch is the number of the notifications one run
 	// reads.
 	notificationBatch = 20
@@ -111,29 +119,50 @@ func (w *Worker) UseClient(client *http.Client) *Worker {
 // it. The failures of the run are reported, but they never stop the other
 // notifications.
 func (w *Worker) RunOnce(ctx context.Context) error {
+	var failures []error
+	// The notifications that used all of their tries leave the queue, so
+	// they do not block the notifications that follow them.
+	if err := w.sweep(ctx); err != nil {
+		failures = append(failures, err)
+	}
+
 	target, found, err := w.store.Target(ctx, DefaultTargetID)
 	if err != nil {
-		return err
+		return errors.Join(append(failures, err)...)
 	}
 	if !found || !target.Enabled || strings.TrimSpace(target.URL) == "" {
-		return nil
+		return errors.Join(failures...)
 	}
 	sender, err := w.sender(target)
 	if err != nil {
-		return err
+		return errors.Join(append(failures, err)...)
 	}
 	pending, err := w.outbox.PendingNotifications(ctx, notificationBatch)
 	if err != nil {
-		return err
+		return errors.Join(append(failures, err)...)
 	}
 
-	var failures []error
 	for _, notification := range pending {
+		if ctx.Err() != nil {
+			// The run is over: the notifications that follow wait for
+			// the next run instead of holding the end of it.
+			break
+		}
 		if err := w.deliver(ctx, sender, notification); err != nil {
 			failures = append(failures, err)
 		}
 	}
 	return errors.Join(failures...)
+}
+
+// sweep ends the notifications that used all of their tries.
+//
+// A worker that died after its last claim leaves a notification behind
+// that no worker can claim again. The sweep ends it, so it does not
+// starve the notifications that follow it. The sweep is idempotent.
+func (w *Worker) sweep(ctx context.Context) error {
+	_, err := w.outbox.FailTheExhaustedNotifications(ctx)
+	return err
 }
 
 // sender builds the sender of the target.
@@ -166,9 +195,13 @@ func (w *Worker) deliver(ctx context.Context, sender *Sender, notification alert
 		return nil
 	}
 
-	sendErr := sender.Send(ctx, notification)
+	// The try runs with a context that the end of the run does not stop:
+	// the target either answers or it does not, so the result of the try
+	// tells whether the notification reached it. The client of the
+	// sender bounds the try with its own timeout.
+	sendErr := sender.Send(context.WithoutCancel(ctx), notification)
 	if sendErr == nil {
-		return w.outbox.CompleteNotification(ctx, notification.ID, alerts.Delivery{Delivered: true})
+		return w.complete(ctx, notification.ID, alerts.Delivery{Delivered: true})
 	}
 
 	failure := DescribeFailure(sendErr)
@@ -180,10 +213,22 @@ func (w *Worker) deliver(ctx context.Context, sender *Sender, notification alert
 	} else {
 		delivery.NextAttemptAt = now.Add(RetryDelay(attempt))
 	}
-	if err := w.outbox.CompleteNotification(ctx, notification.ID, delivery); err != nil {
+	if err := w.complete(ctx, notification.ID, delivery); err != nil {
 		return err
 	}
 	return fmt.Errorf("notify: the notification %s was not delivered: %s", notification.ID, failure)
+}
+
+// complete records the result of a try.
+//
+// The result is written with a context that the end of the run does not
+// stop and with a short timeout: the result of the last try of a
+// notification must reach the database, or the notification waits for a
+// try that never comes and it starves the notifications that follow it.
+func (w *Worker) complete(ctx context.Context, id string, delivery alerts.Delivery) error {
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ResultTimeout)
+	defer cancel()
+	return w.outbox.CompleteNotification(writeCtx, id, delivery)
 }
 
 // DescribeFailure describes why a delivery failed.

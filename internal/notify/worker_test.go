@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -274,6 +275,131 @@ func TestTheWorkerRedeliversAfterAnExpiredLease(t *testing.T) {
 	}
 	if state.attempts != 2 {
 		t.Fatalf("attempts = %d, want 2", state.attempts)
+	}
+}
+
+// TestTheWorkerEndsTheLastTryWhenTheRunIsCancelled proves that the result
+// of the last try of a notification reaches the database even when the run
+// ends.
+//
+// The run is cancelled while the target answers, so the result of the try
+// is written with a context that the cancellation does not stop. The
+// notification leaves the queue instead of waiting for a try that never
+// comes and blocking the notifications that follow it.
+func TestTheWorkerEndsTheLastTryWhenTheRunIsCancelled(t *testing.T) {
+	transport := &recordingTransport{status: http.StatusInternalServerError}
+	worker, db, clock := newWorker(t, transport)
+
+	at := time.Unix(1800000000, 0).UTC()
+	recordAlert(t, db, at)
+
+	// The first tries fail and the notification waits for its retry.
+	for attempt := 1; attempt < notify.MaxAttempts; attempt++ {
+		if err := worker.RunOnce(context.Background()); err == nil {
+			t.Fatalf("the attempt %d did not report the failure", attempt)
+		}
+		clock.advance(notify.RetryDelay(attempt))
+	}
+
+	// The run ends while the target answers the last try.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	transport.cancel = cancel
+	if err := worker.RunOnce(ctx); err == nil {
+		t.Fatal("the last attempt did not report the failure")
+	}
+
+	state := readOutboxState(t, db)
+	if state.deliveryState != "failed" {
+		t.Fatalf("the delivery state = %q, want failed", state.deliveryState)
+	}
+	if state.attempts != notify.MaxAttempts {
+		t.Fatalf("attempts = %d, want %d", state.attempts, notify.MaxAttempts)
+	}
+	if state.lastError == "" {
+		t.Fatal("the last failure was not recorded")
+	}
+}
+
+// TestTheWorkerDeliversBehindTheExhaustedNotifications proves that the
+// notifications that wait in the queue do not starve the ones that follow
+// them.
+//
+// A worker that died after its last claim leaves notifications behind that
+// no worker can claim again. They are the oldest ones of the queue, so a
+// batch that returns them delivers nothing and stops the delivery of the
+// notifications that follow them.
+func TestTheWorkerDeliversBehindTheExhaustedNotifications(t *testing.T) {
+	transport := &recordingTransport{}
+	worker, db, clock := newWorker(t, transport)
+
+	at := time.Unix(1800000000, 0).UTC()
+	recordAlert(t, db, at)
+
+	// The queue is filled with notifications that used all of their tries
+	// and that no worker can claim.
+	insertExhaustedNotifications(t, db, 25, clock.read())
+
+	var notificationID string
+	if err := db.QueryRow(
+		`SELECT id FROM notification_outbox WHERE id NOT LIKE 'exhausted-%'`).
+		Scan(&notificationID); err != nil {
+		t.Fatalf("read the notification: %v", err)
+	}
+
+	if err := worker.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run the worker: %v", err)
+	}
+
+	requests := transport.received()
+	if len(requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(requests))
+	}
+	if !strings.Contains(requests[0].Body, notificationID) {
+		t.Fatalf("the notification %s was not delivered", notificationID)
+	}
+
+	var state string
+	if err := db.QueryRow(`SELECT delivery_state FROM notification_outbox WHERE id = ?`,
+		notificationID).Scan(&state); err != nil {
+		t.Fatalf("read the notification: %v", err)
+	}
+	if state != "delivered" {
+		t.Fatalf("the delivery state = %q, want delivered", state)
+	}
+
+	// The exhausted notifications left the queue, so they block nobody
+	// any more.
+	var exhausted int
+	if err := db.QueryRow(`
+		SELECT count(*) FROM notification_outbox
+		 WHERE id LIKE 'exhausted-%' AND delivery_state = 'failed'`).Scan(&exhausted); err != nil {
+		t.Fatalf("count the notifications: %v", err)
+	}
+	if exhausted != 25 {
+		t.Fatalf("the ended notifications = %d, want 25", exhausted)
+	}
+}
+
+// insertExhaustedNotifications writes the notifications that used all of
+// their tries and that no worker can claim.
+//
+// They are the oldest ones of the queue, so a batch that returns them
+// delivers nothing at all.
+func insertExhaustedNotifications(t *testing.T, db *sql.DB, count int, at time.Time) {
+	t.Helper()
+
+	for index := 0; index < count; index++ {
+		id := fmt.Sprintf("exhausted-%d", index)
+		if _, err := db.Exec(`
+			INSERT INTO notification_outbox
+			    (id, event_id, transition_seq, state, occurred_at, summary, environment, object,
+			     next_attempt_at, delivery_state, attempts, lease_until)
+			VALUES (?, ?, 1, 'active', ?, 'summary', 'environment', 'object', ?, 'pending', ?, 0)`,
+			id, "event-"+id, at.Add(-time.Hour).UnixMilli(), at.Add(-time.Hour).UnixMilli(),
+			notify.MaxAttempts); err != nil {
+			t.Fatalf("write the notification: %v", err)
+		}
 	}
 }
 

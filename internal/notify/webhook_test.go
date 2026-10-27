@@ -26,6 +26,9 @@ type recordingTransport struct {
 	status   int
 	body     string
 	delay    time.Duration
+	// cancel ends the run of the worker while the target answers, so the
+	// result of the try is written while the run is over.
+	cancel context.CancelFunc
 }
 
 // recordedRequest is one request that the transport received.
@@ -53,7 +56,13 @@ func (t *recordingTransport) RoundTrip(request *http.Request) (*http.Response, e
 		Body:   body,
 		Header: request.Header.Clone(),
 	})
+	cancel := t.cancel
 	t.mu.Unlock()
+
+	if cancel != nil {
+		// The run ends while the target answers.
+		cancel()
+	}
 
 	if t.delay > 0 {
 		select {
