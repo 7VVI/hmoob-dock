@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppShell from '../components/AppShell.vue'
 import DeploymentHistory from '../components/DeploymentHistory.vue'
 import DeploymentStatus from '../components/DeploymentStatus.vue'
+import LogViewer from '../components/LogViewer.vue'
+import MetricChart from '../components/MetricChart.vue'
 import YamlEditor from '../components/YamlEditor.vue'
+import { api } from '../api/client'
 import {
   getApplication,
   getDeployment,
@@ -22,12 +25,34 @@ import {
   type EventSubscription,
 } from '../api/deployments'
 import {
+  createLogSubscription,
+  deleteLogSubscription,
+  describeLogError,
+  logErrorMessage,
+  openLogStream,
+  type LogStream,
+} from '../api/logs'
+import {
+  getMetrics,
+  isStale,
+  metricNames,
+  metricPoints,
+  metricScale,
+  metricUnit,
+  newestPoint,
+  type MetricName,
+} from '../api/metrics'
+import {
   ApiError,
   configFailures,
   describeError,
   formatTimestamp,
   type AppConfig,
   type Deployment,
+  type LogEvent,
+  type MetricPoint,
+  type NodeListPayload,
+  type NodeSummary,
   type PreviewResult,
   type TaskState,
   type VersionSummary,
@@ -106,6 +131,103 @@ const resolveError = ref('')
 
 let subscription: EventSubscription | null = null
 
+// The limits of the curve of the container.
+const curveRanges = [
+  { minutes: 60, label: '最近 1 小时' },
+  { minutes: 360, label: '最近 6 小时' },
+  { minutes: 1440, label: '最近 24 小时' },
+]
+
+// The container whose curve and logs the page shows.
+//
+// The control端 names a container by its identifier, so the administrator
+// writes it down.
+const containerID = ref('')
+const metric = ref<MetricName>('cpu_percent')
+const range = ref(curveRanges[0].minutes)
+const points = ref<MetricPoint[]>([])
+const curveLoading = ref(false)
+const curveError = ref('')
+const curveLoaded = ref(false)
+
+// The nodes of the deployment.
+//
+// The page only needs to know whether the node of the target is connected,
+// so a failure to read the list never hides the application itself.
+const nodes = ref<NodeSummary[]>([])
+
+// now is the moment of the page.
+//
+// Whether the data of the curve is fresh depends on the time, so the page
+// reads the clock from time to time and tells an old curve from a new one.
+const now = ref(Date.now())
+let ticker: ReturnType<typeof setInterval> | null = null
+
+// The logs of the container.
+//
+// The subscription is opened on demand and closed again when the page
+// leaves the tab, so no read of the logs stays open behind the back of
+// the administrator.
+const logBusy = ref(false)
+const logOpen = ref(false)
+const logLines = ref<string[]>([])
+const logTruncated = ref(false)
+const logError = ref('')
+const logNotice = ref('')
+let logStream: LogStream | null = null
+let logSubscriptionID = ''
+// logPending is the text of the log that does not end with a line break
+// yet, so a piece that ends in the middle of a line does not lose it.
+let logPending = ''
+
+// maxLogLines is the number of the lines the page keeps.
+//
+// A container that writes a lot does not fill the memory of the browser:
+// the oldest lines leave the buffer and the page says so.
+const maxLogLines = 5000
+
+// theMetricName names the metric of the curve.
+const theMetricName = computed(
+  () => metricNames.find((item) => item.name === metric.value)?.label ?? metric.value,
+)
+
+// theUnit is the unit of the curve.
+const theUnit = computed(() => metricUnit(metric.value))
+
+// theScale writes a value of the curve in its unit.
+const theScale = computed(() => metricScale(metric.value))
+
+// theDataIsStale reports whether the newest observation is too old.
+const theDataIsStale = computed(() => curveLoaded.value && isStale(points.value, now.value))
+
+// theNewestAt is the moment of the newest observation of the curve.
+const theNewestAt = computed(() => newestPoint(points.value)?.at ?? '')
+
+// theTargetIsConnected reports whether the agent of the node of the target
+// is connected.
+//
+// A node that is not connected is not a machine that is broken: the page
+// says that the connection is interrupted and never that the server is down.
+const theTargetIsConnected = computed(() => {
+  const target = app.value?.target_id ?? ''
+  if (target === '') {
+    return true
+  }
+  const node = nodes.value.find((item) => item.id === target)
+  if (!node) {
+    return true
+  }
+  return node.connected
+})
+
+// shownLogLines are the lines of the log as the viewer shows them.
+//
+// The last line of the log may still grow, so it is shown with the lines
+// that are complete.
+const shownLogLines = computed(() =>
+  logPending === '' ? logLines.value : [...logLines.value, logPending],
+)
+
 // currentConfig is the configuration the editor holds.
 function currentConfig(): AppConfig {
   return { yaml: yaml.value, variables: { ...variables.value } }
@@ -158,6 +280,20 @@ async function loadOutput(taskID: string): Promise<void> {
   }
 }
 
+// loadNodes reads the nodes of the deployment.
+//
+// The list only says whether the agent of the node of the target is
+// connected, so a failure to read it never hides the application.
+async function loadNodes(): Promise<void> {
+  try {
+    const payload = await api<NodeListPayload>('/api/v1/nodes')
+    nodes.value = payload.nodes
+  } catch {
+    // The page works without the list: it simply cannot tell a broken
+    // connection from a quiet one.
+  }
+}
+
 // load reads everything the page shows.
 async function load(): Promise<void> {
   loading.value = true
@@ -174,6 +310,7 @@ async function load(): Promise<void> {
   } finally {
     loading.value = false
   }
+  await loadNodes()
 }
 
 // onEvent follows the changes of the deployment the page shows.
@@ -536,8 +673,174 @@ async function resolve(): Promise<void> {
   }
 }
 
+// loadCurve reads the history of the container of the application.
+//
+// The curve belongs to the container, not to the machine of the node.
+async function loadCurve(): Promise<void> {
+  const target = app.value?.target_id ?? ''
+  if (target === '' || containerID.value.trim() === '') {
+    points.value = []
+    curveLoaded.value = false
+    curveError.value = ''
+    return
+  }
+  curveLoading.value = true
+  curveError.value = ''
+  try {
+    const to = new Date()
+    const from = new Date(to.getTime() - range.value * 60 * 1000)
+    const payload = await getMetrics({
+      node_id: target,
+      container_id: containerID.value.trim(),
+      from: from.toISOString(),
+      to: to.toISOString(),
+    })
+    points.value = metricPoints(payload.buckets, metric.value, payload.from, payload.to)
+    curveLoaded.value = true
+  } catch (failure) {
+    points.value = []
+    curveLoaded.value = false
+    curveError.value = describeError(failure)
+  } finally {
+    curveLoading.value = false
+  }
+}
+
+// openLogs opens the subscription of the logs of the container.
+//
+// The pieces of the logs travel in the stream of the events, so the page
+// opens the stream first and asks for the subscription afterwards. A
+// control端 that refuses the subscription gets a clear reason, never a
+// silent page.
+async function openLogs(): Promise<void> {
+  const target = app.value?.target_id ?? ''
+  if (logBusy.value) {
+    return
+  }
+  if (target === '' || containerID.value.trim() === '') {
+    logError.value = '请先填写容器的 ID。'
+    return
+  }
+  logBusy.value = true
+  logError.value = ''
+  logNotice.value = ''
+  logTruncated.value = false
+  logLines.value = []
+  logPending = ''
+  try {
+    logStream = openLogStream({
+      onLog: (event) => {
+        handleLogEvent(event)
+      },
+    })
+    const opened = await Promise.race([
+      logStream.ready.then(() => true),
+      new Promise<boolean>((resolve) => {
+        setTimeout(() => resolve(false), 5000)
+      }),
+    ])
+    if (!opened) {
+      logError.value = '实时连接没有建立，请稍后重试。'
+      logStream.close()
+      logStream = null
+      return
+    }
+    const subscription = await createLogSubscription({
+      node_id: target,
+      container_id: containerID.value.trim(),
+    })
+    logSubscriptionID = subscription.id
+    logOpen.value = true
+  } catch (failure) {
+    logOpen.value = false
+    logError.value = describeLogError(failure)
+    logStream?.close()
+    logStream = null
+  } finally {
+    logBusy.value = false
+  }
+}
+
+// closeLogs ends the subscription of the logs.
+//
+// The subscription belongs to the session of the administrator, so the page
+// ends it when it leaves the tab. The read of the logs of the container
+// ends with it.
+async function closeLogs(): Promise<void> {
+  const subscriptionID = logSubscriptionID
+  logSubscriptionID = ''
+  logOpen.value = false
+  logStream?.close()
+  logStream = null
+  if (subscriptionID === '') {
+    return
+  }
+  try {
+    await deleteLogSubscription(subscriptionID)
+  } catch {
+    // The session ends the subscription on its own when the last stream
+    // closes, so a failed request does not leave the page stuck.
+  }
+}
+
+// handleLogEvent puts a piece of the log into the buffer.
+//
+// A piece that reports an error ends the stream of the logs and names the
+// reason for the administrator. A piece that reports a gap tells the
+// reader that the text before it is missing, without calling it a failure.
+function handleLogEvent(event: LogEvent): void {
+  if (event.object_id !== logSubscriptionID) {
+    return
+  }
+  if (event.error_code) {
+    logOpen.value = false
+    logError.value = logErrorMessage(event.error_code)
+    return
+  }
+  if (event.truncated) {
+    logTruncated.value = true
+    if (!event.text) {
+      // The control端 rebuilt the tail of the log. The text before it is
+      // gone, but nothing failed.
+      logNotice.value = '日志已经重新接上，前面的内容缺失。'
+      return
+    }
+  }
+  appendText(event.text ?? '')
+}
+
+// appendText puts the text of a piece of the log into the buffer.
+function appendText(text: string): void {
+  if (text === '') {
+    return
+  }
+  logPending += text
+  const parts = logPending.split('\n')
+  logPending = parts.pop() ?? ''
+  if (parts.length === 0) {
+    return
+  }
+  const all = [...logLines.value, ...parts]
+  if (all.length > maxLogLines) {
+    logTruncated.value = true
+    logLines.value = all.slice(all.length - maxLogLines)
+    return
+  }
+  logLines.value = all
+}
+
+// The page leaves the tab, so the read of the logs ends with it.
+watch(tab, (current) => {
+  if (current !== 'containers') {
+    void closeLogs()
+  }
+})
+
 onMounted(async () => {
   await load()
+  ticker = setInterval(() => {
+    now.value = Date.now()
+  }, 30_000)
   subscription = subscribeEvents({
     onEvent: (event) => {
       void onEvent(event)
@@ -549,8 +852,13 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  if (ticker !== null) {
+    clearInterval(ticker)
+    ticker = null
+  }
   subscription?.close()
   subscription = null
+  void closeLogs()
 })
 </script>
 
@@ -699,6 +1007,95 @@ onBeforeUnmount(() => {
         <ul v-else class="observations">
           <li v-for="observation in observations" :key="observation">{{ observation }}</li>
         </ul>
+
+        <h3 class="panel__title">资源曲线</h3>
+        <p class="muted">曲线是容器的，不是整台机器的。</p>
+
+        <form class="form form--inline" novalidate @submit.prevent="loadCurve">
+          <div class="field">
+            <label class="field__label" for="detail-container">容器</label>
+            <input
+              id="detail-container"
+              v-model="containerID"
+              class="field__input"
+              type="text"
+              name="detail-container"
+              autocomplete="off"
+              placeholder="容器的 ID"
+            />
+          </div>
+
+          <div class="field">
+            <label class="field__label" for="detail-metric">指标</label>
+            <select id="detail-metric" v-model="metric" class="field__input" name="detail-metric">
+              <option v-for="item in metricNames" :key="item.name" :value="item.name">
+                {{ item.label }}
+              </option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label class="field__label" for="detail-range">时间范围</label>
+            <select id="detail-range" v-model.number="range" class="field__input" name="detail-range">
+              <option v-for="item in curveRanges" :key="item.minutes" :value="item.minutes">
+                {{ item.label }}
+              </option>
+            </select>
+          </div>
+
+          <button class="button button--primary" type="submit" :disabled="curveLoading">
+            {{ curveLoading ? '读取中…' : '查看曲线' }}
+          </button>
+        </form>
+
+        <p v-if="curveError" class="alert" role="alert">
+          <span>{{ curveError }}</span>
+          <button type="button" class="button button--quiet" @click="loadCurve">重试</button>
+        </p>
+
+        <p v-else-if="!theTargetIsConnected" class="notice">
+          连接中断。曲线停在最后一次收到数据的时候。
+        </p>
+
+        <p v-else-if="theDataIsStale" class="notice">
+          数据已过期。最后一次数据来自
+          {{ theNewestAt === '' ? '更早' : formatTimestamp(theNewestAt) }}。
+        </p>
+
+        <p v-if="!curveLoaded && !curveLoading && curveError === ''" class="empty">
+          填写容器 ID 之后可以看到它的资源曲线。
+        </p>
+
+        <MetricChart
+          v-if="curveLoaded"
+          :points="points"
+          :unit="theUnit"
+          :title="theMetricName"
+          :format="theScale"
+        />
+
+        <h3 class="panel__title">日志</h3>
+        <p class="muted">日志按需打开，离开这个页签就会关闭。</p>
+
+        <div class="actions">
+          <button
+            v-if="!logOpen"
+            type="button"
+            class="button button--quiet"
+            :disabled="logBusy"
+            @click="openLogs"
+          >
+            {{ logBusy ? '打开中…' : '打开日志' }}
+          </button>
+          <button v-else type="button" class="button button--quiet" @click="closeLogs">
+            关闭日志
+          </button>
+        </div>
+
+        <p v-if="logError" class="alert" role="alert">{{ logError }}</p>
+        <p v-if="logNotice" class="notice">{{ logNotice }}</p>
+
+        <LogViewer :lines="shownLogLines" :truncated="logTruncated" />
       </section>
 
       <section v-else-if="tab === 'logs'" class="panel">

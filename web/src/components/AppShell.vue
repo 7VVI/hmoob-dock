@@ -40,6 +40,7 @@ async function signOut() {
       <nav class="shell__nav" aria-label="主导航">
         <RouterLink class="shell__link" to="/">概览</RouterLink>
         <RouterLink class="shell__link" to="/applications">应用</RouterLink>
+        <RouterLink class="shell__link" to="/alerts">告警</RouterLink>
         <RouterLink class="shell__link" to="/settings">设置</RouterLink>
       </nav>
       <button type="button" class="button button--quiet" :disabled="busy" @click="signOut">

@@ -220,6 +220,175 @@ export interface DeploymentOutput {
   truncated: boolean
 }
 
+// MetricValues holds the values of one observation of a container.
+//
+// The names of the fields are the names that the API uses, so a document of
+// the API can be read without a translation.
+export interface MetricValues {
+  cpu_percent: number
+  memory_bytes: number
+  net_rx_per_sec: number
+  net_tx_per_sec: number
+  io_read_per_sec: number
+  io_write_per_sec: number
+}
+
+// MetricBucket is one minute of the history of a container.
+//
+// A minute that was not observed has no bucket at all: the reader fills the
+// gap with an empty value and never with a zero.
+export interface MetricBucket {
+  // start is the start of the minute in UTC.
+  start: string
+  // average holds the mean of the valid samples of the minute.
+  average: MetricValues
+  // peak holds the largest value of every field of the minute.
+  peak: MetricValues
+  // sample_count is the number of the valid samples.
+  sample_count: number
+  // expected_count is the number of the samples a complete minute holds.
+  expected_count: number
+  // complete reports whether the minute holds every expected sample.
+  complete: boolean
+}
+
+// MetricsPayload is the answer of the history of the metrics.
+export interface MetricsPayload {
+  node_id: string
+  container_id: string
+  from: string
+  to: string
+  // units names the unit of every value of a bucket.
+  units: Record<string, string>
+  buckets: MetricBucket[]
+  limit: number
+  offset: number
+  has_more: boolean
+}
+
+// MetricPoint is one point of a curve.
+//
+// A minute that was not observed holds no value: the point keeps its place
+// on the time line and shows a gap instead of a made up number.
+export interface MetricPoint {
+  // at is the start of the minute in UTC.
+  at: string
+  // average is the mean of the minute, or null when the minute was not
+  // observed.
+  average: number | null
+  // peak is the largest value of the minute, or null when the minute was
+  // not observed.
+  peak: number | null
+  // complete reports whether the minute holds every expected sample.
+  complete: boolean
+}
+
+// AlertRuleKind is the kind of the observation a rule watches.
+export type AlertRuleKind = 'resource' | 'container_exit' | 'agent_offline'
+
+// AlertRule is a rule of the alerts.
+export interface AlertRule {
+  id: string
+  kind: AlertRuleKind
+  // scope_id is the object the rule watches: a container for a resource
+  // rule, a node for a rule of a lost agent.
+  scope_id: string
+  // metric is the value a resource rule watches.
+  metric: string
+  // threshold is the limit of a resource rule.
+  threshold: number
+  // for_seconds is the time the condition has to hold, in seconds.
+  for_seconds: number
+  enabled: boolean
+}
+
+// AlertEventState is the state of an event of the alerts.
+export type AlertEventState = 'active' | 'resolved'
+
+// AlertEvent is one anomaly of one object.
+export interface AlertEvent {
+  id: string
+  // rule_id is the rule that opened the event.
+  rule_id: string
+  // object_id is the object the event is about.
+  object_id: string
+  state: AlertEventState
+  summary: string
+  started_at: string
+  resolved_at: string | null
+  acknowledged_at: string | null
+}
+
+// WebhookPayload is the state of the target of the notifications.
+//
+// The answer holds the masked form of the address only: the address of a
+// target can carry a secret in its path, so it never leaves the control端
+// in the clear.
+export interface WebhookPayload {
+  id: string
+  // configured reports whether a target was configured already.
+  configured: boolean
+  // url_masked is the display form of the address of the target.
+  url_masked: string
+  // allowed_private_cidrs are the private networks the administrator
+  // allowed the target to live in.
+  allowed_private_cidrs: string[]
+  enabled: boolean
+  updated_at: string | null
+}
+
+// NotificationStatus is the state of the queue of the notifications.
+export interface NotificationStatus {
+  // pending is the number of the notifications that wait for their
+  // delivery.
+  pending: number
+  // delivered is the number of the notifications that reached their
+  // target.
+  delivered: number
+  // failed is the number of the notifications that gave up after their last
+  // try.
+  failed: number
+  // skipped is the number of the notifications that were not queued,
+  // because the queue was full.
+  skipped: number
+  last_delivered_at: string | null
+}
+
+// WebhookBundle is the target of the notifications with the state of their
+// queue.
+export interface WebhookBundle {
+  webhook: WebhookPayload
+  notifications: NotificationStatus
+}
+
+// LogSubscriptionPayload is a subscription of the logs of a container.
+export interface LogSubscriptionPayload {
+  id: string
+  node_id: string
+  container_id: string
+  tail: number
+  follow: boolean
+  expires_at: string
+}
+
+// LogEvent is a piece of the logs of a container.
+//
+// The event of a piece of the logs carries the text and its position. An
+// empty piece without a text reports a gap: the control端 lost a piece of
+// the logs or rebuilt the tail of the log.
+export interface LogEvent {
+  type: string
+  // object_id is the subscription the piece belongs to.
+  object_id: string
+  seq: number
+  offset?: number
+  text?: string
+  // truncated reports that a piece before this one was lost.
+  truncated?: boolean
+  // error_code names the reason a stream of the logs ended.
+  error_code?: string
+}
+
 // ConfigFailure is one field of a configuration the control端 refused.
 //
 // The path names the place in the document and the line the place in the

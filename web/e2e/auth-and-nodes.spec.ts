@@ -208,7 +208,7 @@ test('logs the administrator in and shows the nodes of the deployment', async ({
   await expect(page.getByText('已连接', { exact: true })).toBeVisible()
   await expect(page.getByText('连接中断', { exact: true })).toBeVisible()
   await expect(page.getByText('服务器宕机')).toHaveCount(0)
-  await expect(page.getByText('共 2 个节点。')).toBeVisible()
+  await expect(page.getByText('共 2 个节点，', { exact: false })).toBeVisible()
 })
 
 test('refuses a wrong password and keeps the input', async ({ page }) => {
