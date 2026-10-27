@@ -157,15 +157,20 @@ func (s *Server) handleAlertAcknowledge(w http.ResponseWriter, r *http.Request) 
 
 // requireAlertWrite checks the session, the origin and the token of a
 // request that changes the alerts.
+//
+// A rejected request answers with its reason: an empty answer would look
+// like a success to the caller, although nothing was written.
 func (s *Server) requireAlertWrite(w http.ResponseWriter, r *http.Request) (auth.Session, bool) {
 	session, ok := s.requireSession(w, r)
 	if !ok {
 		return session, false
 	}
 	if !s.sameOrigin(r) {
+		writeError(w, http.StatusForbidden, "cross_origin", "请求来源不被允许")
 		return session, false
 	}
 	if !auth.CheckCSRF(r, session) {
+		writeError(w, http.StatusForbidden, "csrf_invalid", "CSRF 令牌无效")
 		return session, false
 	}
 	return session, true
