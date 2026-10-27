@@ -101,9 +101,9 @@ watch(
 .logs__gap {
   margin: 0;
   padding: var(--space-2) var(--space-3);
-  border: 1px solid #f0e0c4;
-  border-radius: 6px;
-  background: #fdf7ec;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius);
+  background: var(--color-warn-soft);
   color: var(--color-offline);
   font-size: 0.85rem;
 }
@@ -114,7 +114,7 @@ watch(
   margin: 0;
   padding: var(--space-3);
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   background: var(--color-page);
   font-family: var(--font-mono);
   font-size: 0.8rem;

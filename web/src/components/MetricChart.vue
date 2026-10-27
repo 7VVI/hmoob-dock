@@ -75,24 +75,60 @@ function tooltip(params: unknown): string {
 // The two lines never join over a gap, so a minute that was not observed
 // stays visible as a gap instead of a line that never existed.
 function option() {
+  // The curve is drawn on a canvas, so the colours are the literal values of
+  // the palette: a canvas does not resolve a custom property.
+  const ink = '#0f1416'
+  const muted = '#66706c'
+  const line = '#d7dcd9'
+  const grid = '#e9edeb'
+  const mono = '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
   return {
     animation: false,
     grid: { left: 56, right: 20, top: 16, bottom: 40 },
-    legend: { data: ['平均值', '峰值'], bottom: 0, itemWidth: 18, itemHeight: 10 },
-    tooltip: { trigger: 'axis', formatter: tooltip },
-    xAxis: { type: 'time', axisLine: { lineStyle: { color: '#e2e5ea' } } },
+    legend: {
+      data: ['平均值', '峰值'],
+      bottom: 0,
+      itemWidth: 16,
+      itemHeight: 8,
+      textStyle: { color: muted, fontSize: 11, fontFamily: mono },
+    },
+    tooltip: {
+      trigger: 'axis',
+      formatter: tooltip,
+      backgroundColor: '#ffffff',
+      borderColor: line,
+      borderWidth: 1,
+      padding: [8, 10],
+      textStyle: { color: ink, fontSize: 12, fontFamily: mono },
+    },
+    xAxis: {
+      type: 'time',
+      axisLine: { lineStyle: { color: line } },
+      axisTick: { show: false },
+      axisLabel: { color: muted, fontSize: 11, fontFamily: mono },
+      splitLine: { show: false },
+    },
     yAxis: {
       type: 'value',
+      // The readings of an idle container sit close to zero, so the axis
+      // follows the data instead of starting at a full range.
+      scale: true,
       name: props.unit,
-      nameTextStyle: { color: '#5f6873' },
-      axisLabel: { color: '#5f6873' },
-      splitLine: { lineStyle: { color: '#eef0f3' } },
+      nameTextStyle: { color: muted, fontSize: 11, align: 'left' },
+      axisLine: { show: false },
+      axisTick: { show: false },
+      axisLabel: { color: muted, fontSize: 11, fontFamily: mono },
+      splitLine: { lineStyle: { color: grid, width: 1 } },
     },
-    series: chartSeries(props.points).map((line) => ({
-      ...line,
+    series: chartSeries(props.points).map((entry, index) => ({
+      ...entry,
       showSymbol: false,
       smooth: false,
-      lineStyle: { width: 1.5 },
+      lineStyle: {
+        width: index === 0 ? 1.5 : 1,
+        type: index === 0 ? 'solid' : 'dashed',
+      },
+      itemStyle: { color: index === 0 ? ink : muted },
     })),
   }
 }

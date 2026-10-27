@@ -53,6 +53,7 @@ async function submit() {
 
 <template>
   <main class="page page--narrow">
+    <p class="shell__brand">轻量部署平台</p>
     <h1 class="page__title">初始化</h1>
     <p class="page__lead">用部署时生成的凭据创建管理员账号。</p>
     <form class="form" novalidate @submit.prevent="submit">

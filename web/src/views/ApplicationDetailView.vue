@@ -1046,11 +1046,22 @@ onBeforeUnmount(() => {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="item in appContainers" :key="item.id">
-              <th scope="row">{{ item.service === '' ? '—' : item.service }}</th>
-              <td>{{ item.name }}</td>
-              <td>{{ item.image }}</td>
-              <td>{{ item.state }}{{ item.health === '' ? '' : ' · ' + item.health }}</td>
+            <tr
+              v-for="item in appContainers"
+              :key="item.id"
+              :data-state="item.state === 'running' ? 'running' : 'stopped'"
+            >
+              <th scope="row" class="nodes__host">{{ item.service === '' ? '—' : item.service }}</th>
+              <td class="nodes__host">{{ item.name }}</td>
+              <td class="nodes__seen">{{ item.image }}</td>
+              <td>
+                <span
+                  class="state"
+                  :class="item.state === 'running' ? 'state--online' : 'state--offline'"
+                >
+                  {{ item.state }}{{ item.health === '' ? '' : ' · ' + item.health }}
+                </span>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -1117,7 +1128,7 @@ onBeforeUnmount(() => {
         </p>
 
         <p v-if="!curveLoaded && !curveLoading && curveError === ''" class="empty">
-          选择一个容器之后可以看到它的资源曲线。
+          选好容器和指标后点「查看曲线」。
         </p>
 
         <MetricChart
@@ -1330,7 +1341,6 @@ onBeforeUnmount(() => {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-4);
-  margin-bottom: var(--space-4);
   border-bottom: 1px solid var(--color-border);
 }
 
@@ -1344,10 +1354,18 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 
+.tabs__tab {
+  transition: color 120ms ease;
+}
+
+.tabs__tab:hover {
+  color: var(--color-text);
+}
+
 .tabs__tab--active {
   color: var(--color-text);
   border-bottom-color: var(--color-accent);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .facts {
@@ -1425,7 +1443,7 @@ onBeforeUnmount(() => {
   margin-top: var(--space-4);
   padding: var(--space-4);
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   background: var(--color-page);
 }
 
@@ -1458,7 +1476,7 @@ onBeforeUnmount(() => {
   overflow: auto;
   padding: var(--space-3);
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   background: var(--color-page);
   font-family: var(--font-mono);
   font-size: 0.8rem;

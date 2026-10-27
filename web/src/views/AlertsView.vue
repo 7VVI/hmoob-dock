@@ -451,7 +451,7 @@ onMounted(load)
 
         <form class="form" novalidate @submit.prevent="saveTarget">
           <div class="field">
-            <label class="field__label" for="webhook-url">通知地址</label>
+            <label class="field__label" for="webhook-url">新的通知地址</label>
             <input
               id="webhook-url"
               v-model="url"
@@ -465,7 +465,7 @@ onMounted(load)
           </div>
 
           <div class="field">
-            <label class="field__label" for="webhook-cidrs">允许的内网网段</label>
+            <label class="field__label" for="webhook-cidrs">新增允许的内网网段</label>
             <input
               id="webhook-cidrs"
               v-model="cidrs"

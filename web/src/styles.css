@@ -1,26 +1,34 @@
-/* The styles of the pages.
+/* The design of the control端.
  *
- * The interface stays quiet: one column, a lot of white space and a list
- * instead of a wall of cards. The colours and the distances live in
- * variables, so every page uses the same ones.
+ * The page is an instrument, not a dashboard: a single column, hairline
+ * rules instead of floating cards, and a monospace face for every number,
+ * identifier and timestamp. The one bold element is the state spine, the
+ * three pixel bar on the left of a row that carries the state of the object
+ * it names. The accent is spent only on the focus ring and the current tab,
+ * so a page full of readings stays quiet.
  */
 
 :root {
-  color-scheme: light;
-
-  --color-page: #f6f7f9;
+  /* The palette. The paper is a cool grey rather than a warm cream: the
+   * product is a machine room, not a magazine. */
+  --color-ink: #0f1416;
+  --color-ink-soft: #2a3236;
+  --color-page: #eff2f1;
   --color-surface: #ffffff;
-  --color-border: #e2e5ea;
-  --color-text: #1b1f24;
-  --color-text-muted: #5f6873;
-  --color-accent: #2f5fd0;
-  --color-accent-strong: #274da8;
-  --color-accent-soft: #eef3fd;
-  --color-danger: #a12b22;
-  --color-danger-soft: #fdf1f0;
-  --color-online: #1c7a45;
-  --color-offline: #8a5a12;
+  --color-border: #d7dcd9;
+  --color-border-strong: #bfc6c2;
+  --color-text: var(--color-ink);
+  --color-text-muted: #66706c;
 
+  /* The signals. They mark the state of an object and nothing else. */
+  --color-accent: #0b6b63;
+  --color-online: #1c6b4f;
+  --color-offline: #8a6108;
+  --color-danger: #972a2a;
+  --color-danger-soft: #fbf0ef;
+  --color-warn-soft: #fbf5e8;
+
+  /* The rhythm. */
   --space-1: 0.25rem;
   --space-2: 0.5rem;
   --space-3: 0.75rem;
@@ -29,16 +37,34 @@
   --space-6: 2rem;
   --space-7: 3rem;
 
-  --radius: 8px;
-  --width-page: 52rem;
-  --width-form: 24rem;
+  /* A crisp corner, like a machined panel. */
+  --radius: 2px;
+  --control-height: 2.125rem;
 
-  --font-sans: system-ui, -apple-system, "Segoe UI", "Noto Sans SC", "Microsoft YaHei", sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --width-page: 60rem;
+  --width-form: 26rem;
+  --width-readout: 9rem;
+
+  /* The faces. The monospace carries the data; the sans carries the
+   * sentences. Both fall back to the fonts of the platform, so the page
+   * works on a node without a network. */
+  --font-sans:
+    "IBM Plex Sans", "Segoe UI Variable Text", "Segoe UI", system-ui,
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC",
+    sans-serif;
+  --font-mono:
+    "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas,
+    "Liberation Mono", monospace;
 }
 
-* {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
 }
 
 body {
@@ -46,62 +72,124 @@ body {
   background: var(--color-page);
   color: var(--color-text);
   font-family: var(--font-sans);
-  font-size: 16px;
-  line-height: 1.6;
+  font-size: 0.875rem;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
 }
 
 h1,
 h2,
+h3,
+h4 {
+  margin: 0;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+}
+
 p,
-ol {
+ul,
+ol,
+dl,
+dd {
   margin: 0;
 }
 
-code {
+code,
+kbd,
+pre,
+samp {
   font-family: var(--font-mono);
+  font-size: 0.82em;
 }
 
-/* The page of a task that does not need the navigation. */
+a {
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+/* The layout. */
+
 .page {
-  max-width: var(--width-page);
+  width: min(100%, var(--width-page));
   margin: 0 auto;
-  padding: var(--space-7) var(--space-4) var(--space-6);
+  padding: var(--space-6) var(--space-5) var(--space-7);
+  display: grid;
+  gap: var(--space-5);
+  align-content: start;
 }
 
 .page--narrow {
-  max-width: var(--width-form);
+  width: min(100% - 2rem, var(--width-form));
+  margin: 12vh auto var(--space-7);
+  padding: var(--space-6) var(--space-5);
+  display: grid;
+  align-content: start;
+  gap: var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+}
+
+@media (max-height: 40rem) {
+  .page--narrow {
+    margin-top: var(--space-6);
+  }
 }
 
 .page__title {
-  font-size: 1.5rem;
-  font-weight: 650;
-  letter-spacing: 0.01em;
-  margin-bottom: var(--space-5);
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+  font-size: 1.375rem;
+  letter-spacing: -0.015em;
 }
 
 .page__lead {
-  margin-top: var(--space-2);
+  max-width: 42rem;
+  margin-top: calc(var(--space-1) * -1);
   color: var(--color-text-muted);
 }
 
-/* The shell of the pages that need the navigation. */
+/* The shell. */
+
 .shell {
-  max-width: var(--width-page);
-  margin: 0 auto;
-  padding: var(--space-5) var(--space-4) var(--space-7);
+  min-height: 100dvh;
 }
 
 .shell__header {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-4);
-  padding-bottom: var(--space-3);
+  gap: var(--space-5);
+  width: min(100%, var(--width-page));
+  margin: 0 auto;
+  padding: var(--space-4) var(--space-5);
   border-bottom: 1px solid var(--color-border);
 }
 
 .shell__brand {
-  font-weight: 650;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+/* The mark repeats the spine of the rows: a panel with the state bar on its
+ * left, so the page has one motif. */
+.shell__brand::before {
+  content: "";
+  width: 0.6875rem;
+  height: 0.8125rem;
+  border: 1px solid var(--color-ink);
+  border-left: 3px solid var(--color-ink);
 }
 
 .shell__nav {
@@ -111,184 +199,256 @@ code {
 }
 
 .shell__link {
-  color: var(--color-text-muted);
-  text-decoration: none;
+  position: relative;
   padding: var(--space-1) 0;
-  border-bottom: 2px solid transparent;
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+  text-decoration: none;
+  transition: color 120ms ease;
+}
+
+.shell__link::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 -1px;
+  height: 2px;
+  background: transparent;
+  transition: background-color 120ms ease;
 }
 
 .shell__link:hover {
-  color: var(--color-text);
+  color: var(--color-ink);
 }
 
 .shell__link.router-link-active {
-  color: var(--color-text);
-  border-bottom-color: var(--color-accent);
-  font-weight: 600;
+  color: var(--color-ink);
+  font-weight: 500;
+}
+
+.shell__link.router-link-active::after {
+  background: var(--color-accent);
 }
 
 .shell__main {
-  margin-top: var(--space-6);
+  display: grid;
+  gap: var(--space-5);
+  align-content: start;
+  width: min(100%, var(--width-page));
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-5) var(--space-7);
 }
 
-/* A section of a page. */
+/* The panels. A rule, not a shadow: the page reads like one sheet. */
+
 .panel {
-  background: var(--color-surface);
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-5);
   border: 1px solid var(--color-border);
   border-radius: var(--radius);
-  padding: var(--space-5);
-  margin-bottom: var(--space-5);
+  background: var(--color-surface);
 }
 
 .panel__head {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
-  margin-bottom: var(--space-3);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
 }
 
 .panel__title {
-  font-size: 1.05rem;
-  font-weight: 650;
-  margin-bottom: var(--space-2);
+  font-size: 0.9375rem;
 }
 
-.panel__head .panel__title {
-  margin-bottom: 0;
+.panel__actions {
+  display: flex;
+  gap: var(--space-2);
 }
 
-.panel > .button {
-  margin-top: var(--space-3);
-}
+/* The forms. */
 
-/* A form. */
 .form {
   display: grid;
   gap: var(--space-4);
-  max-width: var(--width-form);
-  margin-top: var(--space-4);
+}
+
+.form--inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--space-3);
 }
 
 .field {
   display: grid;
-  gap: var(--space-2);
+  gap: var(--space-1);
+  align-content: start;
 }
 
 .field__label {
-  font-size: 0.9rem;
-  font-weight: 600;
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--color-text-muted);
 }
 
 .field__input {
-  width: 100%;
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
+  height: var(--control-height);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius);
   background: var(--color-surface);
   color: var(--color-text);
   font: inherit;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+textarea.field__input,
+select.field__input {
+  height: auto;
+  min-height: var(--control-height);
+  padding: var(--space-2) var(--space-3);
+}
+
+select.field__input {
+  padding-right: var(--space-2);
+}
+
+.field__input:hover {
+  border-color: var(--color-ink-soft);
 }
 
 .field__input:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 1px;
+  outline: none;
   border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px rgb(11 107 99 / 12%);
+}
+
+.field__input:disabled {
+  background: var(--color-page);
+  color: var(--color-text-muted);
 }
 
 .field__hint {
   color: var(--color-text-muted);
-  font-size: 0.8rem;
+  font-size: 0.78125rem;
 }
 
 .field__error {
   color: var(--color-danger);
-  font-size: 0.8rem;
+  font-size: 0.78125rem;
 }
 
-/* A button. */
+.field__check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 0.8125rem;
+}
+
+/* The buttons. The primary action is the ink of the page, not a colour:
+ * the accent belongs to the focus and the current tab. */
+
 .button {
-  font: inherit;
-  padding: var(--space-2) var(--space-4);
-  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--control-height);
+  padding: 0 var(--space-3);
   border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--color-ink);
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 500;
   cursor: pointer;
-  justify-self: start;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
 }
 
 .button:disabled {
-  opacity: 0.55;
   cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .button--primary {
-  background: var(--color-accent);
-  color: #ffffff;
+  background: var(--color-ink);
+  color: #fff;
 }
 
 .button--primary:hover:not(:disabled) {
-  background: var(--color-accent-strong);
+  background: #22302f;
 }
 
 .button--quiet {
-  background: transparent;
-  border-color: var(--color-border);
-  color: var(--color-text);
+  border-color: var(--color-border-strong);
+  color: var(--color-ink-soft);
 }
 
 .button--quiet:hover:not(:disabled) {
-  border-color: var(--color-text-muted);
+  border-color: var(--color-ink-soft);
+  background: var(--color-page);
 }
 
 .button--danger {
-  background: var(--color-danger);
-  color: #ffffff;
+  border-color: var(--color-danger);
+  color: var(--color-danger);
 }
 
-.button:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 2px;
+.button--danger:hover:not(:disabled) {
+  background: var(--color-danger-soft);
 }
 
-/* The messages of the page. */
+/* The text. */
+
 .muted {
   color: var(--color-text-muted);
-  font-size: 0.9rem;
+}
+
+.empty {
+  padding: var(--space-5) 0;
+  color: var(--color-text-muted);
 }
 
 .alert {
   display: grid;
-  justify-items: start;
   gap: var(--space-2);
   padding: var(--space-3) var(--space-4);
-  border: 1px solid #f0cdc9;
-  border-radius: 6px;
+  border: 1px solid var(--color-danger);
+  border-left-width: 3px;
+  border-radius: var(--radius);
   background: var(--color-danger-soft);
   color: var(--color-danger);
-  font-size: 0.9rem;
+}
+
+.alert__list {
+  padding-left: var(--space-4);
 }
 
 .notice {
-  margin-top: var(--space-3);
   padding: var(--space-3) var(--space-4);
-  border: 1px solid #d5e0f8;
-  border-radius: 6px;
-  background: var(--color-accent-soft);
-  color: var(--color-accent-strong);
-  font-size: 0.9rem;
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-offline);
+  border-radius: var(--radius);
+  background: var(--color-warn-soft);
 }
 
-.empty {
-  padding: var(--space-4) 0;
-  color: var(--color-text-muted);
+.notice__actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
 }
 
-/* The table of the nodes.
- *
- * The table keeps its shape on a narrow screen: the area around it scrolls,
- * so the columns are not squeezed into unreadable slivers.
- */
+/* The tables. The first cell carries the spine, the readings line up in the
+ * monospace face with tabular figures. */
+
 .table-scroll {
   overflow-x: auto;
 }
@@ -296,36 +456,54 @@ code {
 .nodes {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.95rem;
-}
-
-.nodes th,
-.nodes td {
   text-align: left;
-  padding: var(--space-3) var(--space-2);
-  border-bottom: 1px solid var(--color-border);
-  vertical-align: top;
 }
 
 .nodes thead th {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-border-strong);
   color: var(--color-text-muted);
-  font-size: 0.8rem;
-  font-weight: 600;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
 }
 
-.nodes tbody th {
-  font-weight: 600;
+.nodes tbody th,
+.nodes tbody td {
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  vertical-align: middle;
+}
+
+.nodes tbody tr:last-child > * {
+  border-bottom: none;
+}
+
+.nodes tbody tr:hover > * {
+  background: #fafbfa;
 }
 
 .nodes__host {
-  max-width: 14rem;
-  overflow-wrap: break-word;
+  font-weight: 500;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
 }
 
 .nodes__count,
 .nodes__seen {
+  font-family: var(--font-mono);
+  font-size: 0.78125rem;
+  font-variant-numeric: tabular-nums;
   color: var(--color-text-muted);
   white-space: nowrap;
+}
+
+.nodes__count {
+  text-align: right;
 }
 
 .nodes__actions {
@@ -333,20 +511,48 @@ code {
   white-space: nowrap;
 }
 
+/* The spine: three pixels that name the state of the row without a word. */
+
+.nodes tbody tr[data-state] > :first-child {
+  box-shadow: inset 3px 0 0 var(--color-border-strong);
+}
+
+.nodes tbody tr[data-state="online"] > :first-child {
+  box-shadow: inset 3px 0 0 var(--color-online);
+}
+
+.nodes tbody tr[data-state="offline"] > :first-child {
+  box-shadow: inset 3px 0 0 var(--color-offline);
+}
+
+.nodes tbody tr[data-state="running"] > :first-child {
+  box-shadow: inset 3px 0 0 var(--color-online);
+}
+
+.nodes tbody tr[data-state="stopped"] > :first-child {
+  box-shadow: inset 3px 0 0 var(--color-border-strong);
+}
+
+.nodes tbody tr[data-state="failed"] > :first-child {
+  box-shadow: inset 3px 0 0 var(--color-danger);
+}
+
+/* The state of an object. The dot is the signal, the word names it. */
+
 .state {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  font-size: 0.85rem;
+  font-size: 0.8125rem;
   white-space: nowrap;
 }
 
 .state::before {
   content: "";
-  width: 0.5rem;
-  height: 0.5rem;
+  width: 0.4375rem;
+  height: 0.4375rem;
   border-radius: 50%;
-  background: currentColor;
+  background: currentcolor;
 }
 
 .state--online {
@@ -357,34 +563,27 @@ code {
   color: var(--color-offline);
 }
 
-/* The enrollment token. */
+/* The token and the command of the enrollment. */
+
 .token {
   display: grid;
   gap: var(--space-3);
   justify-items: start;
-  margin-top: var(--space-4);
 }
 
 .token__hint {
-  font-size: 0.9rem;
+  font-size: 0.8125rem;
 }
 
-.token__value code {
-  display: block;
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  background: var(--color-page);
-  font-size: 0.85rem;
-  overflow-wrap: anywhere;
-}
-
+.token__value code,
 .token__command code {
   display: block;
   padding: var(--space-2) var(--space-3);
-  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-border-strong);
+  border-radius: var(--radius);
   background: var(--color-page);
-  font-size: 0.85rem;
+  font-size: 0.78125rem;
   overflow-wrap: anywhere;
 }
 
@@ -393,7 +592,15 @@ code {
   gap: var(--space-1);
   padding-left: var(--space-5);
   color: var(--color-text-muted);
-  font-size: 0.9rem;
+  font-size: 0.8125rem;
+}
+
+.observations {
+  display: grid;
+  gap: var(--space-2);
+  padding-left: var(--space-5);
+  color: var(--color-text-muted);
+  font-size: 0.8125rem;
 }
 
 /* The text that only a screen reader reads. */
@@ -408,16 +615,64 @@ code {
   white-space: nowrap;
 }
 
-/* A narrow screen shows the table with a scroll, so the columns keep their
- * shape instead of squeezing the text into nothing. */
-@media (max-width: 30rem) {
+/* A tab panel arrives instead of appearing, so the page does not jump. */
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.panel {
+  animation: panel-in 140ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .panel {
+    animation: none;
+  }
+}
+
+/* A narrow screen keeps the columns readable instead of squeezing them. */
+@media (max-width: 40rem) {
   .page,
-  .shell {
-    padding-left: var(--space-3);
-    padding-right: var(--space-3);
+  .shell__main {
+    padding: var(--space-5) var(--space-4);
+  }
+
+  .shell__header {
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .shell__nav {
+    order: 3;
+    width: 100%;
+    margin-right: 0;
+    gap: var(--space-4);
+    overflow-x: auto;
   }
 
   .panel {
     padding: var(--space-4);
+  }
+
+  .nodes thead th,
+  .nodes tbody th,
+  .nodes tbody td {
+    padding: var(--space-2) var(--space-3);
   }
 }

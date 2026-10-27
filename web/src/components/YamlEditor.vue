@@ -95,7 +95,7 @@ defineExpose({
 <style scoped>
 .yaml-editor {
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   overflow: hidden;
   background: var(--color-surface);
 }

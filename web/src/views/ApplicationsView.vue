@@ -10,6 +10,15 @@ const router = useRouter()
 
 const applications = ref<AppSummary[]>([])
 const nodes = ref<NodeSummary[]>([])
+
+// hostnameOf names the target by the name the administrator knows.
+//
+// The identifier of a node is what the control端 stores, but a person
+// recognizes the host. The identifier stays in the title of the cell, so it
+// is one hover away when someone needs it.
+function hostnameOf(targetID: string): string {
+  return nodes.value.find((node) => node.id === targetID)?.hostname ?? targetID
+}
 const loading = ref(true)
 const error = ref('')
 
@@ -142,7 +151,7 @@ onMounted(load)
                 </th>
                 <td>{{ app.mode === 'swarm' ? 'Swarm' : 'Compose' }}</td>
                 <td class="nodes__host">{{ app.namespace }}</td>
-                <td class="nodes__host">{{ app.target_id }}</td>
+                <td :title="app.target_id">{{ hostnameOf(app.target_id) }}</td>
                 <td class="nodes__actions">
                   <RouterLink
                     class="button button--quiet"

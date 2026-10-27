@@ -44,6 +44,7 @@ async function submit() {
 
 <template>
   <main class="page page--narrow">
+    <p class="shell__brand">轻量部署平台</p>
     <h1 class="page__title">登录</h1>
     <p v-if="notice" class="notice">{{ notice }}</p>
     <form class="form" novalidate @submit.prevent="submit">

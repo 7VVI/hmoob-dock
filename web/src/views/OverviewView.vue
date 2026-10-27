@@ -279,7 +279,7 @@ watch(nodeID, () => {
       </p>
 
       <p v-if="!curveLoaded && !curveLoading && curveError === ''" class="empty">
-        填写容器 ID 之后可以看到它的资源曲线。
+        选好容器和指标后点「查看曲线」。
       </p>
 
       <MetricChart

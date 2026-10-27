@@ -21,7 +21,11 @@ defineProps<{ nodes: NodeSummary[] }>()
         </tr>
       </thead>
       <tbody>
-        <tr v-for="node in nodes" :key="node.id">
+        <tr
+          v-for="node in nodes"
+          :key="node.id"
+          :data-state="node.connected ? 'online' : 'offline'"
+        >
           <th scope="row" class="nodes__host">{{ node.hostname }}</th>
           <td>
             <span class="state" :class="node.connected ? 'state--online' : 'state--offline'">
