@@ -19,6 +19,7 @@ import (
 	"hmoob-dock/internal/auth"
 	"hmoob-dock/internal/config"
 	"hmoob-dock/internal/deploy"
+	"hmoob-dock/internal/protocol"
 	"hmoob-dock/internal/secret"
 	"hmoob-dock/internal/store"
 )
@@ -71,6 +72,8 @@ type Server struct {
 	dispatcher *deploy.Dispatcher
 	// events hands the changes of the deployments to the browser.
 	events *eventBroker
+	// logs owns the subscriptions of the logs of the containers.
+	logs *logSubscriptions
 	// ctx is the context of the server. The background work of the server
 	// stops when it is canceled.
 	ctx context.Context
@@ -170,7 +173,13 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 	server.registerApplicationRoutes()
 	server.registerDeploymentRoutes()
 	server.registerEventRoutes()
+	server.registerLogRoutes()
 	server.mux.HandleFunc("/", server.handleNotFound)
+
+	// The pieces of the logs of the agents reach the subscriptions of the
+	// browser through the event stream.
+	server.logs = newLogSubscriptions(server.hub, server.events)
+	server.hub.Subscribe(protocol.TypeLogsFrame, server.logs.handleFrame)
 
 	// The reports of the agents reach the dispatcher, and the dispatcher
 	// tells the browser about the changes of the deployments.

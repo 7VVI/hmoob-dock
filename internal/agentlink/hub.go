@@ -547,10 +547,12 @@ func (c *connection) outbound(messageType string) chan []byte {
 // state of a node instead of a command.
 func isMonitoringType(messageType string) bool {
 	switch messageType {
-	case protocol.TypeHeartbeat, protocol.TypeInventory, protocol.TypeDeployOutput:
-		// The fragments of the output of a task are logs. They wait behind
-		// the receipts of the tasks, so a flood of logs cannot hold back
-		// the answer of the control端.
+	case protocol.TypeHeartbeat, protocol.TypeInventory, protocol.TypeDeployOutput,
+		protocol.TypeMetricsSample, protocol.TypeLogsFrame:
+		// The fragments of the output of a task, the samples of the
+		// containers and the pieces of the logs wait behind the receipts of
+		// the tasks, so a flood of logs cannot hold back the answer of the
+		// control端.
 		return true
 	default:
 		return false
@@ -600,9 +602,11 @@ func (c *connection) accept(envelope protocol.Envelope) error {
 		return nil
 	case protocol.TypeInventory:
 		return c.acceptInventory(envelope)
-	case protocol.TypeDeployReceipt, protocol.TypeDeployQueryResult, protocol.TypeDeployOutput:
-		// The report of a task reaches the subscribers of the hub. The
-		// hub does not judge the report itself.
+	case protocol.TypeDeployReceipt, protocol.TypeDeployQueryResult, protocol.TypeDeployOutput,
+		protocol.TypeMetricsSample, protocol.TypeContainerEvent, protocol.TypeLogsFrame:
+		// The report of a task, the sample of a container, the event of a
+		// container and the piece of a log reach the subscribers of the
+		// hub. The hub does not judge them itself.
 		return nil
 	default:
 		return fmt.Errorf("agentlink: the message type %s is not accepted", envelope.Type)

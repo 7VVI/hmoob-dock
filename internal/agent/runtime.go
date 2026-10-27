@@ -704,14 +704,21 @@ func session(ctx context.Context, cfg config.Agent, client *http.Client, credent
 	// into the small default limit of the library.
 	conn.SetReadLimit(int64(protocol.MaxMessageSize))
 
+	// The work of the connection stops with the connection and not with
+	// the process: a stream of the logs of Docker and a round of the
+	// samples must not keep running after the control端 went away.
+	sessionCtx, cancelSession := context.WithCancel(ctx)
+	defer cancelSession()
+
 	done := make(chan struct{})
 	control := make(chan []byte, controlBuffer)
 	logs := make(chan []byte, logBuffer)
 	frames := &framer{}
+	out := &sessionSender{ctx: sessionCtx, frames: frames, control: control, logs: logs, done: done}
 
 	// The conversation starts with the hello of the agent. The hello is a
 	// control frame, so it is the first frame the control端 reads.
-	identity, err := engine.Identity(ctx)
+	identity, err := engine.Identity(sessionCtx)
 	if err != nil {
 		return true, err
 	}
@@ -719,7 +726,7 @@ func session(ctx context.Context, cfg config.Agent, client *http.Client, credent
 	if err != nil {
 		return true, err
 	}
-	if err := send(ctx, done, control, hello); err != nil {
+	if err := send(sessionCtx, done, control, hello); err != nil {
 		return true, err
 	}
 
@@ -727,26 +734,63 @@ func session(ctx context.Context, cfg config.Agent, client *http.Client, credent
 	workers.Add(1)
 	go func() {
 		defer workers.Done()
-		writeFrames(ctx, conn, control, logs, done)
+		writeFrames(sessionCtx, conn, control, logs, done)
 	}()
 	workers.Add(2)
 	go func() {
 		defer workers.Done()
-		reportHeartbeats(ctx, frames, logs, done)
+		reportHeartbeats(sessionCtx, frames, logs, done)
 	}()
 	go func() {
 		defer workers.Done()
-		reportInventory(ctx, frames, logs, done, engine)
+		reportInventory(sessionCtx, frames, logs, done, engine)
 	}()
 
-	out := &sessionSender{ctx: ctx, frames: frames, control: control, logs: logs, done: done}
-	err = readControl(ctx, conn, func(ctx context.Context, envelope protocol.Envelope) {
-		handler.handle(ctx, envelope, out)
+	// The telemetry runs only when the engine of the node provides it. A
+	// test engine or a node without the Docker engine reports no samples
+	// and no events.
+	if sampling, ok := engine.(sampler); ok {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			reportSamples(sessionCtx, engine, sampling, out)
+		}()
+	}
+	if events, ok := engine.(eventSource); ok {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			reportEvents(sessionCtx, events, out)
+		}()
+	}
+
+	// The logs of a container are read only on demand. The manager is the
+	// reference count of the reads of the connection.
+	var logManager *logManager
+	if source, ok := engine.(logSource); ok {
+		logManager = newLogManager(sessionCtx, source, out)
+	}
+
+	err = readControl(sessionCtx, conn, func(ctx context.Context, envelope protocol.Envelope) {
+		switch envelope.Type {
+		case protocol.TypeLogsSubscribe, protocol.TypeLogsUnsubscribe:
+			if logManager == nil {
+				log.Printf("agent: the control端 asks for logs, but the node does not provide them")
+				return
+			}
+			logManager.handle(envelope)
+		default:
+			handler.handle(ctx, envelope, out)
+		}
 	})
 
 	// The workers stop before the connection is closed, so no frame is
 	// written to a closed connection.
+	cancelSession()
 	close(done)
+	if logManager != nil {
+		logManager.Close()
+	}
 	workers.Wait()
 	return true, err
 }

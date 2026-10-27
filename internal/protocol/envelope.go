@@ -107,6 +107,11 @@ var registeredTypes = map[string]bool{
 	TypeDeployQuery:       true,
 	TypeDeployQueryResult: true,
 	TypeDeployResolve:     true,
+	TypeMetricsSample:     true,
+	TypeContainerEvent:    true,
+	TypeLogsSubscribe:     true,
+	TypeLogsUnsubscribe:   true,
+	TypeLogsFrame:         true,
 }
 
 // IsRegisteredType reports whether the control端 accepts the given message
@@ -127,6 +132,11 @@ func RegisteredTypes() []string {
 		TypeDeployQuery,
 		TypeDeployQueryResult,
 		TypeDeployResolve,
+		TypeMetricsSample,
+		TypeContainerEvent,
+		TypeLogsSubscribe,
+		TypeLogsUnsubscribe,
+		TypeLogsFrame,
 	}
 }
 
@@ -141,10 +151,15 @@ func PayloadLimit(messageType string) int {
 		return MaxCommandPayloadSize
 	case TypeInventory:
 		return MaxInventoryPayloadSize
-	case TypeDeployReceipt, TypeDeployQuery, TypeDeployQueryResult, TypeDeployResolve:
+	case TypeDeployReceipt, TypeDeployQuery, TypeDeployQueryResult, TypeDeployResolve,
+		TypeContainerEvent, TypeLogsSubscribe, TypeLogsUnsubscribe:
 		return MaxControlPayloadSize
 	case TypeDeployOutput:
 		return MaxOutputPayloadSize
+	case TypeLogsFrame:
+		// The text of a log frame is bounded by MaxLogFrameTextSize; the
+		// payload may be larger, because the JSON escapes the text.
+		return MaxLogPayloadSize
 	default:
 		return MaxPayloadSize
 	}
