@@ -18,6 +18,41 @@ import (
 	"hmoob-dock/internal/protocol"
 )
 
+// The reasons a stream of the logs ended without its text.
+const (
+	// logCodeNodeDisconnected reports a subscription that ended because the
+	// agent of its node did not come back within the grace period.
+	logCodeNodeDisconnected = "node_disconnected"
+	// logCodeNodeRevoked reports a subscription that ended because the
+	// administrator revoked the node.
+	logCodeNodeRevoked = "node_revoked"
+)
+
+// The delays of the subscriptions.
+//
+// A frame of the control端 is refused while the queue of the node is full.
+// The subscription keeps its state then and hands the frame over again, so
+// the read of the logs of the agent is not left behind. A subscription whose
+// node disappeared waits for the grace period before it ends with an error,
+// so a short reconnect does not force the page to start over.
+var (
+	logRetryInterval  = time.Second
+	logReconnectGrace = 30 * time.Second
+)
+
+// errNoEventStream reports a creation without an open event stream. The
+// pieces of a subscription only reach a page through the event stream, so a
+// subscription that nobody listens to would lose its tail.
+var errNoEventStream = errors.New("httpapi: the session has no event stream")
+
+// logSender hands the frames of the log subscriptions to the agents.
+type logSender interface {
+	// Send hands a frame to the agent of a node.
+	Send(ctx context.Context, nodeID string, message protocol.Envelope) error
+	// Connected reports whether a live connection of the node exists.
+	Connected(nodeID string) bool
+}
+
 // logSubscription is one subscription of the logs of a container of the
 // administrator. It belongs to the session that created it and ends with
 // the session and with the last event stream of the session.
@@ -29,7 +64,20 @@ type logSubscription struct {
 	tail        int
 	follow      bool
 	expiresAt   time.Time
-	timer       *time.Timer
+	// timer ends the subscription with the session.
+	timer *time.Timer
+	// graceTimer ends a subscription whose agent is gone.
+	graceTimer *time.Timer
+	// retryTimer hands a refused frame to the agent again.
+	retryTimer *time.Timer
+	// retryType is the type of the frame the retry sends.
+	retryType string
+	// ending reports that the subscription was ended and only waits for the
+	// agent to accept the unsubscribe.
+	ending bool
+	// suspended reports that the agent of the node disappeared and the
+	// subscription waits for its return or for the grace period.
+	suspended bool
 	// lastOffset is the position after the last piece of the text that was
 	// handed to the session. A frame that starts after it marks the gap of
 	// a piece that did not arrive.
@@ -45,8 +93,13 @@ type logSubscription struct {
 // that closes does not end the subscriptions of the pages that stay open.
 // The last stream ends them, and the expiry of the session ends them as
 // well.
+//
+// A subscription is not dropped before the agent accepted its end. A queue
+// of the node that is full refuses the frame, and the manager tries again
+// instead of leaving a read of Docker behind. When the agent reconnects, the
+// manager starts the subscriptions that are still alive again.
 type logSubscriptions struct {
-	hub    *agentlink.Hub
+	hub    logSender
 	events *eventBroker
 	now    func() time.Time
 
@@ -58,7 +111,7 @@ type logSubscriptions struct {
 }
 
 // newLogSubscriptions builds the manager of the log subscriptions.
-func newLogSubscriptions(hub *agentlink.Hub, events *eventBroker) *logSubscriptions {
+func newLogSubscriptions(hub logSender, events *eventBroker) *logSubscriptions {
 	return &logSubscriptions{
 		hub:     hub,
 		events:  events,
@@ -87,26 +140,18 @@ func (m *logSubscriptions) create(ctx context.Context, session auth.Session, nod
 	}
 
 	m.mu.Lock()
+	// The pieces of the subscription only reach the page through an event
+	// stream. Without one the agent would read a tail that nobody receives,
+	// so the creation is refused instead of losing the first frames.
+	if m.streams[session.ID] == 0 {
+		m.mu.Unlock()
+		return nil, errNoEventStream
+	}
 	m.subs[id] = subscription
 	m.mu.Unlock()
 
-	payload, err := json.Marshal(protocol.LogRequest{
-		SubscriptionID: id,
-		ContainerID:    containerID,
-		Tail:           tail,
-		Follow:         follow,
-	})
-	if err != nil {
-		m.delete("", id, false)
-		return nil, fmt.Errorf("httpapi: encode the log subscription: %w", err)
-	}
-	envelope := protocol.Envelope{
-		Version: protocol.WireVersion,
-		Type:    protocol.TypeLogsSubscribe,
-		Payload: payload,
-	}
-	if err := m.hub.Send(ctx, nodeID, envelope); err != nil {
-		m.delete("", id, false)
+	if err := m.send(ctx, subscription, protocol.TypeLogsSubscribe); err != nil {
+		m.forget(subscription)
 		return nil, err
 	}
 
@@ -127,6 +172,10 @@ func (m *logSubscriptions) create(ctx context.Context, session auth.Session, nod
 
 // delete ends a subscription. A subscription of another session is not
 // deleted, so a page cannot end the source of another page.
+//
+// The state stays until the agent accepted the end: a queue that is full
+// does not lose the unsubscribe, so the read of the logs does not outlive
+// the page.
 func (m *logSubscriptions) delete(sessionID, subscriptionID string, notify bool) (*logSubscription, bool) {
 	m.mu.Lock()
 	subscription, known := m.subs[subscriptionID]
@@ -134,23 +183,42 @@ func (m *logSubscriptions) delete(sessionID, subscriptionID string, notify bool)
 		m.mu.Unlock()
 		return nil, false
 	}
-	delete(m.subs, subscriptionID)
-	if subscription.timer != nil {
-		subscription.timer.Stop()
+	if !notify {
+		m.forgetLocked(subscription)
+		m.mu.Unlock()
+		return subscription, true
+	}
+	if !subscription.ending {
+		subscription.ending = true
+		m.stopTimer(&subscription.graceTimer)
+		m.stopTimer(&subscription.retryTimer)
 	}
 	m.mu.Unlock()
 
-	if notify {
-		m.unsubscribe(subscription)
-	}
+	m.end(subscription)
 	return subscription, true
 }
 
 // expire ends a subscription whose session ended.
 func (m *logSubscriptions) expire(subscriptionID string) {
-	if _, ok := m.delete("", subscriptionID, true); ok {
-		log.Printf("httpapi: the log subscription %s ended with the session", subscriptionID)
+	m.mu.Lock()
+	subscription, known := m.subs[subscriptionID]
+	if !known {
+		m.mu.Unlock()
+		return
 	}
+	ending := subscription.ending
+	if ending {
+		// The session is over and the subscription already waits for the
+		// agent; no page reads it any more, so the state is dropped.
+		m.forgetLocked(subscription)
+	}
+	m.mu.Unlock()
+
+	if !ending {
+		m.delete("", subscriptionID, true)
+	}
+	log.Printf("httpapi: the log subscription %s ended with the session", subscriptionID)
 }
 
 // attachStream registers an event stream of a session.
@@ -179,21 +247,143 @@ func (m *logSubscriptions) detachStream(session auth.Session) {
 	}
 	delete(m.streams, session.ID)
 	var ended []*logSubscription
-	for id, subscription := range m.subs {
+	for _, subscription := range m.subs {
 		if subscription.sessionID != session.ID {
 			continue
 		}
-		delete(m.subs, id)
-		if subscription.timer != nil {
-			subscription.timer.Stop()
+		if !subscription.ending {
+			subscription.ending = true
+			m.stopTimer(&subscription.graceTimer)
+			m.stopTimer(&subscription.retryTimer)
 		}
 		ended = append(ended, subscription)
 	}
 	m.mu.Unlock()
 
 	for _, subscription := range ended {
-		m.unsubscribe(subscription)
+		m.end(subscription)
 	}
+}
+
+// handleConnect replays the subscriptions of a node whose agent opened a
+// connection.
+//
+// Every connection of an agent owns its own reads of Docker, so the
+// subscriptions that survived the old connection have to be started again.
+// A subscription keeps its ID, so the frames of the new read stay with the
+// page that created it.
+func (m *logSubscriptions) handleConnect(nodeID string) {
+	if m == nil {
+		return
+	}
+
+	m.mu.Lock()
+	var active, ending []*logSubscription
+	for _, subscription := range m.subs {
+		if subscription.nodeID != nodeID {
+			continue
+		}
+		if subscription.ending {
+			ending = append(ending, subscription)
+			continue
+		}
+		subscription.suspended = false
+		m.stopTimer(&subscription.graceTimer)
+		subscription.graceTimer = nil
+		active = append(active, subscription)
+	}
+	m.mu.Unlock()
+
+	for _, subscription := range ending {
+		m.end(subscription)
+	}
+	for _, subscription := range active {
+		m.resume(subscription)
+	}
+}
+
+// handleDisconnect suspends the subscriptions of a node whose agent
+// disappeared.
+//
+// A subscription waits for the grace period. A node that comes back within
+// it keeps its subscriptions; a node that stays away ends them with an
+// error event, so a page never waits for pieces that cannot arrive.
+func (m *logSubscriptions) handleDisconnect(nodeID string) {
+	if m == nil {
+		return
+	}
+	// A newer connection that already replaced the lost one owns the
+	// subscriptions now; its connect callback replays them.
+	if m.hub != nil && m.hub.Connected(nodeID) {
+		return
+	}
+
+	m.mu.Lock()
+	// The connection may have been replaced while the callback waited for
+	// the lock. The check under the lock orders it with the connect
+	// callback, so a subscription is not suspended while its node is alive.
+	if m.hub != nil && m.hub.Connected(nodeID) {
+		m.mu.Unlock()
+		return
+	}
+	for _, subscription := range m.subs {
+		if subscription.nodeID != nodeID {
+			continue
+		}
+		if subscription.ending {
+			// The agent read ended with the connection. The state waits
+			// for the return of the node or for the end of the session.
+			m.stopTimer(&subscription.retryTimer)
+			subscription.retryTimer = nil
+			continue
+		}
+		if subscription.suspended {
+			continue
+		}
+		subscription.suspended = true
+		m.stopTimer(&subscription.retryTimer)
+		subscription.retryTimer = nil
+		subscription.graceTimer = time.AfterFunc(logReconnectGrace, func() { m.endSuspended(subscription) })
+	}
+	m.mu.Unlock()
+}
+
+// revokeNode ends every subscription of a revoked node with an error event.
+//
+// The credential of the node is not accepted any more, so the node cannot
+// come back and the reads of its containers are gone.
+func (m *logSubscriptions) revokeNode(nodeID string) {
+	if m == nil {
+		return
+	}
+
+	m.mu.Lock()
+	var ended []*logSubscription
+	for _, subscription := range m.subs {
+		if subscription.nodeID != nodeID {
+			continue
+		}
+		m.forgetLocked(subscription)
+		ended = append(ended, subscription)
+	}
+	m.mu.Unlock()
+
+	for _, subscription := range ended {
+		m.publishError(subscription, logCodeNodeRevoked)
+	}
+}
+
+// endSuspended ends a subscription whose agent did not return within the
+// grace period.
+func (m *logSubscriptions) endSuspended(subscription *logSubscription) {
+	m.mu.Lock()
+	if current, known := m.subs[subscription.id]; !known || current != subscription || !subscription.suspended {
+		m.mu.Unlock()
+		return
+	}
+	m.forgetLocked(subscription)
+	m.mu.Unlock()
+	m.publishError(subscription, logCodeNodeDisconnected)
 }
 
 // handleFrame hands a piece of the logs of an agent to the event stream of
@@ -206,7 +396,7 @@ func (m *logSubscriptions) handleFrame(ctx context.Context, nodeID string, envel
 
 	m.mu.Lock()
 	subscription, known := m.subs[frame.SubscriptionID]
-	if !known {
+	if !known || subscription.ending {
 		// The page deleted the subscription while the frame was on its
 		// way. That is not an error.
 		m.mu.Unlock()
@@ -216,10 +406,28 @@ func (m *logSubscriptions) handleFrame(ctx context.Context, nodeID string, envel
 		m.mu.Unlock()
 		return fmt.Errorf("httpapi: the node %s sent the logs of the subscription %s of another node", nodeID, frame.SubscriptionID)
 	}
+	if subscription.suspended {
+		// The agent of the frame belongs to a connection that is gone.
+		m.mu.Unlock()
+		return nil
+	}
+	if m.streams[subscription.sessionID] == 0 {
+		// No page listens to the subscription. The frame is not counted as
+		// delivered, so the positions of the next page still show the gap.
+		m.mu.Unlock()
+		return nil
+	}
 	expired := !subscription.expiresAt.IsZero() && m.now().After(subscription.expiresAt)
 	truncated := frame.Truncated
 	if frame.ErrorCode == "" && frame.Text != "" {
-		if subscription.offsetKnown && frame.Offset > subscription.lastOffset {
+		if !subscription.offsetKnown {
+			// The subscription starts in the middle of its stream, for
+			// example because it joined a shared read of the agent after
+			// the head of the tail left the buffer of the read.
+			if frame.Offset > 0 {
+				truncated = true
+			}
+		} else if frame.Offset > subscription.lastOffset {
 			// A piece between the last one and this one did not arrive,
 			// for example because a queue of the transport dropped it.
 			truncated = true
@@ -249,25 +457,173 @@ func (m *logSubscriptions) handleFrame(ctx context.Context, nodeID string, envel
 	return nil
 }
 
-// unsubscribe tells the agent that a subscription ended. A frame that does
-// not reach the agent leaves only a read that ends with the connection.
-func (m *logSubscriptions) unsubscribe(subscription *logSubscription) {
-	if subscription == nil || m.hub == nil {
+// resume starts a subscription again after the agent of its node opened a
+// new connection.
+func (m *logSubscriptions) resume(subscription *logSubscription) {
+	m.mu.Lock()
+	if current, known := m.subs[subscription.id]; !known || current != subscription || subscription.ending {
+		m.mu.Unlock()
 		return
 	}
-	payload, err := json.Marshal(protocol.LogRequest{SubscriptionID: subscription.id})
-	if err != nil {
-		log.Printf("httpapi: encode the end of the log subscription %s: %v", subscription.id, err)
+	gap := subscription.offsetKnown || subscription.lastOffset > 0
+	// The new read of the agent starts at its own tail, so the positions of
+	// the page start over as well.
+	subscription.lastOffset = 0
+	subscription.offsetKnown = false
+	sessionID := subscription.sessionID
+	m.mu.Unlock()
+
+	if err := m.send(context.Background(), subscription, protocol.TypeLogsSubscribe); err != nil {
+		if errors.Is(err, agentlink.ErrQueueFull) || errors.Is(err, agentlink.ErrNodeNotConnected) {
+			m.retryLater(subscription, protocol.TypeLogsSubscribe)
+			return
+		}
+		log.Printf("httpapi: restart the log subscription %s: %v", subscription.id, err)
+		m.fail(subscription, "logs_unavailable")
 		return
 	}
-	envelope := protocol.Envelope{
-		Version: protocol.WireVersion,
-		Type:    protocol.TypeLogsUnsubscribe,
-		Payload: payload,
+	if gap {
+		// The pieces between the old stream and the new tail are lost.
+		m.events.publish(Event{Type: EventLog, ObjectID: subscription.id, Truncated: true, sessionID: sessionID})
 	}
-	if err := m.hub.Send(context.Background(), subscription.nodeID, envelope); err != nil {
+}
+
+// end hands the end of a subscription to the agent.
+func (m *logSubscriptions) end(subscription *logSubscription) {
+	m.mu.Lock()
+	_, known := m.subs[subscription.id]
+	m.mu.Unlock()
+	if !known {
+		return
+	}
+
+	err := m.send(context.Background(), subscription, protocol.TypeLogsUnsubscribe)
+	switch {
+	case err == nil:
+		m.forget(subscription)
+	case errors.Is(err, agentlink.ErrQueueFull):
+		// The queue of the node was full. The read of the agent still
+		// exists, so the end is tried again instead of dropping the state.
+		m.retryLater(subscription, protocol.TypeLogsUnsubscribe)
+	case errors.Is(err, agentlink.ErrNodeNotConnected):
+		// The connection of the node ended and its reads ended with it.
+		// The state waits for the return of the node, so the end still
+		// reaches an agent that comes back within the session.
+	default:
 		log.Printf("httpapi: end the log subscription %s: %v", subscription.id, err)
+		m.forget(subscription)
 	}
+}
+
+// retryLater hands a refused frame to the agent again after the retry
+// interval.
+func (m *logSubscriptions) retryLater(subscription *logSubscription, messageType string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if current, known := m.subs[subscription.id]; !known || current != subscription {
+		return
+	}
+	subscription.retryType = messageType
+	if subscription.retryTimer != nil {
+		return
+	}
+	subscription.retryTimer = time.AfterFunc(logRetryInterval, func() { m.retry(subscription) })
+}
+
+// retry repeats the frame that the queue of the node refused.
+func (m *logSubscriptions) retry(subscription *logSubscription) {
+	m.mu.Lock()
+	if current, known := m.subs[subscription.id]; !known || current != subscription {
+		m.mu.Unlock()
+		return
+	}
+	subscription.retryTimer = nil
+	messageType := subscription.retryType
+	ending := subscription.ending
+	suspended := subscription.suspended
+	m.mu.Unlock()
+
+	switch {
+	case messageType == protocol.TypeLogsUnsubscribe:
+		if ending {
+			m.end(subscription)
+		}
+	case ending || suspended:
+		// The subscription waits for the return of the node; the connect
+		// callback starts it again.
+	default:
+		m.resume(subscription)
+	}
+}
+
+// fail ends a subscription with an error event.
+func (m *logSubscriptions) fail(subscription *logSubscription, code string) {
+	m.forget(subscription)
+	m.publishError(subscription, code)
+}
+
+// publishError tells the session of a subscription why its stream ended.
+func (m *logSubscriptions) publishError(subscription *logSubscription, code string) {
+	m.events.publish(Event{
+		Type:      EventLog,
+		ObjectID:  subscription.id,
+		ErrorCode: code,
+		sessionID: subscription.sessionID,
+	})
+}
+
+// forget drops the state of a subscription.
+func (m *logSubscriptions) forget(subscription *logSubscription) {
+	m.mu.Lock()
+	m.forgetLocked(subscription)
+	m.mu.Unlock()
+}
+
+// forgetLocked drops the state of a subscription. The caller holds the
+// lock.
+func (m *logSubscriptions) forgetLocked(subscription *logSubscription) {
+	if current, known := m.subs[subscription.id]; known && current == subscription {
+		delete(m.subs, subscription.id)
+	}
+	m.stopTimer(&subscription.timer)
+	m.stopTimer(&subscription.graceTimer)
+	m.stopTimer(&subscription.retryTimer)
+}
+
+// stopTimer stops a timer if one waits.
+func (m *logSubscriptions) stopTimer(timer **time.Timer) {
+	if *timer == nil {
+		return
+	}
+	(*timer).Stop()
+	*timer = nil
+}
+
+// send hands one frame of a subscription to the agent of its node.
+func (m *logSubscriptions) send(ctx context.Context, subscription *logSubscription, messageType string) error {
+	if subscription == nil || m.hub == nil {
+		return errors.New("httpapi: the hub of the agents is not available")
+	}
+	request := protocol.LogRequest{SubscriptionID: subscription.id}
+	switch messageType {
+	case protocol.TypeLogsSubscribe:
+		request.ContainerID = subscription.containerID
+		request.Tail = subscription.tail
+		request.Follow = subscription.follow
+	case protocol.TypeLogsUnsubscribe:
+	default:
+		return fmt.Errorf("httpapi: the log frame %q is not supported", messageType)
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return fmt.Errorf("httpapi: encode the %s: %w", messageType, err)
+	}
+	return m.hub.Send(ctx, subscription.nodeID, protocol.Envelope{
+		Version: protocol.WireVersion,
+		Type:    messageType,
+		Payload: payload,
+	})
 }
 
 // newLogSubscriptionID returns a random identifier of a subscription.
@@ -290,7 +646,8 @@ func (s *Server) registerLogRoutes() {
 // The browser names the node and the container; the control端 checks that
 // the node is enrolled and that the container belongs to the inventory of
 // the node. The browser never names an address of an agent, so it cannot
-// choose a target of its own.
+// choose a target of its own. The session needs an open event stream,
+// because the pieces of the subscription travel in it.
 func (s *Server) handleLogSubscriptions(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
 	if r.Method != http.MethodPost {
@@ -388,6 +745,8 @@ func (s *Server) handleLogSubscriptions(w http.ResponseWriter, r *http.Request) 
 	subscription, err := s.logs.create(r.Context(), session, nodeID, containerID, tail, follow)
 	if err != nil {
 		switch {
+		case errors.Is(err, errNoEventStream):
+			writeError(w, http.StatusConflict, "event_stream_required", "会话没有活跃的事件流，无法接收日志")
 		case errors.Is(err, agentlink.ErrNodeNotConnected), errors.Is(err, agentlink.ErrQueueFull):
 			writeError(w, http.StatusServiceUnavailable, "node_unavailable", "节点当前不可用")
 		default:

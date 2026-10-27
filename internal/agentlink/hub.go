@@ -129,6 +129,9 @@ type Hub struct {
 	subscribers map[string][]subscriber
 	// onConnect holds the callbacks that run when a node connects.
 	onConnect []func(string)
+	// onDisconnect holds the callbacks that run when the live connection of
+	// a node ends.
+	onDisconnect []func(string)
 }
 
 // NewHub builds the hub of the agent connections.
@@ -167,6 +170,21 @@ func (h *Hub) OnConnect(fn func(nodeID string)) {
 	h.onConnect = append(h.onConnect, fn)
 }
 
+// OnDisconnect registers a callback that runs when the live connection of a
+// node ends. A connection that is replaced by a newer one of the same node
+// does not run the callback, because the node did not disappear.
+//
+// The callback runs in the goroutine of the connection, so it has to be
+// quick: a slow callback delays the end of its own connection only.
+func (h *Hub) OnDisconnect(fn func(nodeID string)) {
+	if fn == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.onDisconnect = append(h.onDisconnect, fn)
+}
+
 // connected tells the callbacks that the agent of a node is connected.
 //
 // A node that comes back may have lost the reports of its tasks, so the
@@ -175,6 +193,19 @@ func (h *Hub) connected(nodeID string) {
 	h.mu.RLock()
 	callbacks := make([]func(string), len(h.onConnect))
 	copy(callbacks, h.onConnect)
+	h.mu.RUnlock()
+
+	for _, callback := range callbacks {
+		callback(nodeID)
+	}
+}
+
+// disconnected tells the callbacks that the live connection of a node
+// ended.
+func (h *Hub) disconnected(nodeID string) {
+	h.mu.RLock()
+	callbacks := make([]func(string), len(h.onDisconnect))
+	copy(callbacks, h.onDisconnect)
 	h.mu.RUnlock()
 
 	for _, callback := range callbacks {
@@ -344,7 +375,14 @@ func (h *Hub) Serve(ctx context.Context, nodeID string, conn *websocket.Conn) er
 	h.connected(nodeID)
 	defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
 	defer node.stop()
-	defer h.unregister(node)
+	defer func() {
+		// A connection that a newer connection replaced is not a lost
+		// node, so only the connection that was still live reports the
+		// end.
+		if h.unregister(node) {
+			h.disconnected(nodeID)
+		}
+	}()
 
 	go node.writeLoop(ctx)
 	go node.dispatchLoop(ctx)
@@ -431,14 +469,18 @@ func (h *Hub) register(node *connection) {
 	}
 }
 
-// unregister removes the connection from the hub when it ends.
-func (h *Hub) unregister(node *connection) {
+// unregister removes the connection from the hub when it ends. The second
+// return value reports whether the connection was still the live one of its
+// node.
+func (h *Hub) unregister(node *connection) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	if current, ok := h.connections[node.nodeID]; ok && current == node {
 		delete(h.connections, node.nodeID)
+		return true
 	}
+	return false
 }
 
 // notify hands a frame of an agent to the subscribers of its type.

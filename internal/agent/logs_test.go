@@ -183,6 +183,115 @@ func TestTwoSubscriptionsShareOneReadWithAReferenceCount(t *testing.T) {
 	}
 }
 
+// logFramesFor returns the log frames the sender handed to one
+// subscription.
+func logFramesFor(sender *gatedSender, subscriptionID string) []protocol.LogFrame {
+	var frames []protocol.LogFrame
+	for _, frame := range sender.frames(false) {
+		entry, ok := frame.payload.(protocol.LogFrame)
+		if !ok || entry.SubscriptionID != subscriptionID {
+			continue
+		}
+		frames = append(frames, entry)
+	}
+	return frames
+}
+
+// TestALateSubscriptionReceivesTheBufferedTail proves that a page that joins
+// a shared read after the tail of Docker arrived still receives that tail.
+// Docker only reads the tail when the stream is opened, so a shared read
+// replays its recent frames to the pages that join later.
+func TestALateSubscriptionReceivesTheBufferedTail(t *testing.T) {
+	source := &scriptedLogSource{}
+	source.run = func(ctx context.Context, _ protocol.LogRequest, emit func(protocol.LogFrame) error) error {
+		if err := emit(protocol.LogFrame{Text: "first line\n"}); err != nil {
+			return err
+		}
+		if err := emit(protocol.LogFrame{Text: "second line\n"}); err != nil {
+			return err
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	sender := &gatedSender{}
+	manager := newLogManager(context.Background(), source, sender)
+	defer manager.Close()
+
+	if err := manager.subscribe(protocol.LogRequest{SubscriptionID: "sub-1", ContainerID: "c1", Tail: 200, Follow: true}); err != nil {
+		t.Fatalf("subscribe sub-1: %v", err)
+	}
+	waitFor(t, "the first subscription to receive the tail", func() bool {
+		return len(logFramesFor(sender, "sub-1")) >= 2
+	})
+
+	if err := manager.subscribe(protocol.LogRequest{SubscriptionID: "sub-2", ContainerID: "c1", Tail: 200, Follow: true}); err != nil {
+		t.Fatalf("subscribe sub-2: %v", err)
+	}
+	waitFor(t, "the late subscription to receive the tail", func() bool {
+		frames := logFramesFor(sender, "sub-2")
+		return len(frames) >= 2 && frames[0].Text == "first line\n" && frames[1].Text == "second line\n"
+	})
+	for _, frame := range logFramesFor(sender, "sub-2") {
+		if frame.Truncated {
+			t.Fatalf("the complete tail of the late subscription is marked truncated: %+v", frame)
+		}
+	}
+}
+
+// TestALateSubscriptionIsTruncatedWhenTheTailDoesNotFit proves that the
+// replay of a shared read is bounded: when the tail of Docker does not fit
+// into the buffer of the read, the late page learns that its tail has a gap
+// instead of believing that the newest pieces are the whole tail.
+func TestALateSubscriptionIsTruncatedWhenTheTailDoesNotFit(t *testing.T) {
+	const frameSize = protocol.MaxLogFrameTextSize
+	const total = 12
+	emitted := make(chan struct{})
+	source := &scriptedLogSource{}
+	source.run = func(ctx context.Context, _ protocol.LogRequest, emit func(protocol.LogFrame) error) error {
+		for index := 0; index < total; index++ {
+			if err := emit(protocol.LogFrame{Text: strings.Repeat("x", frameSize)}); err != nil {
+				return err
+			}
+		}
+		close(emitted)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	sender := &gatedSender{}
+	manager := newLogManager(context.Background(), source, sender)
+	defer manager.Close()
+
+	if err := manager.subscribe(protocol.LogRequest{SubscriptionID: "sub-1", ContainerID: "c1", Tail: 200, Follow: true}); err != nil {
+		t.Fatalf("subscribe sub-1: %v", err)
+	}
+	select {
+	case <-emitted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the source did not emit its frames")
+	}
+	waitFor(t, "the first subscription to receive every frame", func() bool {
+		return len(logFramesFor(sender, "sub-1")) >= total
+	})
+
+	if err := manager.subscribe(protocol.LogRequest{SubscriptionID: "sub-2", ContainerID: "c1", Tail: 200, Follow: true}); err != nil {
+		t.Fatalf("subscribe sub-2: %v", err)
+	}
+	waitFor(t, "the late subscription to receive its truncated tail", func() bool {
+		return len(logFramesFor(sender, "sub-2")) > 0
+	})
+	frames := logFramesFor(sender, "sub-2")
+	if !frames[0].Truncated {
+		t.Fatalf("the first frame of the late tail = %+v, want the gap marked", frames[0])
+	}
+	bytes := 0
+	for _, frame := range frames {
+		bytes += len(frame.Text)
+	}
+	if limit := 256 * 1024; bytes > limit {
+		t.Fatalf("the late subscription received %d bytes of tail, want at most %d", bytes, limit)
+	}
+}
+
 // TestDifferentLogRequestsDoNotShareTheRead proves that a different tail or
 // follow belongs to a read of its own.
 func TestDifferentLogRequestsDoNotShareTheRead(t *testing.T) {

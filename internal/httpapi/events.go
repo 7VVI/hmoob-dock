@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +15,10 @@ const (
 	// eventBufferSize is the number of events that wait for a subscriber
 	// that reads slowly.
 	eventBufferSize = 64
+	// maxEventLogBytes is the largest text of the log events that wait for
+	// one subscriber. A log piece can be fetched again; the state of a
+	// deployment cannot, so the logs are dropped before the other events.
+	maxEventLogBytes = 256 * 1024
 	// eventKeepAlive is the time after which the control端 writes a comment
 	// into the stream, so a proxy in front of it does not close it.
 	eventKeepAlive = 30 * time.Second
@@ -61,38 +66,192 @@ type Event struct {
 }
 
 // eventSubscriber is the queue of one event stream of the browser.
+//
+// The queue belongs to one stream, so a slow page loses its own events and
+// never holds the events of the other pages. The queue drops an event of the
+// logs before it drops an event of a deployment: the logs can be fetched
+// again, the state of a deployment cannot.
 type eventSubscriber struct {
-	// events carries the events of the stream.
-	events chan Event
 	// sessionID is the session of the stream. A piece of the logs is only
 	// handed to the streams of the session that owns its subscription.
 	sessionID string
+
+	// mu guards the queue and the state of the stream.
+	mu sync.Mutex
+	// queue holds the events that wait for the stream.
+	queue []Event
+	// logBytes is the text of the log events that wait in the queue.
+	logBytes int
+	// closed reports that the stream was unregistered.
+	closed bool
+	// dropped reports that an event of the logs was lost and the next event
+	// of the logs tells the page about the gap.
+	dropped bool
+	// wake signals a waiting writer that the queue changed.
+	wake chan struct{}
+}
+
+// newEventSubscriber builds the queue of one stream.
+func newEventSubscriber(sessionID string) *eventSubscriber {
+	return &eventSubscriber{sessionID: sessionID, wake: make(chan struct{}, 1)}
+}
+
+// signal wakes the writer of the stream.
+func (s *eventSubscriber) signal() {
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+// enqueue adds an event to the queue.
+//
+// A full queue loses its oldest event of the logs, so the events of the
+// deployments arrive even while a flood of the logs runs. Only a queue
+// without any event of the logs loses another event. The text of the logs is
+// bounded, so the queue of one stream stays within the limit of the
+// protocol.
+func (s *eventSubscriber) enqueue(event Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return
+	}
+	if event.Type == EventLog && s.dropped {
+		// The pieces before this one were lost.
+		event.Truncated = true
+		s.dropped = false
+	}
+
+	if event.Type != EventLog {
+		if len(s.queue) >= eventBufferSize {
+			if s.dropOldestLogLocked() {
+				// The next event of the logs tells the page about the gap.
+				s.dropped = true
+			} else if len(s.queue) > 0 {
+				s.queue = s.queue[1:]
+			}
+		}
+		s.queue = append(s.queue, event)
+		s.signal()
+		return
+	}
+
+	if len(event.Text) > maxEventLogBytes {
+		s.dropped = true
+		return
+	}
+	trimmed := false
+	for s.logBytes+len(event.Text) > maxEventLogBytes {
+		if !s.dropOldestLogLocked() {
+			break
+		}
+		trimmed = true
+	}
+	if s.logBytes+len(event.Text) > maxEventLogBytes {
+		s.dropped = true
+		return
+	}
+	if len(s.queue) >= eventBufferSize {
+		if s.dropOldestLogLocked() {
+			trimmed = true
+		} else if len(s.queue) > 0 {
+			s.queue = s.queue[1:]
+		}
+	}
+	if len(s.queue) >= eventBufferSize {
+		s.dropped = true
+		return
+	}
+	if trimmed {
+		// The text before this piece left the queue.
+		event.Truncated = true
+	}
+	s.queue = append(s.queue, event)
+	s.logBytes += len(event.Text)
+	s.signal()
+}
+
+// dropOldestLogLocked drops the oldest event of the logs. The caller holds
+// the lock. A queue without an event of the logs keeps every event.
+func (s *eventSubscriber) dropOldestLogLocked() bool {
+	for index, event := range s.queue {
+		if event.Type != EventLog {
+			continue
+		}
+		s.logBytes -= len(event.Text)
+		s.queue = append(s.queue[:index], s.queue[index+1:]...)
+		return true
+	}
+	return false
+}
+
+// next hands the next event to the writer of the stream.
+//
+// The second return value reports whether an event arrived, the third
+// whether the stream is still open. A stream without an event within the
+// timeout is open and quiet; the writer sends a keep-alive comment then.
+func (s *eventSubscriber) next(ctx context.Context, timeout time.Duration) (Event, bool, bool) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	for {
+		s.mu.Lock()
+		if len(s.queue) > 0 {
+			event := s.queue[0]
+			s.queue = s.queue[1:]
+			if event.Type == EventLog {
+				s.logBytes -= len(event.Text)
+			}
+			s.mu.Unlock()
+			return event, true, true
+		}
+		if s.closed {
+			s.mu.Unlock()
+			return Event{}, false, false
+		}
+		s.mu.Unlock()
+
+		select {
+		case <-s.wake:
+		case <-timer.C:
+			return Event{}, false, true
+		case <-ctx.Done():
+			return Event{}, false, false
+		}
+	}
+}
+
+// close ends the stream. The queued events are dropped: nobody reads them.
+func (s *eventSubscriber) close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
+	s.queue = nil
+	s.logBytes = 0
+	s.signal()
 }
 
 // eventBroker hands the events of the control端 to the subscribers.
 //
 // The broker never blocks: a subscriber that does not read fast enough
-// loses its oldest event, so the newest state of an object always arrives.
-// A slow browser may not hold the deployments of the control端. When the
-// broker drops an event of the logs, the next piece carries the truncation,
-// so a gap of a stream is never shown as contiguous text.
+// loses its oldest event of the logs, so the newest state of an object
+// always arrives. A slow browser may not hold the deployments of the
+// control端. When the broker drops an event of the logs, the next piece
+// carries the truncation, so a gap of a stream is never shown as contiguous
+// text.
 type eventBroker struct {
 	mu sync.Mutex
 	// seq counts the events of the control端.
 	seq uint64
 	// subscribers holds the queues of the subscribers.
 	subscribers map[*eventSubscriber]bool
-	// dropped marks the subscribers whose queue lost an event since their
-	// last event of the logs.
-	dropped map[*eventSubscriber]bool
 }
 
 // newEventBroker builds the broker of the events.
 func newEventBroker() *eventBroker {
-	return &eventBroker{
-		subscribers: make(map[*eventSubscriber]bool),
-		dropped:     make(map[*eventSubscriber]bool),
-	}
+	return &eventBroker{subscribers: make(map[*eventSubscriber]bool)}
 }
 
 // publish hands an event to the subscribers.
@@ -107,40 +266,7 @@ func (b *eventBroker) publish(event Event) {
 			// The subscription of the piece belongs to another session.
 			continue
 		}
-		delivered := event
-		if b.dropped[subscriber] && event.Type == EventLog {
-			delivered.Truncated = true
-			b.dropped[subscriber] = false
-		}
-		select {
-		case subscriber.events <- delivered:
-			continue
-		default:
-		}
-
-		// The subscriber is too slow. Its oldest event is dropped, so the
-		// newest state of the object arrives anyway.
-		droppedLog := false
-		select {
-		case oldest := <-subscriber.events:
-			droppedLog = oldest.Type == EventLog
-		default:
-		}
-		if droppedLog {
-			if event.Type == EventLog {
-				// The gap belongs to the event of the logs that follows
-				// it.
-				delivered.Truncated = true
-				b.dropped[subscriber] = false
-			} else {
-				// The next event of the logs carries the gap.
-				b.dropped[subscriber] = true
-			}
-		}
-		select {
-		case subscriber.events <- delivered:
-		default:
-		}
+		subscriber.enqueue(event)
 	}
 }
 
@@ -148,23 +274,19 @@ func (b *eventBroker) publish(event Event) {
 //
 // The second return value unregisters it again: a browser that closes the
 // stream only removes its subscription.
-func (b *eventBroker) subscribe(sessionID string) (<-chan Event, func()) {
-	subscriber := &eventSubscriber{
-		events:    make(chan Event, eventBufferSize),
-		sessionID: sessionID,
-	}
+func (b *eventBroker) subscribe(sessionID string) (*eventSubscriber, func()) {
+	subscriber := newEventSubscriber(sessionID)
 
 	b.mu.Lock()
 	b.subscribers[subscriber] = true
 	b.mu.Unlock()
 
-	return subscriber.events, func() {
+	return subscriber, func() {
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		if b.subscribers[subscriber] {
 			delete(b.subscribers, subscriber)
-			delete(b.dropped, subscriber)
-			close(subscriber.events)
+			subscriber.close()
 		}
 	}
 }
@@ -216,30 +338,25 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	events, cancel := s.events.subscribe(session.ID)
+	subscriber, cancel := s.events.subscribe(session.ID)
 	defer cancel()
 
-	keepAlive := time.NewTicker(eventKeepAlive)
-	defer keepAlive.Stop()
-
 	for {
-		select {
-		case <-r.Context().Done():
+		event, got, open := subscriber.next(r.Context(), eventKeepAlive)
+		if !open {
 			return
-		case event, open := <-events:
-			if !open {
-				return
-			}
-			if err := writeEvent(w, event); err != nil {
-				return
-			}
-			flusher.Flush()
-		case <-keepAlive.C:
+		}
+		if !got {
 			if _, err := io.WriteString(w, ": keep-alive\n\n"); err != nil {
 				return
 			}
 			flusher.Flush()
+			continue
 		}
+		if err := writeEvent(w, event); err != nil {
+			return
+		}
+		flusher.Flush()
 	}
 }
 

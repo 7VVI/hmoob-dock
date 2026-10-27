@@ -180,6 +180,12 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 	// browser through the event stream.
 	server.logs = newLogSubscriptions(server.hub, server.events)
 	server.hub.Subscribe(protocol.TypeLogsFrame, server.logs.handleFrame)
+	// The reads of Docker belong to the connection of an agent. A node that
+	// comes back starts the subscriptions of its pages again, and a node
+	// that stays away ends them with an error event.
+	server.hub.OnConnect(server.logs.handleConnect)
+	server.hub.OnDisconnect(server.logs.handleDisconnect)
+	server.enrollment.OnRevoke(server.logs.revokeNode)
 
 	// The reports of the agents reach the dispatcher, and the dispatcher
 	// tells the browser about the changes of the deployments.

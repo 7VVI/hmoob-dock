@@ -14,6 +14,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	api "hmoob-dock/internal/httpapi"
 	"hmoob-dock/internal/protocol"
 )
 
@@ -120,9 +121,10 @@ func readSSEEvent(reader *bufio.Reader) (sseEvent, error) {
 // logTestControl is a control端 with an agent and one running container.
 type logTestControl struct {
 	*authServer
-	csrf   string
-	nodeID string
-	agent  *websocket.Conn
+	csrf       string
+	nodeID     string
+	credential string
+	agent      *websocket.Conn
 }
 
 // newLogTestControl starts a control端, enrolls a node and connects its
@@ -141,7 +143,7 @@ func newLogTestControl(t *testing.T) *logTestControl {
 		t.Fatalf("the enrollment answered %v, want a node and a credential", payload)
 	}
 
-	control := &logTestControl{authServer: server, csrf: csrf, nodeID: nodeID}
+	control := &logTestControl{authServer: server, csrf: csrf, nodeID: nodeID, credential: credential}
 	control.agent = dialTestAgent(t, server, credential)
 	sendTestAgentFrame(t, control.agent, protocol.TypeHello, protocol.Hello{Identity: nodeIdentity})
 	sendTestAgentFrame(t, control.agent, protocol.TypeInventory, protocol.InventoryBatch{
@@ -532,6 +534,35 @@ func TestAGapBetweenTheOffsetsIsMarkedTruncated(t *testing.T) {
 	}
 }
 
+// TestASubscriptionThatStartsAtANonZeroOffsetIsTruncated proves that the
+// first frame of a subscription that does not start at the beginning of its
+// stream is marked as a gap. A subscription that joins a shared read of the
+// agent may start in the middle of the tail of the container.
+func TestASubscriptionThatStartsAtANonZeroOffsetIsTruncated(t *testing.T) {
+	control := newLogTestControl(t)
+	stream := openEventStream(t, control.authServer)
+
+	payload, status := control.createLogSubscription(t, subscriptionRequest(control.nodeID, "c1", 20))
+	if status != http.StatusCreated {
+		t.Fatalf("the creation returned %d: %v", status, payload)
+	}
+	id, _ := payload["id"].(string)
+	readTestAgentFrame(t, control.agent)
+
+	sendTestAgentFrame(t, control.agent, protocol.TypeLogsFrame, protocol.LogFrame{
+		SubscriptionID: id,
+		Offset:         120,
+		Text:           "the tail that survived\n",
+	})
+	event := stream.next(t)
+	if !event.Truncated {
+		t.Fatalf("the first piece = %+v, want the missing head marked", event)
+	}
+	if event.Offset != 120 || event.Text != "the tail that survived\n" {
+		t.Fatalf("the event = %+v, want the first piece of the subscription", event)
+	}
+}
+
 // TestARevokedNodeCannotBeALogTarget proves that a revoked node is not a
 // target of a new subscription.
 func TestARevokedNodeCannotBeALogTarget(t *testing.T) {
@@ -557,6 +588,8 @@ func TestARevokedNodeCannotBeALogTarget(t *testing.T) {
 // cannot name an arbitrary target and that the limits of the tail hold.
 func TestLogSubscriptionsValidateTheTargetAndTheTail(t *testing.T) {
 	control := newLogTestControl(t)
+	// A subscription needs an event stream that carries its pieces.
+	openEventStream(t, control.authServer)
 
 	cases := []struct {
 		name   string
@@ -680,6 +713,7 @@ func TestALogSubscriptionNeedsAConnectedNode(t *testing.T) {
 // delete the subscription of the administrator.
 func TestALogSubscriptionBelongsToItsSession(t *testing.T) {
 	control := newLogTestControl(t)
+	openEventStream(t, control.authServer)
 	payload, status := control.createLogSubscription(t, subscriptionRequest(control.nodeID, "c1", 200))
 	if status != http.StatusCreated {
 		t.Fatalf("the creation returned %d: %v", status, payload)
@@ -748,6 +782,183 @@ func TestClosingTheEventStreamStopsTheSessionSubscriptions(t *testing.T) {
 	}
 	if request.SubscriptionID != id {
 		t.Fatalf("the unsubscribe names %q, want %q", request.SubscriptionID, id)
+	}
+}
+
+// waitForFrameType waits for the next frame of the given type and ignores
+// the other frames of the control端.
+func (r *agentFrameReader) waitForFrameType(t *testing.T, messageType string) protocol.Envelope {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			t.Fatalf("timeout while waiting for a %s frame", messageType)
+		}
+		select {
+		case envelope := <-r.frames:
+			if envelope.Type == messageType {
+				return envelope
+			}
+		case err := <-r.errors:
+			t.Fatalf("read the frame of the control端: %v", err)
+		case <-time.After(remaining):
+			t.Fatalf("timeout while waiting for a %s frame", messageType)
+		}
+	}
+}
+
+// TestACreationNeedsAnOpenEventStream proves that a subscription cannot be
+// created without an event stream: a browser that creates one before it
+// opens the stream would lose the first pieces of the tail.
+func TestACreationNeedsAnOpenEventStream(t *testing.T) {
+	control := newLogTestControl(t)
+	frames := startAgentFrameReader(t, control.agent)
+
+	payload, status := control.createLogSubscription(t, subscriptionRequest(control.nodeID, "c1", 50))
+	if status != http.StatusConflict {
+		t.Fatalf("the creation without a stream returned %d, want %d: %v", status, http.StatusConflict, payload)
+	}
+	if payload["code"] != "event_stream_required" {
+		t.Fatalf("the code = %v, want event_stream_required", payload["code"])
+	}
+	if !frames.absent(t, 300*time.Millisecond) {
+		t.Fatal("the control端 asked for the logs without an event stream")
+	}
+
+	openEventStream(t, control.authServer)
+	payload, status = control.createLogSubscription(t, subscriptionRequest(control.nodeID, "c1", 50))
+	if status != http.StatusCreated {
+		t.Fatalf("the creation with a stream returned %d: %v", status, payload)
+	}
+	if frame := frames.next(t); frame.Type != protocol.TypeLogsSubscribe {
+		t.Fatalf("the frame = %q, want %q", frame.Type, protocol.TypeLogsSubscribe)
+	}
+}
+
+// TestTheSubscriptionsAreResentWhenTheAgentReconnects proves that a page
+// keeps its stream when the agent reconnects: the control端 starts the
+// subscription of the new connection again with the same ID, and the pieces
+// of the new read reach the page.
+func TestTheSubscriptionsAreResentWhenTheAgentReconnects(t *testing.T) {
+	t.Cleanup(api.SetLogReconnectGraceForTest(10 * time.Second))
+
+	control := newLogTestControl(t)
+	stream := openEventStream(t, control.authServer)
+
+	payload, status := control.createLogSubscription(t, subscriptionRequest(control.nodeID, "c1", 50))
+	if status != http.StatusCreated {
+		t.Fatalf("the creation returned %d: %v", status, payload)
+	}
+	id, _ := payload["id"].(string)
+	readTestAgentFrame(t, control.agent)
+
+	sendTestAgentFrame(t, control.agent, protocol.TypeLogsFrame, protocol.LogFrame{
+		SubscriptionID: id,
+		Text:           "before the reconnect\n",
+	})
+	if event := stream.next(t); event.Text != "before the reconnect\n" {
+		t.Fatalf("the event = %+v, want the line before the reconnect", event)
+	}
+
+	// The agent loses its connection and opens a new one.
+	control.agent.CloseNow()
+	replacement := dialTestAgent(t, control.authServer, control.credential)
+	sendTestAgentFrame(t, replacement, protocol.TypeHello, protocol.Hello{Identity: nodeIdentity})
+	sendTestAgentFrame(t, replacement, protocol.TypeInventory, protocol.InventoryBatch{
+		SnapshotID:  "snapshot-2",
+		BatchIndex:  0,
+		BatchCount:  1,
+		Complete:    true,
+		Identity:    nodeIdentity,
+		Containers:  []protocol.Container{{ID: "c1", Name: "web", Image: "nginx", State: "running"}},
+		CollectedAt: time.Now().UTC(),
+	})
+
+	frames := startAgentFrameReader(t, replacement)
+	resend := frames.waitForFrameType(t, protocol.TypeLogsSubscribe)
+	var request protocol.LogRequest
+	if err := json.Unmarshal(resend.Payload, &request); err != nil {
+		t.Fatalf("decode the resent log request: %v", err)
+	}
+	if request.SubscriptionID != id || request.ContainerID != "c1" || request.Tail != 50 || !request.Follow {
+		t.Fatalf("the resent request = %+v, want the subscription of the page", request)
+	}
+
+	sendTestAgentFrame(t, replacement, protocol.TypeLogsFrame, protocol.LogFrame{
+		SubscriptionID: id,
+		Text:           "after the reconnect\n",
+	})
+	marker := false
+	line := false
+	for !marker || !line {
+		event := stream.next(t)
+		if event.ObjectID != id {
+			continue
+		}
+		switch {
+		case event.Truncated && event.Text == "":
+			marker = true
+		case event.Text == "after the reconnect\n":
+			line = true
+		}
+	}
+}
+
+// TestALostAgentEndsItsSubscriptionsWithAnError proves that a subscription
+// does not wait for pieces that cannot arrive: a node that stays away ends
+// its subscriptions with an error event after the grace period.
+func TestALostAgentEndsItsSubscriptionsWithAnError(t *testing.T) {
+	t.Cleanup(api.SetLogReconnectGraceForTest(100 * time.Millisecond))
+
+	control := newLogTestControl(t)
+	stream := openEventStream(t, control.authServer)
+
+	payload, status := control.createLogSubscription(t, subscriptionRequest(control.nodeID, "c1", 50))
+	if status != http.StatusCreated {
+		t.Fatalf("the creation returned %d: %v", status, payload)
+	}
+	id, _ := payload["id"].(string)
+	readTestAgentFrame(t, control.agent)
+
+	control.agent.CloseNow()
+
+	event := stream.next(t)
+	if event.Type != "log" || event.ObjectID != id || event.ErrorCode != "node_disconnected" {
+		t.Fatalf("the event = %+v, want the end of the subscription of the lost node", event)
+	}
+
+	// The state of the ended subscription is gone.
+	response := control.deleteLogSubscription(t, id)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("the deletion after the end returned %d, want %d", response.StatusCode, http.StatusNotFound)
+	}
+}
+
+// TestARevokedNodeEndsItsLogSubscriptions proves that revoking a node ends
+// the subscriptions of its pages with an explicit error event.
+func TestARevokedNodeEndsItsLogSubscriptions(t *testing.T) {
+	control := newLogTestControl(t)
+	stream := openEventStream(t, control.authServer)
+
+	payload, status := control.createLogSubscription(t, subscriptionRequest(control.nodeID, "c1", 50))
+	if status != http.StatusCreated {
+		t.Fatalf("the creation returned %d: %v", status, payload)
+	}
+	id, _ := payload["id"].(string)
+	readTestAgentFrame(t, control.agent)
+
+	response := control.post("/api/v1/nodes/"+control.nodeID+"/revoke", nil,
+		withHeader("X-CSRF-Token", control.csrf))
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("the revocation returned %d, want %d", response.StatusCode, http.StatusNoContent)
+	}
+
+	event := stream.next(t)
+	if event.Type != "log" || event.ObjectID != id || event.ErrorCode != "node_revoked" {
+		t.Fatalf("the event = %+v, want the end of the subscription of the revoked node", event)
 	}
 }
 

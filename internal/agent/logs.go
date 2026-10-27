@@ -23,6 +23,11 @@ const (
 	// maxLogQueueFrames bounds the number of the frames of a queue that
 	// carries very small pieces.
 	maxLogQueueFrames = 1024
+	// maxLogHistoryBytes is the largest recent tail a shared read keeps for
+	// the pages that join later. Docker reads the tail only when the stream
+	// is opened, so a subscription that joins an open read is served from
+	// this buffer instead of from the engine.
+	maxLogHistoryBytes = 256 * 1024
 )
 
 // The reasons a stream of the logs ended without its text.
@@ -55,6 +60,33 @@ type logReader struct {
 	cancel context.CancelFunc
 	// subscribers are the subscriptions that read this stream.
 	subscribers map[string]*logSubscriber
+	// history holds the recent frames of the read, so a subscription that
+	// joins after the tail arrived still receives it. The buffer is
+	// bounded; frames that do not fit are dropped and the replay of the
+	// remaining history is marked as truncated.
+	history []protocol.LogFrame
+	// historyBytes is the text of the frames that wait in the history.
+	historyBytes int
+	// historyDropped reports that the oldest frames of the read left the
+	// history, so a replay no longer starts at the beginning of the tail.
+	historyDropped bool
+}
+
+// remember adds one frame to the recent tail of the read. The oldest frames
+// leave the buffer when it is full; the read keeps the memory of the history
+// bounded.
+func (r *logReader) remember(frame protocol.LogFrame) {
+	r.history = append(r.history, frame)
+	r.historyBytes += len(frame.Text)
+	for r.historyBytes > maxLogHistoryBytes && len(r.history) > 1 {
+		r.historyBytes -= len(r.history[0].Text)
+		// The dropped frame may hold a large text; clearing it lets the
+		// garbage collector release the string before the buffer grows
+		// again.
+		r.history[0] = protocol.LogFrame{}
+		r.history = r.history[1:]
+		r.historyDropped = true
+	}
 }
 
 // logManager owns the subscriptions of the logs of one connection.
@@ -144,6 +176,19 @@ func (m *logManager) subscribe(req protocol.LogRequest) error {
 	subscriber := newLogSubscriber(m, id, key)
 	reader.subscribers[id] = subscriber
 	m.subs[id] = subscriber
+
+	// The page that joins an open read starts with the recent tail of the
+	// read: Docker read the tail when the read was opened, so the engine
+	// does not hand it out a second time. A history that lost its oldest
+	// frames tells the page that the replayed tail has a gap.
+	if reader.historyDropped {
+		subscriber.noteDrop()
+	}
+	for _, frame := range reader.history {
+		frame.SubscriptionID = id
+		subscriber.enqueue(frame)
+	}
+
 	m.wg.Add(1)
 	go subscriber.run()
 	return nil
@@ -197,20 +242,19 @@ func (m *logManager) read(reader *logReader) {
 	m.finish(reader, err)
 }
 
-// broadcast hands one frame of the shared read to every subscription.
+// broadcast hands one frame of the shared read to every subscription and
+// remembers it for the pages that join later. The lock spans the hand over,
+// so a subscription that joins sees every frame either in the history or as
+// a waiting frame of its own, never twice.
 func (m *logManager) broadcast(reader *logReader, frame protocol.LogFrame) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if m.closed || m.readers[reader.key] != reader {
-		m.mu.Unlock()
 		return
 	}
-	subscribers := make([]*logSubscriber, 0, len(reader.subscribers))
+	reader.remember(frame)
 	for _, subscriber := range reader.subscribers {
-		subscribers = append(subscribers, subscriber)
-	}
-	m.mu.Unlock()
-
-	for _, subscriber := range subscribers {
 		frame.SubscriptionID = subscriber.id
 		subscriber.enqueue(frame)
 	}
