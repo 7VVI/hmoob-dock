@@ -130,10 +130,10 @@ func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not_found", "未找到请求的资源")
 			return
 		}
-		staticServeFile(w, r, index, indexInfo)
+		staticServeFile(w, r, index, indexInfo, staticCacheControl(name))
 		return
 	case err == nil:
-		staticServeFile(w, r, target, info)
+		staticServeFile(w, r, target, info, staticCacheControl(name))
 		return
 	case !errors.Is(err, fs.ErrNotExist):
 		// The file could not be read, e.g. because the permissions of the
@@ -155,7 +155,7 @@ func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "未找到请求的资源")
 		return
 	}
-	staticServeFile(w, r, index, indexInfo)
+	staticServeFile(w, r, index, indexInfo, staticCacheControl(name))
 }
 
 // staticName turns the path of a request into the name of a file of the
@@ -208,8 +208,24 @@ func staticWithinRoot(root, target string) bool {
 	return relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator))
 }
 
+// staticAssetsPrefix marks the directory of the hashed assets of the build.
+const staticAssetsPrefix = "assets/"
+
+// staticCacheControl returns the caching rule of a file of the build.
+//
+// The index names the hashed assets, so the browser has to revalidate it;
+// otherwise a new build keeps answering with the interface of the old one.
+// The assets are named with a content hash and never change under the same
+// name, so they are cached for good.
+func staticCacheControl(name string) string {
+	if strings.HasPrefix(name, staticAssetsPrefix) {
+		return "public, max-age=31536000, immutable"
+	}
+	return "no-cache"
+}
+
 // staticServeFile writes the file to the answer.
-func staticServeFile(w http.ResponseWriter, r *http.Request, name string, info os.FileInfo) {
+func staticServeFile(w http.ResponseWriter, r *http.Request, name string, info os.FileInfo, cacheControl string) {
 	file, err := os.Open(name)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "读取静态资源失败")
@@ -217,5 +233,6 @@ func staticServeFile(w http.ResponseWriter, r *http.Request, name string, info o
 	}
 	defer func() { _ = file.Close() }()
 
+	w.Header().Set("Cache-Control", cacheControl)
 	http.ServeContent(w, r, info.Name(), info.ModTime(), file)
 }

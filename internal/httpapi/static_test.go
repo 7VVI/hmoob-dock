@@ -112,6 +112,43 @@ func TestStaticAssetIsAnsweredWithTheFile(t *testing.T) {
 	}
 }
 
+// TestIndexIsNotCachedWithoutRevalidation proves that the index of the build
+// is always revalidated. The index names the hashed assets of the build, so a
+// cached index keeps serving an older interface after a new build is
+// deployed.
+func TestStaticIndexIsNotCachedWithoutRevalidation(t *testing.T) {
+	handler := httpapi.StaticHandler(writeBuild(t))
+
+	for _, path := range []string{"/", "/settings", "/index.html"} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("the path %s returned %d, want %d", path, recorder.Code, http.StatusOK)
+		}
+		if cacheControl := recorder.Header().Get("Cache-Control"); cacheControl != "no-cache" {
+			t.Fatalf("the path %s returned cache control %q, want no-cache", path, cacheControl)
+		}
+	}
+}
+
+// TestHashedAssetsAreCachedImmutably proves that the assets of the build are
+// cached for good. The build names them with a content hash, so a new build
+// never reuses a name and the browser may keep the file.
+func TestStaticHashedAssetsAreCachedImmutably(t *testing.T) {
+	handler := httpapi.StaticHandler(writeBuild(t))
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/assets/app.js", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if cacheControl := recorder.Header().Get("Cache-Control"); cacheControl != "public, max-age=31536000, immutable" {
+		t.Fatalf("cache control = %q, want a long immutable cache", cacheControl)
+	}
+}
+
 // TestMissingAssetIsNotAnsweredWithTheIndex proves that a file that the
 // build does not hold is a 404. The index would answer with an empty page
 // and the browser would report a broken script instead of a missing file.
