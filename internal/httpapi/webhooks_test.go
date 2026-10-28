@@ -80,7 +80,9 @@ func TestTheWebhookSavesTheTargetAndHidesTheSecret(t *testing.T) {
 		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
 	}
 	body := readBody(t, response)
-	if strings.Contains(body, "T00") || strings.Contains(body, "secret") {
+	// The token of the address names the secret; the timestamp of the answer
+	// holds its own "T00", so only the whole token is a leak.
+	if strings.Contains(body, "T00/B00") || strings.Contains(body, "B00/secret") {
 		t.Fatalf("the answer carries the secret of the address: %s", body)
 	}
 	if !strings.Contains(body, "https://hooks.example.com/***") {
@@ -104,7 +106,7 @@ func TestTheWebhookSavesTheTargetAndHidesTheSecret(t *testing.T) {
 		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
 	}
 	body = readBody(t, response)
-	if strings.Contains(body, "T00") || strings.Contains(body, "/services/") {
+	if strings.Contains(body, "T00/B00") || strings.Contains(body, "/services/") {
 		t.Fatalf("the list carries the secret of the address: %s", body)
 	}
 	if !strings.Contains(body, "https://hooks.example.com/***") {
