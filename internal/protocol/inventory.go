@@ -40,6 +40,37 @@ type NodeIdentity struct {
 	Architecture string `json:"architecture,omitempty"`
 }
 
+// PortMapping is one port of a container or of a service.
+//
+// A port that the node publishes has a public port; a port that is only
+// exposed inside its network keeps the public port empty.
+type PortMapping struct {
+	// PrivatePort is the port inside the container or the service.
+	PrivatePort uint16 `json:"private_port"`
+	// PublicPort is the published port, zero when the port is not
+	// published.
+	PublicPort uint16 `json:"public_port,omitempty"`
+	// Type is the protocol of the port, for example tcp or udp.
+	Type string `json:"type,omitempty"`
+	// IP is the address the port is published on, when the node names one.
+	IP string `json:"ip,omitempty"`
+}
+
+// Mount is a mount of a container.
+type Mount struct {
+	// Type is the type of the mount, for example volume, bind or tmpfs.
+	Type string `json:"type,omitempty"`
+	// Source is the source of the mount on the node or the name of the
+	// volume.
+	Source string `json:"source,omitempty"`
+	// Destination is the path inside the container.
+	Destination string `json:"destination,omitempty"`
+	// Mode is the mode of the mount, for example rw.
+	Mode string `json:"mode,omitempty"`
+	// ReadWrite reports whether the mount is writable.
+	ReadWrite bool `json:"read_write,omitempty"`
+}
+
 // Container is a container of an inventory.
 type Container struct {
 	// ID is the ID of the container.
@@ -63,6 +94,16 @@ type Container struct {
 	ExitCode *int `json:"exit_code,omitempty"`
 	// RestartCount is the number of times the container was restarted.
 	RestartCount int `json:"restart_count,omitempty"`
+	// Created is the time Docker created the container.
+	Created string `json:"created,omitempty"`
+	// StartedAt is the time the container last started.
+	StartedAt string `json:"started_at,omitempty"`
+	// IP is the address of the container in its first network.
+	IP string `json:"ip,omitempty"`
+	// Ports are the ports of the container.
+	Ports []PortMapping `json:"ports,omitempty"`
+	// Mounts are the mounts of the container.
+	Mounts []Mount `json:"mounts,omitempty"`
 }
 
 // SwarmNode is a node of a Swarm cluster.
@@ -106,6 +147,32 @@ type SwarmService struct {
 	Running int `json:"running"`
 	// Labels are the labels of the service.
 	Labels map[string]string `json:"labels,omitempty"`
+	// Image is the image the tasks of the service run.
+	Image string `json:"image,omitempty"`
+	// Ports are the ports the service publishes.
+	Ports []PortMapping `json:"ports,omitempty"`
+	// UpdatedAt is the time the service was updated last.
+	UpdatedAt string `json:"updated_at,omitempty"`
+}
+
+// Network is a network of the Docker engine of a node.
+type Network struct {
+	// ID is the ID of the network.
+	ID string `json:"id"`
+	// Name is the name of the network.
+	Name string `json:"name"`
+	// Driver is the driver of the network, for example bridge or overlay.
+	Driver string `json:"driver,omitempty"`
+	// Scope is the scope of the network, for example local or swarm.
+	Scope string `json:"scope,omitempty"`
+	// Internal reports whether the network is internal.
+	Internal bool `json:"internal,omitempty"`
+	// Attachable reports whether a container may attach to the network.
+	Attachable bool `json:"attachable,omitempty"`
+	// Created is the time the network was created.
+	Created string `json:"created,omitempty"`
+	// Containers is the number of the containers attached to the network.
+	Containers int `json:"containers"`
 }
 
 // SwarmTask is a task of a Swarm service.
@@ -143,6 +210,8 @@ type Inventory struct {
 	SwarmServices []SwarmService `json:"swarm_services,omitempty"`
 	// SwarmTasks are the tasks of the Swarm cluster the node belongs to.
 	SwarmTasks []SwarmTask `json:"swarm_tasks,omitempty"`
+	// Networks are the networks of the Docker engine of the node.
+	Networks []Network `json:"networks,omitempty"`
 	// CollectedAt is the time the inventory was collected.
 	CollectedAt time.Time `json:"collected_at"`
 }
@@ -182,6 +251,18 @@ type InventoryBatch struct {
 	Identity NodeIdentity `json:"identity"`
 	// Containers are the containers of the batch.
 	Containers []Container `json:"containers"`
+	// SwarmNodes are the nodes of the Swarm cluster. They travel in the
+	// first batch of the snapshot, so the other batches stay small.
+	SwarmNodes []SwarmNode `json:"swarm_nodes,omitempty"`
+	// SwarmServices are the services of the Swarm cluster. They travel in
+	// the first batch of the snapshot.
+	SwarmServices []SwarmService `json:"swarm_services,omitempty"`
+	// SwarmTasks are the tasks of the Swarm cluster. They travel in the
+	// first batch of the snapshot.
+	SwarmTasks []SwarmTask `json:"swarm_tasks,omitempty"`
+	// Networks are the networks of the engine. They travel in the first
+	// batch of the snapshot.
+	Networks []Network `json:"networks,omitempty"`
 	// CollectedAt is the time the snapshot was collected.
 	CollectedAt time.Time `json:"collected_at"`
 }

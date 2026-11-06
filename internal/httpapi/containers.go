@@ -22,8 +22,8 @@ import (
 //
 // The page needs the identifier of a container to read its metrics and its
 // logs, so the identifier travels with the name the administrator
-// recognizes. Nothing else of the container leaves the node: the labels and
-// the configuration stay there.
+// recognizes. The facts of the engine (the state, the address, the ports)
+// are the ones the node reported with its last inventory.
 type containerSummary struct {
 	// ID is the identifier Docker gave the container.
 	ID string `json:"id"`
@@ -42,6 +42,58 @@ type containerSummary struct {
 	// belongs to. It is empty for a container that no application of the
 	// platform manages.
 	Namespace string `json:"namespace"`
+	// Created is the time Docker created the container.
+	Created string `json:"created"`
+	// StartedAt is the time the container last started.
+	StartedAt string `json:"started_at"`
+	// IP is the address of the container in its first network.
+	IP string `json:"ip"`
+	// Ports are the ports of the container.
+	Ports []protocol.PortMapping `json:"ports"`
+	// RestartCount is the number of times the container was restarted.
+	RestartCount int `json:"restart_count"`
+	// ExitCode is the exit code of a container that ended.
+	ExitCode *int `json:"exit_code"`
+}
+
+// containerDetail is a container with the facts of its details.
+type containerDetail struct {
+	containerSummary
+	// Mounts are the mounts of the container.
+	Mounts []protocol.Mount `json:"mounts"`
+	// Labels are the labels of the container.
+	Labels map[string]string `json:"labels"`
+}
+
+// serviceSummary is one service of a node in the API.
+//
+// A service of a Swarm cluster carries its tasks; a service derived from
+// the containers of a Compose project carries its containers.
+type serviceSummary struct {
+	ID          string                 `json:"id"`
+	Name        string                 `json:"name"`
+	Stack       string                 `json:"stack"`
+	Image       string                 `json:"image"`
+	Mode        string                 `json:"mode"`
+	Desired     int                    `json:"desired"`
+	Running     int                    `json:"running"`
+	UpdateState string                 `json:"update_state"`
+	Containers  int                    `json:"containers"`
+	Ports       []protocol.PortMapping `json:"ports"`
+	UpdatedAt   string                 `json:"updated_at"`
+	Source      string                 `json:"source"`
+}
+
+// networkSummary is one network of a node in the API.
+type networkSummary struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Driver     string `json:"driver"`
+	Scope      string `json:"scope"`
+	Internal   bool   `json:"internal"`
+	Attachable bool   `json:"attachable"`
+	Created    string `json:"created"`
+	Containers int    `json:"containers"`
 }
 
 // stackNamespaceLabel names the Swarm stack of a container.
@@ -67,7 +119,10 @@ const containerOpTimeout = 30 * time.Second
 // the operations on one container of a node.
 func (s *Server) registerContainerRoutes() {
 	s.mux.HandleFunc("/api/v1/nodes/{id}/containers", s.handleNodeContainers)
+	s.mux.HandleFunc("/api/v1/nodes/{id}/containers/{cid}", s.handleNodeContainerDetail)
 	s.mux.HandleFunc("/api/v1/nodes/{id}/containers/{cid}/op", s.handleContainerOp)
+	s.mux.HandleFunc("/api/v1/nodes/{id}/services", s.handleNodeServices)
+	s.mux.HandleFunc("/api/v1/nodes/{id}/networks", s.handleNodeNetworks)
 }
 
 // handleNodeContainers answers with the containers of one node.
@@ -108,15 +163,7 @@ func (s *Server) handleNodeContainers(w http.ResponseWriter, r *http.Request) {
 		if namespace != "" && container.Labels[composeProjectLabel] != namespace {
 			continue
 		}
-		summaries = append(summaries, containerSummary{
-			ID:        container.ID,
-			Name:      container.Name,
-			Image:     container.Image,
-			State:     container.State,
-			Health:    container.Health,
-			Service:   container.Service,
-			Namespace: namespaceOfContainer(container),
-		})
+		summaries = append(summaries, summaryOfContainer(container))
 	}
 	// The running containers come first, because a container that runs is
 	// the one whose metrics tell the administrator something.
@@ -132,6 +179,238 @@ func (s *Server) handleNodeContainers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"node_id":      nodeID,
 		"containers":   summaries,
+		"collected_at": inventory.CollectedAt.UTC().Format(time.RFC3339Nano),
+	})
+}
+
+// summaryOfContainer projects a container of the inventory into the API.
+func summaryOfContainer(container protocol.Container) containerSummary {
+	return containerSummary{
+		ID:           container.ID,
+		Name:         container.Name,
+		Image:        container.Image,
+		State:        container.State,
+		Health:       container.Health,
+		Service:      container.Service,
+		Namespace:    namespaceOfContainer(container),
+		Created:      container.Created,
+		StartedAt:    container.StartedAt,
+		IP:           container.IP,
+		Ports:        container.Ports,
+		RestartCount: container.RestartCount,
+		ExitCode:     container.ExitCode,
+	}
+}
+
+// handleNodeContainerDetail answers with one container of one node.
+func (s *Server) handleNodeContainerDetail(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "该端点只接受 GET 请求")
+		return
+	}
+	if _, ok := s.requireSession(w, r); !ok {
+		return
+	}
+
+	nodeID := strings.TrimSpace(r.PathValue("id"))
+	containerID := strings.TrimSpace(r.PathValue("cid"))
+	if nodeID == "" || containerID == "" {
+		writeError(w, http.StatusBadRequest, "validation_failed", "必须指定节点与容器")
+		return
+	}
+
+	inventory, err := s.hub.ReadInventory(r.Context(), "compose", nodeID)
+	if err != nil {
+		writeError(w, http.StatusConflict, "target_unavailable", "这个节点当前的清单不可用，请稍后重试")
+		return
+	}
+
+	for _, container := range inventory.Containers {
+		if container.ID != containerID {
+			continue
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"node_id": nodeID,
+			"container": containerDetail{
+				containerSummary: summaryOfContainer(container),
+				Mounts:           container.Mounts,
+				Labels:           container.Labels,
+			},
+			"collected_at": inventory.CollectedAt.UTC().Format(time.RFC3339Nano),
+		})
+		return
+	}
+	writeError(w, http.StatusNotFound, "container_not_found", "这个节点上没有这个容器")
+}
+
+// handleNodeServices answers with the services of one node.
+//
+// A node that belongs to a Swarm cluster reports the services of the
+// cluster. A node that runs Compose projects reports the services its
+// containers belong to, so the page has an answer for both kinds of node.
+func (s *Server) handleNodeServices(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "该端点只接受 GET 请求")
+		return
+	}
+	if _, ok := s.requireSession(w, r); !ok {
+		return
+	}
+
+	nodeID := strings.TrimSpace(r.PathValue("id"))
+	if nodeID == "" {
+		writeError(w, http.StatusBadRequest, "validation_failed", "必须指定节点")
+		return
+	}
+
+	inventory, err := s.hub.ReadInventory(r.Context(), "compose", nodeID)
+	if err != nil {
+		writeError(w, http.StatusConflict, "target_unavailable", "这个节点当前的清单不可用，请稍后重试")
+		return
+	}
+
+	services := make([]serviceSummary, 0)
+	if len(inventory.SwarmServices) > 0 {
+		for _, service := range inventory.SwarmServices {
+			services = append(services, serviceSummary{
+				ID:          service.ID,
+				Name:        service.Name,
+				Stack:       service.Labels[stackNamespaceLabel],
+				Image:       service.Image,
+				Mode:        service.Mode,
+				Desired:     service.Desired,
+				Running:     service.Running,
+				UpdateState: service.UpdateState,
+				Ports:       service.Ports,
+				UpdatedAt:   service.UpdatedAt,
+				Source:      "swarm",
+			})
+		}
+	} else {
+		services = composeServices(inventory.Containers)
+	}
+	sort.SliceStable(services, func(i, j int) bool {
+		if services[i].Stack != services[j].Stack {
+			return services[i].Stack < services[j].Stack
+		}
+		return services[i].Name < services[j].Name
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"node_id":      nodeID,
+		"services":     services,
+		"collected_at": inventory.CollectedAt.UTC().Format(time.RFC3339Nano),
+	})
+}
+
+// composeServices groups the containers of Compose projects by their
+// project and service names. A container that belongs to no Compose project
+// is not part of a service.
+func composeServices(containers []protocol.Container) []serviceSummary {
+	type key struct {
+		namespace string
+		service   string
+	}
+	groups := map[key][]protocol.Container{}
+	order := make([]key, 0)
+	for _, container := range containers {
+		if container.Service == "" {
+			continue
+		}
+		namespace := namespaceOfContainer(container)
+		if namespace == "" {
+			continue
+		}
+		item := key{namespace: namespace, service: container.Service}
+		if _, known := groups[item]; !known {
+			order = append(order, item)
+		}
+		groups[item] = append(groups[item], container)
+	}
+
+	services := make([]serviceSummary, 0, len(order))
+	for _, item := range order {
+		items := groups[item]
+		summary := serviceSummary{
+			ID:         item.namespace + "/" + item.service,
+			Name:       item.service,
+			Stack:      item.namespace,
+			Mode:       "compose",
+			Desired:    len(items),
+			Containers: len(items),
+			Source:     "compose",
+		}
+		ports := map[protocol.PortMapping]bool{}
+		for _, container := range items {
+			if container.State == "running" {
+				summary.Running += 1
+			}
+			if summary.Image == "" {
+				summary.Image = container.Image
+			}
+			for _, port := range container.Ports {
+				ports[port] = true
+			}
+		}
+		for port := range ports {
+			summary.Ports = append(summary.Ports, port)
+		}
+		sort.SliceStable(summary.Ports, func(i, j int) bool {
+			if summary.Ports[i].PrivatePort != summary.Ports[j].PrivatePort {
+				return summary.Ports[i].PrivatePort < summary.Ports[j].PrivatePort
+			}
+			return summary.Ports[i].PublicPort < summary.Ports[j].PublicPort
+		})
+		services = append(services, summary)
+	}
+	return services
+}
+
+// handleNodeNetworks answers with the networks of one node.
+func (s *Server) handleNodeNetworks(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "该端点只接受 GET 请求")
+		return
+	}
+	if _, ok := s.requireSession(w, r); !ok {
+		return
+	}
+
+	nodeID := strings.TrimSpace(r.PathValue("id"))
+	if nodeID == "" {
+		writeError(w, http.StatusBadRequest, "validation_failed", "必须指定节点")
+		return
+	}
+
+	inventory, err := s.hub.ReadInventory(r.Context(), "compose", nodeID)
+	if err != nil {
+		writeError(w, http.StatusConflict, "target_unavailable", "这个节点当前的清单不可用，请稍后重试")
+		return
+	}
+
+	networks := make([]networkSummary, 0, len(inventory.Networks))
+	for _, network := range inventory.Networks {
+		networks = append(networks, networkSummary{
+			ID:         network.ID,
+			Name:       network.Name,
+			Driver:     network.Driver,
+			Scope:      network.Scope,
+			Internal:   network.Internal,
+			Attachable: network.Attachable,
+			Created:    network.Created,
+			Containers: network.Containers,
+		})
+	}
+	sort.SliceStable(networks, func(i, j int) bool {
+		return networks[i].Name < networks[j].Name
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"node_id":      nodeID,
+		"networks":     networks,
 		"collected_at": inventory.CollectedAt.UTC().Format(time.RFC3339Nano),
 	})
 }

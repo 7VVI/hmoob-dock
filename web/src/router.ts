@@ -5,6 +5,7 @@ import { restoreSession, sessionState, type SessionStatus } from './auth/session
 import ApplicationDetailView from './views/ApplicationDetailView.vue'
 import ApplicationsView from './views/ApplicationsView.vue'
 import AlertsView from './views/AlertsView.vue'
+import ContainerDetailView from './views/ContainerDetailView.vue'
 import InitializeView from './views/InitializeView.vue'
 import LoginView from './views/LoginView.vue'
 import NodeDetailView from './views/NodeDetailView.vue'
@@ -24,6 +25,7 @@ export const router = createRouter({
     { path: '/applications/:id', name: 'application', component: ApplicationDetailView },
     { path: '/services', name: 'services', component: ServicesView },
     { path: '/nodes', name: 'nodes', component: NodeListView },
+    { path: '/nodes/:id/containers/:cid', name: 'container', component: ContainerDetailView },
     { path: '/nodes/:id', name: 'node', component: NodeDetailView },
     { path: '/alerts', name: 'alerts', component: AlertsView },
   ],

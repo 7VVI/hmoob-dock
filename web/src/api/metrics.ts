@@ -10,7 +10,7 @@
 // no token ever appears in the address of a request.
 import { api } from './client'
 import type { EventSubscription } from './deployments'
-import type { MetricBucket, MetricPoint, MetricsPayload } from './types'
+import type { MetricBucket, MetricPoint, MetricsPayload, PortMapping } from './types'
 
 // MetricName is the name of a value of a sample of a container.
 //
@@ -212,6 +212,18 @@ export interface ContainerSummary {
   // belongs to. It is empty for a container that no application of the
   // platform manages.
   namespace: string
+  // created is the time Docker created the container.
+  created?: string
+  // started_at is the time the container last started.
+  started_at?: string
+  // ip is the address of the container in its first network.
+  ip?: string
+  // ports are the ports of the container.
+  ports?: PortMapping[]
+  // restart_count is the number of times the container was restarted.
+  restart_count?: number
+  // exit_code is the exit code of a container that ended.
+  exit_code?: number | null
 }
 
 // listContainers reads the containers of a node.

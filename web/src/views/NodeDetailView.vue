@@ -1,636 +1,1097 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { NAlert, NButton, NCard } from 'naive-ui'
 import AppShell from '../components/AppShell.vue'
-import MetricChart from '../components/MetricChart.vue'
-import ContainerRows from '../components/ContainerRows.vue'
-import { containerOp, describeOpError, getNode, roleLabel } from '../api/nodes'
 import {
-  getMetrics,
-  isStale,
-  metricNames,
-  metricPoints,
-  metricScale,
-  metricUnit,
-  newestPoint,
-  subscribeContainerEvents,
-  type ContainerSummary,
-  type MetricName,
-} from '../api/metrics'
+  getNode,
+  listNodeNetworks,
+  listNodeServices,
+  roleLabel,
+} from '../api/nodes'
+import { listContainers, type ContainerSummary } from '../api/metrics'
 import {
-  createLogSubscription,
-  deleteLogSubscription,
-  logErrorMessage,
-  openLogStream,
-  type LogStream,
-} from '../api/logs'
-import { api } from '../api/client'
-import {
-  ApiError,
   describeError,
   formatTimestamp,
+  type NodeNetwork,
+  type NodeService,
   type NodeSummary,
+  type PortMapping,
 } from '../api/types'
 
-// The bounds of the logs of a container. They are the bounds of the page of
-// an application as well, so a page never holds more than the platform
-// promises.
-const maxLogLines = 5000
-const logStreamTimeout = 5 * 1000
+// The page of a node follows the environment page of Portainer: a compact
+// header, the readings of the node and one list for every kind of object
+// the node holds. A container opens its own page, so the list stays a
+// list.
+type Tab = 'containers' | 'services' | 'networks'
 
 const route = useRoute()
 const router = useRouter()
 
 const node = ref<NodeSummary | null>(null)
-const loading = ref(true)
-const error = ref('')
-
 const containers = ref<ContainerSummary[]>([])
-const containersBusy = ref(false)
+const services = ref<NodeService[]>([])
+const networks = ref<NodeNetwork[]>([])
+const loading = ref(true)
+const initialLoaded = ref(false)
+const refreshing = ref(false)
+const error = ref('')
 const containersError = ref('')
-const collectedAt = ref('')
-
-// The operation that runs at the moment, and the container whose row holds
-// the confirmation of a removal. Both are identifiers, so a stale answer
-// never lands in the wrong row.
-const operating = ref('')
-const opError = ref('')
-const confirmingRemove = ref('')
-const opNotice = ref('')
-
-// The container whose logs are open, and the state of the subscription.
-const logContainer = ref('')
-const logLines = ref<string[]>([])
-const logTruncated = ref(false)
-const logError = ref('')
-const logBusy = ref(false)
-let logStream: LogStream | null = null
-let logSubscriptionID = ''
-
-// The window of the curve.
-const ranges = [
-  { minutes: 60, label: '最近 1 小时' },
-  { minutes: 360, label: '最近 6 小时' },
-  { minutes: 1440, label: '最近 24 小时' },
-]
-const curveContainerID = ref('')
-const metric = ref<MetricName>('cpu_percent')
-const range = ref(ranges[0].minutes)
-const points = ref<ReturnType<typeof metricPoints>>([])
-const curveLoading = ref(false)
-const curveError = ref('')
-const curveLoaded = ref(false)
+const servicesError = ref('')
+const servicesFallback = ref(false)
+const networksError = ref('')
+const tab = ref<Tab>('containers')
+const filter = ref('')
 
 const nodeID = computed(() => String(route.params.id ?? ''))
 
-// theManaged groups the containers that carry the namespace of an
-// application of the platform.
-const theManaged = computed(() => {
-  const groups = new Map<string, ContainerSummary[]>()
-  for (const item of containers.value) {
-    if (item.namespace === '') {
-      continue
-    }
-    const group = groups.get(item.namespace) ?? []
-    group.push(item)
-    groups.set(item.namespace, group)
+// load reads the node and the three lists of its objects. A list that fails
+// for one node does not sink the page: the page shows the lists it knows
+// and the reason of the missing one.
+async function load(silent = false) {
+  if (!initialLoaded.value) {
+    loading.value = true
+  } else if (!silent) {
+    refreshing.value = true
   }
-  return [...groups.entries()].map(([namespace, items]) => ({ namespace, items }))
-})
-
-// theUnmanaged are the containers that no application of the platform
-// manages. They may be operated on, but the platform does not deploy or
-// clean them.
-const theUnmanaged = computed(() => containers.value.filter((item) => item.namespace === ''))
-
-// theNodeIsConnected reports whether the agent of the node sends
-// heartbeats. An operation needs the connection, so the rows of an away
-// node carry no working buttons.
-const theNodeIsConnected = computed(() => node.value?.connected === true)
-
-// theNodeIsRevoked reports whether the credential of the node was
-// withdrawn. A revoked node never comes back.
-const theNodeIsRevoked = computed(() => node.value?.revoked === true)
-
-// theMetricName names the metric of the curve.
-const theMetricName = computed(
-  () => metricNames.find((item) => item.name === metric.value)?.label ?? metric.value,
-)
-const theUnit = computed(() => metricUnit(metric.value))
-const theScale = computed(() => metricScale(metric.value))
-const theDataIsStale = computed(() => curveLoaded.value && isStale(points.value))
-const theNewestAt = computed(() => newestPoint(points.value)?.at ?? '')
-
-// loadNode reads the record and the live state of the node.
-async function loadNode() {
   error.value = ''
+  containersError.value = ''
+  servicesError.value = ''
+  networksError.value = ''
+
   try {
     node.value = await getNode(nodeID.value)
   } catch (failure) {
     node.value = null
     error.value = describeError(failure)
+    loading.value = false
+    refreshing.value = false
+    initialLoaded.value = true
+    return
+  }
+
+  const [containerResult, serviceResult, networkResult] = await Promise.all([
+    listContainers(nodeID.value).then(
+      (items) => ({ items, error: '' }),
+      (failure) => ({ items: [] as ContainerSummary[], error: describeError(failure) }),
+    ),
+    listNodeServices(nodeID.value).then(
+      (items) => ({ items, error: '' }),
+      (failure) => ({ items: [] as NodeService[], error: describeError(failure) }),
+    ),
+    listNodeNetworks(nodeID.value).then(
+      (items) => ({ items, error: '' }),
+      (failure) => ({ items: [] as NodeNetwork[], error: describeError(failure) }),
+    ),
+  ])
+  containers.value = containerResult.items
+  networks.value = networkResult.items
+  containersError.value = containerResult.error
+  networksError.value = networkResult.error
+  services.value = serviceResult.items
+  servicesFallback.value = false
+  servicesError.value = serviceResult.error
+  // A control端 that does not serve the service list yet still shows the
+  // services the Compose labels of the containers name.
+  if (serviceResult.error !== '' && containerResult.items.length > 0) {
+    services.value = deriveServices(containerResult.items)
+    servicesFallback.value = true
+    servicesError.value = ''
+  }
+  loading.value = false
+  refreshing.value = false
+  initialLoaded.value = true
+}
+
+// theRunning counts the running containers.
+const theRunning = computed(
+  () => containers.value.filter((item) => item.state === 'running').length,
+)
+
+// theRunningServices counts the services that reached their target.
+const theRunningServices = computed(
+  () => services.value.filter((item) => item.running >= item.desired && item.desired > 0).length,
+)
+
+// theFilteredContainers applies the search of the container list.
+const theFilteredContainers = computed(() => {
+  const needle = filter.value.trim().toLowerCase()
+  if (needle === '') {
+    return containers.value
+  }
+  return containers.value.filter((item) =>
+    [item.name, item.image, item.namespace, item.service, item.ip ?? '']
+      .join(' ')
+      .toLowerCase()
+      .includes(needle),
+  )
+})
+
+// stateLabel and stateTone name the state of a container.
+function stateLabel(state: string): string {
+  switch (state) {
+    case 'running':
+      return '运行中'
+    case 'exited':
+      return '已停止'
+    case 'created':
+      return '已创建'
+    case 'paused':
+      return '已暂停'
+    case 'restarting':
+      return '重启中'
+    case 'dead':
+      return '已死亡'
+    case 'removing':
+      return '删除中'
+    default:
+      return state === '' ? '未知' : state
   }
 }
 
-// loadContainers reads the containers of the last inventory.
-//
-// The curve follows the list: a container that is gone cannot be watched,
-// and a running container is the one whose metrics tell something.
-async function loadContainers() {
-  containersBusy.value = true
-  containersError.value = ''
-  try {
-    const payload = await api<{ containers: ContainerSummary[]; collected_at?: string }>(
-      `/api/v1/nodes/${encodeURIComponent(nodeID.value)}/containers`,
-    )
-    containers.value = payload.containers ?? []
-    collectedAt.value = payload.collected_at ?? ''
-    if (!containers.value.some((item) => item.id === curveContainerID.value)) {
-      curveContainerID.value =
-        containers.value.find((item) => item.state === 'running')?.id ?? containers.value[0]?.id ?? ''
+function stateTone(state: string): 'ok' | 'bad' | 'warn' | 'off' {
+  if (state === 'running') return 'ok'
+  if (state === 'exited' || state === 'dead') return 'bad'
+  if (state === 'restarting' || state === 'paused' || state === 'created') return 'warn'
+  return 'off'
+}
+
+// serviceTone names the state of a service.
+function serviceTone(service: NodeService): 'ok' | 'bad' | 'warn' | 'off' {
+  if (service.update_state === 'updating' || service.update_state === 'paused') {
+    return 'warn'
+  }
+  if (service.desired === 0) {
+    return 'off'
+  }
+  if (service.source === 'compose' && service.running < service.desired) {
+    return service.running === 0 ? 'bad' : 'warn'
+  }
+  return service.running >= service.desired ? 'ok' : 'bad'
+}
+
+function serviceStateLabel(service: NodeService): string {
+  switch (service.update_state) {
+    case 'updating':
+      return '更新中'
+    case 'paused':
+      return '更新暂停'
+    case 'rollback_completed':
+      return '已回滚'
+    case 'rollback_started':
+      return '回滚中'
+    default:
+      break
+  }
+  if (service.desired === 0) return '已停止'
+  if (service.source === 'compose') {
+    if (service.running === 0) return '未运行'
+    if (service.running < service.desired) return '部分运行'
+    return '运行中'
+  }
+  return service.running >= service.desired ? '运行中' : '副本不足'
+}
+
+// portText writes one port the way the list shows it.
+function portText(port: PortMapping): string {
+  const published = port.public_port ? `${port.public_port}:` : ''
+  return `${published}${port.private_port}/${port.type || 'tcp'}`
+}
+
+function portsText(ports: PortMapping[] | undefined): string {
+  if (!ports || ports.length === 0) {
+    return '—'
+  }
+  return ports.map(portText).join(', ')
+}
+
+// formatDate writes a date of the engine in the local time.
+function formatDate(value: string | null | undefined): string {
+  if (!value) {
+    return '—'
+  }
+  const at = new Date(value)
+  if (Number.isNaN(at.getTime())) {
+    return '—'
+  }
+  return at.toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+}
+
+// deriveServices builds the services of the Compose containers when the
+// control端 does not serve the service list yet.
+function deriveServices(items: ContainerSummary[]): NodeService[] {
+  const groups = new Map<string, ContainerSummary[]>()
+  for (const item of items) {
+    if (item.service === '' || item.namespace === '') {
+      continue
     }
-  } catch (failure) {
-    containersError.value = describeError(failure)
-  } finally {
-    containersBusy.value = false
+    const key = `${item.namespace}/${item.service}`
+    const group = groups.get(key) ?? []
+    group.push(item)
+    groups.set(key, group)
   }
-}
-
-// operate performs one operation on one container.
-//
-// The answer of the node is the truth of the page: the list is read again
-// after every operation, so the row shows what Docker reported and not
-// what the page guessed.
-async function operate(target: ContainerSummary, action: 'start' | 'stop' | 'restart' | 'remove') {
-  if (operating.value !== '') {
-    return
-  }
-  operating.value = `${action}:${target.id}`
-  opError.value = ''
-  opNotice.value = ''
-  try {
-    const result = await containerOp(nodeID.value, target.id, action)
-    confirmingRemove.value = ''
-    if (action === 'remove') {
-      opNotice.value = `容器 ${target.name} 已删除。平台不清理它的数据卷与镜像。`
-    } else if (target.namespace !== '') {
-      opNotice.value = `对 ${target.name} 的操作已完成。平台外的变更会在下次部署预检中提示，健康状态以节点上报为准。`
-    } else {
-      opNotice.value = `对 ${target.name} 的操作已完成，健康状态以节点上报为准。`
+  const services: NodeService[] = []
+  for (const [key, group] of groups) {
+    const first = group[0]
+    const ports = new Map<string, NodeService['ports'][number]>()
+    let running = 0
+    for (const item of group) {
+      if (item.state === 'running') {
+        running += 1
+      }
+      for (const port of item.ports ?? []) {
+        ports.set(`${port.private_port}-${port.public_port ?? 0}-${port.type}`, port)
+      }
     }
-    void result
-  } catch (failure) {
-    opError.value = describeOpError(failure)
-  } finally {
-    operating.value = ''
-    await loadContainers()
-  }
-}
-
-// askForRemove opens the confirmation of a removal in the row.
-function askForRemove(target: ContainerSummary) {
-  opError.value = ''
-  confirmingRemove.value = target.id
-}
-
-// cancelRemove closes the confirmation without doing anything.
-function cancelRemove() {
-  confirmingRemove.value = ''
-}
-
-// watchContainer opens the logs of a container.
-//
-// The stream of the events has to be open before the subscription is asked
-// for, because the pieces of the logs travel in it. The page waits for the
-// stream and reports it when it does not open.
-async function watchContainer(target: ContainerSummary) {
-  if (logContainer.value === target.id) {
-    closeLogs()
-    return
-  }
-  closeLogs()
-  logContainer.value = target.id
-  logBusy.value = true
-  logError.value = ''
-  try {
-    logStream = openLogStream({
-      onLog: (event) => {
-        if (logSubscriptionID === '' || event.object_id !== logSubscriptionID) {
-          return
-        }
-        if (event.error_code) {
-          logError.value = logErrorMessage(event.error_code)
-          closeLogs(true)
-          return
-        }
-        if (event.truncated) {
-          logTruncated.value = true
-        }
-        if (event.text) {
-          appendText(event.text)
-        }
-      },
+    services.push({
+      id: key,
+      name: first.service,
+      stack: first.namespace,
+      image: first.image,
+      mode: 'compose',
+      desired: group.length,
+      running,
+      update_state: '',
+      containers: group.length,
+      ports: [...ports.values()],
+      updated_at: '',
+      source: 'compose',
     })
-    await Promise.race([
-      logStream.ready,
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('the stream of the logs did not open')), logStreamTimeout),
-      ),
-    ])
-    const payload = await createLogSubscription({
-      node_id: nodeID.value,
-      container_id: target.id,
-    })
-    logSubscriptionID = payload.id
-  } catch (failure) {
-    logError.value =
-      failure instanceof ApiError ? describeError(failure) : '实时连接没有建立，请稍后重试。'
-    closeLogs()
-  } finally {
-    logBusy.value = false
   }
+  return services
 }
 
-// appendText adds a piece of the logs to the page. The lines beyond the
-// limit are dropped, and the page says so.
-function appendText(text: string) {
-  const incoming = logLines.value.length === 0 ? text.split('\n') : text.split('\n').slice(1)
-  logLines.value.push(...incoming)
-  if (logLines.value.length > maxLogLines) {
-    logLines.value.splice(0, logLines.value.length - maxLogLines)
-    logTruncated.value = true
-  }
+// openContainer opens the page of one container.
+function openContainer(containerID: string) {
+  void router.push(`/nodes/${encodeURIComponent(nodeID.value)}/containers/${encodeURIComponent(containerID)}`)
 }
 
-// closeLogs ends the subscription and the stream of the logs. A stream that
-// is left open would deliver the pieces of a page that no longer shows
-// them.
-function closeLogs(keepContainer = false) {
-  if (logSubscriptionID !== '') {
-    const id = logSubscriptionID
-    logSubscriptionID = ''
-    void deleteLogSubscription(id).catch(() => {})
-  }
-  logStream?.close()
-  logStream = null
-  logLines.value = []
-  logTruncated.value = false
-  if (!keepContainer) {
-    logContainer.value = ''
-  }
+// showContainersOf opens the container list filtered by a service.
+function showContainersOf(service: NodeService) {
+  filter.value = service.stack
+  tab.value = 'containers'
 }
 
-// loadCurve reads the history of the container of the curve.
-async function loadCurve(): Promise<void> {
-  if (curveContainerID.value === '') {
-    points.value = []
-    curveLoaded.value = false
-    curveError.value = ''
-    return
-  }
-  curveLoading.value = true
-  curveError.value = ''
-  try {
-    const to = new Date()
-    const from = new Date(to.getTime() - range.value * 60 * 1000)
-    const payload = await getMetrics({
-      node_id: nodeID.value,
-      container_id: curveContainerID.value,
-      from: from.toISOString(),
-      to: to.toISOString(),
-    })
-    points.value = metricPoints(payload.buckets, metric.value, payload.from, payload.to)
-    curveLoaded.value = true
-  } catch (failure) {
-    points.value = []
-    curveLoaded.value = false
-    curveError.value = describeError(failure)
-  } finally {
-    curveLoading.value = false
-  }
-}
-
-// The confirmation of a revocation stays in the page, like the settings
-// page keeps it.
-const revoking = ref(false)
-const revokeError = ref('')
-
-async function revoke() {
-  revokeError.value = ''
-  try {
-    await api<void>(`/api/v1/nodes/${encodeURIComponent(nodeID.value)}/revoke`, { method: 'POST' })
-    revoking.value = false
-    await loadNode()
-  } catch (failure) {
-    revokeError.value = describeError(failure)
-  }
-}
-
-// subscription holds the events of the containers of the deployment. The
-// events of this node reload its list; every open of the stream reloads it
-// as well, so a reconnection never leaves an old list behind. The ticker is
-// the second line of defense: the agent reports its inventory every ten
-// seconds, so a page that reads at the same pace never shows a state that
-// is minutes old, even when the stream of the events is held back by a
-// proxy in between.
-let subscription: ReturnType<typeof subscribeContainerEvents> | null = null
 let pollTimer: ReturnType<typeof setInterval> | undefined
 
-onMounted(async () => {
-  await Promise.all([loadNode(), loadContainers()])
-  loading.value = false
-  void loadCurve()
-
-  subscription = subscribeContainerEvents({
-    onEvent: (changed) => {
-      if (changed === nodeID.value) {
-        void loadContainers()
-        void loadNode()
-      }
-    },
-    onOpen: () => {
-      void loadContainers()
-    },
-  })
+onMounted(() => {
+  void load()
   pollTimer = setInterval(() => {
-    void loadContainers()
+    void load(true)
   }, 15 * 1000)
 })
 
 onBeforeUnmount(() => {
-  subscription?.close()
   if (pollTimer) {
     clearInterval(pollTimer)
   }
-  closeLogs()
 })
 
-// A change of the route parameter is another node: the page reads it from
-// the beginning.
+// A change of the node is another page: read it from the beginning.
 watch(nodeID, async (current, previous) => {
   if (current === previous) {
     return
   }
-  closeLogs()
-  curveContainerID.value = ''
-  curveLoaded.value = false
-  points.value = []
-  loading.value = true
-  await Promise.all([loadNode(), loadContainers()])
-  loading.value = false
-  void loadCurve()
-})
-
-// The curve follows its selectors without a button: a change of the
-// container, of the metric or of the window reads the history again.
-watch([curveContainerID, metric, range], () => {
-  void loadCurve()
-})
-
-// A node that went away cannot serve the logs that are open. The page
-// closes them and says why.
-watch(theNodeIsConnected, (connected) => {
-  if (!connected && logContainer.value !== '') {
-    closeLogs(true)
-    logError.value = '连接中断，日志已经停止。'
-  }
+  initialLoaded.value = false
+  filter.value = ''
+  tab.value = 'containers'
+  await load()
 })
 </script>
 
 <template>
   <AppShell>
-    <p v-if="loading" class="py-6 text-[#667085]">正在读取节点…</p>
+    <p v-if="loading" class="state">正在读取节点…</p>
 
-    <NAlert v-else-if="error || !node" type="error" :show-icon="false" class="mb-4">
+    <div v-else-if="error || !node" class="state error">
       <p>{{ error || '未找到该节点。' }}</p>
-      <NButton quaternary type="primary" class="mt-2" @click="router.push('/nodes')">返回节点列表</NButton>
-    </NAlert>
+      <RouterLink class="text-link" to="/nodes">返回节点列表</RouterLink>
+    </div>
 
-    <template v-else>
-      <div class="mb-1 flex items-center justify-between gap-4">
-        <h1 class="page-title">{{ node.hostname }}</h1>
-        <NButton quaternary type="primary" :loading="containersBusy" @click="loadContainers">
-          刷新清单
-        </NButton>
-      </div>
-      <p class="page-subtitle">
-        {{ roleLabel(node.role) }}
-        <template v-if="node.docker_version"> · Docker {{ node.docker_version }}</template>
-        · {{ containers.filter((item) => item.state === 'running').length }} /
-        {{ containers.length }} 个容器运行中
+    <div v-else class="node-page">
+      <nav class="crumb" aria-label="面包屑">
+        <RouterLink to="/nodes">节点管理</RouterLink>
+        <span aria-hidden="true">/</span>
+        <span>{{ node.hostname }}</span>
+      </nav>
+
+      <header class="node-head">
+        <div class="node-title">
+          <span class="node-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <path d="M4 4h16v6H4V4Zm0 10h16v6H4v-6ZM7.5 7h.01M7.5 17h.01" />
+            </svg>
+          </span>
+          <div>
+            <div class="title-line">
+              <h1>{{ node.hostname }}</h1>
+              <span class="status" :class="node.revoked ? 'off' : node.connected ? 'ok' : 'warn'">
+                <i aria-hidden="true"></i>
+                {{ node.revoked ? '已撤销' : node.connected ? '已连接' : '连接中断' }}
+              </span>
+            </div>
+            <p class="node-meta">
+              <span>{{ roleLabel(node.role) }}</span>
+              <span>{{ node.docker_version ? `Docker ${node.docker_version}` : 'Docker 版本未上报' }}</span>
+              <span>{{ node.os_type || '?' }} / {{ node.os_arch || '?' }}</span>
+              <span v-if="node.agent_version">Agent {{ node.agent_version }}</span>
+              <span>最近上报 {{ formatTimestamp(node.last_seen) }}</span>
+            </p>
+          </div>
+        </div>
+        <button type="button" class="ghost-button" :disabled="refreshing" @click="load()">
+          {{ refreshing ? '刷新中…' : '刷新' }}
+        </button>
+      </header>
+
+      <p v-if="node.revoked" class="banner error">
+        该节点的接入凭据已撤销。节点记录与历史数据保留，但节点不再连接、清单不再更新。
+      </p>
+      <p v-else-if="!node.connected" class="banner warn">
+        连接中断。下面显示的是 {{ formatTimestamp(node.last_seen) }} 的最后一次上报，不代表机器宕机。
       </p>
 
-      <NAlert v-if="theNodeIsRevoked" type="error" :show-icon="false" class="mb-6">
-        该节点的接入凭据已撤销。节点记录与历史数据保留，但节点不再连接、清单不再更新。
-      </NAlert>
-      <NAlert v-else-if="!theNodeIsConnected" type="warning" :show-icon="false" class="mb-6">
-        连接中断。下面显示的是 {{ formatTimestamp(node.last_seen) }} 的最后一次上报，不代表机器已经宕机；容器操作暂不可用。
-      </NAlert>
+      <section class="readings" aria-label="节点概况">
+        <div class="reading">
+          <span>容器</span>
+          <strong>{{ containers.length }}</strong>
+          <small>{{ theRunning }} 个运行中</small>
+        </div>
+        <div class="reading">
+          <span>服务</span>
+          <strong>{{ services.length }}</strong>
+          <small>{{ theRunningServices }} 个达到目标</small>
+        </div>
+        <div class="reading">
+          <span>网络</span>
+          <strong>{{ networks.length }}</strong>
+          <small>Docker 网络</small>
+        </div>
+        <div class="reading">
+          <span>最近上报</span>
+          <strong class="reading-time">{{ formatDate(node.last_seen) }}</strong>
+          <small>{{ node.connected ? '每 15 秒同步' : '历史清单' }}</small>
+        </div>
+      </section>
 
-      <NCard title="节点信息" class="mb-6">
-        <template #header-extra>
-          <template v-if="!theNodeIsRevoked">
-            <NButton v-if="!revoking" quaternary type="error" @click="revoking = true">撤销接入</NButton>
-            <template v-else>
-              <span class="mr-2 text-xs text-[#667085]">确认撤销接入？连接将断开，容器不受影响。</span>
-              <NButton size="small" type="error" class="mr-2" @click="revoke">确认撤销</NButton>
-              <NButton size="small" quaternary @click="revoking = false">取消</NButton>
-            </template>
-          </template>
-        </template>
-        <NAlert v-if="revokeError" type="error" :show-icon="false" class="mb-4">{{ revokeError }}</NAlert>
+      <section class="panel">
+        <nav class="tabs" aria-label="节点对象">
+          <button
+            type="button"
+            :class="{ active: tab === 'containers' }"
+            :aria-selected="tab === 'containers'"
+            @click="tab = 'containers'"
+          >
+            容器 <span>{{ containers.length }}</span>
+          </button>
+          <button
+            type="button"
+            :class="{ active: tab === 'services' }"
+            :aria-selected="tab === 'services'"
+            @click="tab = 'services'"
+          >
+            服务 <span>{{ services.length }}</span>
+          </button>
+          <button
+            type="button"
+            :class="{ active: tab === 'networks' }"
+            :aria-selected="tab === 'networks'"
+            @click="tab = 'networks'"
+          >
+            网络 <span>{{ networks.length }}</span>
+          </button>
+        </nav>
 
-        <dl class="grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-2 lg:grid-cols-4">
-          <div class="min-w-0">
-            <dt class="mb-1 text-xs text-[#667085]">连接状态</dt>
-            <dd class="text-[13px]">
-              <span v-if="node.revoked" class="text-[#e02e2e]">已撤销</span>
-              <span v-else :class="node.connected ? 'text-[#025ffb]' : 'text-[#b54708]'">
-                {{ node.connected ? '已连接' : '连接中断' }}
-              </span>
-            </dd>
+        <!-- Containers -->
+        <div v-if="tab === 'containers'" class="tab-body">
+          <div class="list-toolbar">
+            <label class="search">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" />
+                <path d="m16 16 4 4" />
+              </svg>
+              <input v-model="filter" type="search" placeholder="按名称、镜像、堆栈或 IP 搜索容器" />
+            </label>
+            <span class="toolbar-note">{{ theFilteredContainers.length }} / {{ containers.length }} 个容器</span>
           </div>
-          <div class="min-w-0">
-            <dt class="mb-1 text-xs text-[#667085]">节点角色</dt>
-            <dd class="text-[13px]">{{ roleLabel(node.role) }}</dd>
-          </div>
-          <div class="min-w-0">
-            <dt class="mb-1 text-xs text-[#667085]">节点 ID</dt>
-            <dd class="font-mono text-[13px]">{{ node.id }}</dd>
-          </div>
-          <div class="min-w-0">
-            <dt class="mb-1 text-xs text-[#667085]">Docker 环境</dt>
-            <dd class="text-[13px]">{{ node.docker_version || '尚未上报' }}</dd>
-          </div>
-          <div class="min-w-0">
-            <dt class="mb-1 text-xs text-[#667085]">操作系统 / 架构</dt>
-            <dd class="text-[13px]">{{ node.os_type || '?' }} · {{ node.os_arch || '?' }}</dd>
-          </div>
-          <div class="min-w-0">
-            <dt class="mb-1 text-xs text-[#667085]">Agent 版本</dt>
-            <dd class="text-[13px]">{{ node.agent_version || '尚未上报' }}</dd>
-          </div>
-          <div class="min-w-0">
-            <dt class="mb-1 text-xs text-[#667085]">接入时间</dt>
-            <dd class="text-[13px]">{{ formatTimestamp(node.created_at) }}</dd>
-          </div>
-          <div class="min-w-0">
-            <dt class="mb-1 text-xs text-[#667085]">最近上报</dt>
-            <dd class="text-[13px]">{{ formatTimestamp(node.last_seen) }}</dd>
-          </div>
-        </dl>
-        <p class="mt-4 text-xs text-[#667085]">
-          节点信息来自该节点最近一次上报的身份与环境信息，不是实时探测结果。
-        </p>
-      </NCard>
 
-      <NCard class="mb-6">
-        <template #header>
-          <div class="flex items-center justify-between gap-3">
-            <h2 class="text-base font-semibold">容器清单</h2>
-            <span class="text-xs text-[#667085]">
-              {{ containers.filter((item) => item.state === 'running').length }} /
-              {{ containers.length }} 个运行中
-              <template v-if="collectedAt"> · 上报于 {{ formatTimestamp(collectedAt) }}</template>
-            </span>
-          </div>
-        </template>
+          <p v-if="containersError" class="banner error">{{ containersError }}</p>
 
-        <div v-if="containersError" class="mb-4 rounded-lg bg-[#fdeaea] px-4 py-3 text-xs text-[#e02e2e]">
-          <p>{{ containersError }}</p>
-          <NButton quaternary type="primary" class="mt-2" @click="loadContainers">重试</NButton>
+          <div v-else-if="containers.length === 0" class="empty">
+            <p>这个节点还没有上报任何容器。</p>
+          </div>
+
+          <div v-else class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">名称</th>
+                  <th scope="col">状态</th>
+                  <th scope="col">堆栈 / 命名空间</th>
+                  <th scope="col">镜像</th>
+                  <th scope="col">创建</th>
+                  <th scope="col">IP</th>
+                  <th scope="col">端口</th>
+                  <th scope="col" class="actions-col"><span class="sr-only">操作</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="item in theFilteredContainers"
+                  :key="item.id"
+                  class="container-row"
+                  @click="openContainer(item.id)"
+                >
+                  <td class="name-cell">
+                    <RouterLink
+                      class="container-link"
+                      :to="`/nodes/${encodeURIComponent(node.id)}/containers/${encodeURIComponent(item.id)}`"
+                      @click.stop
+                    >
+                      {{ item.name }}
+                    </RouterLink>
+                    <small>{{ item.service || '未归属服务' }}</small>
+                  </td>
+                  <td>
+                    <span class="pill" :class="stateTone(item.state)">
+                      <i aria-hidden="true"></i>{{ stateLabel(item.state) }}
+                    </span>
+                    <small v-if="item.health" class="health">{{ item.health === 'healthy' ? '健康' : item.health }}</small>
+                  </td>
+                  <td>
+                    <code v-if="item.namespace" class="stack">{{ item.namespace }}</code>
+                    <span v-else class="muted">未接管</span>
+                  </td>
+                  <td class="image-cell" :title="item.image">{{ item.image }}</td>
+                  <td class="mono">{{ formatDate(item.created) }}</td>
+                  <td class="mono">{{ item.ip || '—' }}</td>
+                  <td class="ports-cell">{{ portsText(item.ports) }}</td>
+                  <td class="actions-col">
+                    <RouterLink
+                      class="detail-link"
+                      :to="`/nodes/${encodeURIComponent(node.id)}/containers/${encodeURIComponent(item.id)}`"
+                      @click.stop
+                    >
+                      详情
+                    </RouterLink>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </div>
 
-        <p v-else-if="containers.length === 0" class="py-6 text-center text-[#667085]">
-          这个节点还没有上报任何容器。节点连接后会随清单一起上报。
-        </p>
-
-        <template v-else>
-          <p v-if="opNotice" class="mb-4 rounded-lg bg-[#e8f1fe] px-4 py-3 text-xs leading-relaxed text-[#344054]">
-            {{ opNotice }}
+        <!-- Services -->
+        <div v-else-if="tab === 'services'" class="tab-body">
+          <p v-if="servicesFallback" class="banner warn">
+            控制端或 Agent 还是旧版本，以下服务由容器标签推导；重启后可获得完整的 Swarm 服务清单。
           </p>
-          <p v-if="opError" class="mb-4 rounded-lg bg-[#fdeaea] px-4 py-3 text-xs leading-relaxed text-[#e02e2e]">
-            {{ opError }}
-          </p>
+          <p v-if="servicesError" class="banner error">{{ servicesError }}</p>
 
-          <section v-for="group in theManaged" :key="group.namespace" class="mb-5">
-            <h3 class="mb-2 flex flex-wrap items-baseline gap-3 text-sm font-semibold">
-              <code class="font-mono">{{ group.namespace }}</code>
-              <span class="text-xs font-normal text-[#667085]">平台站点容器 · 操作是运维行为，不会修改站点配置</span>
-            </h3>
-            <ContainerRows
-              :items="group.items"
-              :operating="operating"
-              :confirming-remove="confirmingRemove"
-              :connected="theNodeIsConnected"
-              :log-container="logContainer"
-              :log-lines="logLines"
-              :log-truncated="logTruncated"
-              :log-error="logError"
-              :log-busy="logBusy"
-              @operate="operate"
-              @ask-remove="askForRemove"
-              @cancel-remove="cancelRemove"
-              @watch="watchContainer"
-            />
-          </section>
-
-          <section v-if="theUnmanaged.length > 0">
-            <h3 class="mb-2 flex flex-wrap items-baseline gap-3 text-sm font-semibold">
-              <span>未接管的容器</span>
-              <span class="text-xs font-normal text-[#667085]">不由平台部署，可查看和启停，不会纳入部署管理</span>
-            </h3>
-            <ContainerRows
-              :items="theUnmanaged"
-              :operating="operating"
-              :confirming-remove="confirmingRemove"
-              :connected="theNodeIsConnected"
-              :log-container="logContainer"
-              :log-lines="logLines"
-              :log-truncated="logTruncated"
-              :log-error="logError"
-              :log-busy="logBusy"
-              @operate="operate"
-              @ask-remove="askForRemove"
-              @cancel-remove="cancelRemove"
-              @watch="watchContainer"
-            />
-          </section>
-        </template>
-      </NCard>
-
-      <NCard title="资源曲线">
-        <p class="mb-4 text-xs text-[#667085]">曲线是容器的，不是整台机器的。每 10 秒采样，按分钟聚合，历史保留最近 24 小时。</p>
-
-        <form class="mb-4 flex flex-wrap items-end gap-3" novalidate @submit.prevent>
-          <div class="grid min-w-[11rem] flex-1 gap-1">
-            <label class="text-xs font-medium text-[#344054]" for="curve-container">容器</label>
-            <select
-              id="curve-container"
-              v-model="curveContainerID"
-              class="h-[38px] rounded-lg border border-[#d3dcec] bg-white px-3 text-sm outline-none focus:border-[#025ffb]"
-              :disabled="containers.length === 0"
-            >
-              <option v-if="containers.length === 0" value="">这个节点还没有上报容器</option>
-              <option v-for="item in containers" :key="item.id" :value="item.id">
-                {{ item.name }} · {{ item.state }}
-              </option>
-            </select>
+          <div v-else-if="services.length === 0" class="empty">
+            <p>这个节点没有可展示的服务。Swarm 服务需要节点加入集群；Compose 服务需要容器带有服务标签。</p>
           </div>
 
-          <div class="grid min-w-[11rem] flex-1 gap-1">
-            <label class="text-xs font-medium text-[#344054]" for="curve-metric">指标</label>
-            <select
-              id="curve-metric"
-              v-model="metric"
-              class="h-[38px] rounded-lg border border-[#d3dcec] bg-white px-3 text-sm outline-none focus:border-[#025ffb]"
-            >
-              <option v-for="item in metricNames" :key="item.name" :value="item.name">
-                {{ item.label }}
-              </option>
-            </select>
+          <div v-else class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">名称</th>
+                  <th scope="col">堆栈</th>
+                  <th scope="col">镜像</th>
+                  <th scope="col">模式</th>
+                  <th scope="col">副本 / 容器</th>
+                  <th scope="col">端口</th>
+                  <th scope="col">状态</th>
+                  <th scope="col">更新时间</th>
+                  <th scope="col" class="actions-col"><span class="sr-only">操作</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="service in services" :key="service.id">
+                  <td class="name-cell">
+                    <strong>{{ service.name }}</strong>
+                    <small>{{ service.source === 'swarm' ? 'Swarm 服务' : 'Compose 服务' }}</small>
+                  </td>
+                  <td><code class="stack">{{ service.stack || '—' }}</code></td>
+                  <td class="image-cell" :title="service.image">{{ service.image || '—' }}</td>
+                  <td>{{ service.mode || '—' }}</td>
+                  <td class="mono">{{ service.running }} / {{ service.desired }}</td>
+                  <td class="ports-cell">{{ portsText(service.ports) }}</td>
+                  <td>
+                    <span class="pill" :class="serviceTone(service)">
+                      <i aria-hidden="true"></i>{{ serviceStateLabel(service) }}
+                    </span>
+                  </td>
+                  <td class="mono">{{ formatDate(service.updated_at) }}</td>
+                  <td class="actions-col">
+                    <button type="button" class="detail-link" @click="showContainersOf(service)">
+                      查看容器
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Networks -->
+        <div v-else class="tab-body">
+          <p v-if="networksError" class="banner error">{{ networksError }}</p>
+
+          <div v-else-if="networks.length === 0" class="empty">
+            <p>这个节点还没有上报网络。</p>
           </div>
 
-          <div class="grid min-w-[11rem] flex-1 gap-1">
-            <label class="text-xs font-medium text-[#344054]" for="curve-range">时间范围</label>
-            <select
-              id="curve-range"
-              v-model.number="range"
-              class="h-[38px] rounded-lg border border-[#d3dcec] bg-white px-3 text-sm outline-none focus:border-[#025ffb]"
-            >
-              <option v-for="item in ranges" :key="item.minutes" :value="item.minutes">
-                {{ item.label }}
-              </option>
-            </select>
+          <div v-else class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">名称</th>
+                  <th scope="col">驱动</th>
+                  <th scope="col">范围</th>
+                  <th scope="col">内部</th>
+                  <th scope="col">容器</th>
+                  <th scope="col">创建时间</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="network in networks" :key="network.id">
+                  <td class="name-cell">
+                    <strong>{{ network.name }}</strong>
+                    <small class="mono">{{ network.id.slice(0, 12) }}</small>
+                  </td>
+                  <td>{{ network.driver || '—' }}</td>
+                  <td>{{ network.scope || '—' }}</td>
+                  <td>{{ network.internal ? '是' : '否' }}</td>
+                  <td class="mono">{{ network.containers }}</td>
+                  <td class="mono">{{ formatDate(network.created) }}</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
-        </form>
-
-        <p v-if="curveError" class="mb-4 rounded-lg bg-[#fdeaea] px-4 py-3 text-xs text-[#e02e2e]">
-          <span>{{ curveError }}</span>
-          <NButton quaternary type="primary" class="ml-2" @click="loadCurve">重试</NButton>
-        </p>
-
-        <NAlert v-if="!theNodeIsConnected" type="warning" :show-icon="false" class="mb-4">
-          连接中断。曲线停在最后一次收到数据的时候。
-        </NAlert>
-        <NAlert v-else-if="theDataIsStale" type="warning" :show-icon="false" class="mb-4">
-          数据已过期。最后一次数据来自
-          {{ theNewestAt === '' ? '更早' : formatTimestamp(theNewestAt) }}。
-        </NAlert>
-
-        <p v-if="!curveLoaded && !curveLoading && curveError === ''" class="py-6 text-center text-[#667085]">
-          这个节点还没有可以画曲线的容器。
-        </p>
-
-        <MetricChart
-          v-if="curveLoaded"
-          :points="points"
-          :unit="theUnit"
-          :title="theMetricName"
-          :format="theScale"
-        />
-      </NCard>
-    </template>
+        </div>
+      </section>
+    </div>
   </AppShell>
 </template>
+
+<style scoped>
+.state {
+  display: grid;
+  place-items: center;
+  gap: 10px;
+  min-height: 220px;
+  color: #7b8aa8;
+  font-size: 13px;
+}
+
+.state.error {
+  color: #d92d20;
+}
+
+.text-link {
+  color: #0b63f6;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.node-page {
+  display: grid;
+  gap: 16px;
+}
+
+.crumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #8595b2;
+  font-size: 12.5px;
+}
+
+.crumb a {
+  color: #7b8aa8;
+  text-decoration: none;
+}
+
+.crumb a:hover {
+  color: #0b63f6;
+}
+
+.node-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.node-title {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  min-width: 0;
+}
+
+.node-mark {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  flex: none;
+  border-radius: 50%;
+  background: #e9f2ff;
+  color: #146ef5;
+}
+
+.node-mark svg {
+  width: 24px;
+  height: 24px;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.title-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.title-line h1 {
+  color: #132a56;
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.status i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentcolor;
+}
+
+.status.ok {
+  background: #e7f9f1;
+  color: #0a9b6a;
+}
+
+.status.warn {
+  background: #fff4e6;
+  color: #e07c00;
+}
+
+.status.off {
+  background: #f0f3f9;
+  color: #8595b2;
+}
+
+.node-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 4px;
+  color: #7b8aa8;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.node-meta span + span::before {
+  content: "·";
+  margin-right: 12px;
+  color: #c1ccdf;
+}
+
+.ghost-button {
+  height: 34px;
+  padding: 0 14px;
+  border: 1px solid #dbe6f7;
+  border-radius: 9px;
+  background: #fff;
+  color: #2f6fe4;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ghost-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.banner {
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.banner.error {
+  background: #fef0ef;
+  color: #d92d20;
+}
+
+.banner.warn {
+  background: #fff8eb;
+  color: #9a6a2a;
+}
+
+.readings {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.reading {
+  padding: 14px 18px;
+  border: 1px solid #e9eff9;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 14px 30px -34px rgb(20 52 110 / 50%);
+}
+
+.reading span {
+  color: #7b8aa8;
+  font-size: 11.5px;
+}
+
+.reading strong {
+  display: block;
+  margin-top: 1px;
+  color: #132a56;
+  font-size: 24px;
+  font-weight: 800;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+.reading strong.reading-time {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.7;
+}
+
+.reading small {
+  color: #94a3bd;
+  font-size: 11px;
+}
+
+.panel {
+  overflow: hidden;
+  border: 1px solid #e9eff9;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 18px 38px -36px rgb(20 52 110 / 50%);
+}
+
+.tabs {
+  display: flex;
+  gap: 24px;
+  padding: 0 22px;
+  border-bottom: 1px solid #eef3fb;
+  overflow-x: auto;
+}
+
+.tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 52px;
+  padding: 0 1px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: #7b8aa8;
+  font-size: 13.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tabs button span {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #f2f6fd;
+  color: #8595b2;
+  font-size: 10.5px;
+  line-height: 17px;
+}
+
+.tabs button.active {
+  border-color: #0b63f6;
+  color: #16264a;
+  font-weight: 700;
+}
+
+.tabs button.active span {
+  background: #e8f1ff;
+  color: #2f6fe4;
+}
+
+.tab-body {
+  padding: 18px 22px 22px;
+}
+
+.list-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(100%, 330px);
+  height: 34px;
+  padding: 0 11px;
+  border: 1px solid #dbe6f7;
+  border-radius: 9px;
+  background: #fff;
+  color: #8595b2;
+}
+
+.search svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+}
+
+.search input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: #34446b;
+  font-size: 12.5px;
+}
+
+.toolbar-note {
+  color: #94a3bd;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  text-align: left;
+}
+
+th {
+  padding: 9px 12px;
+  border-bottom: 1px solid #eef3fb;
+  background: #f8faff;
+  color: #7b8aa8;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+td {
+  padding: 12px;
+  border-bottom: 1px solid #f1f5fc;
+  color: #34446b;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+tbody tr:hover {
+  background: #fbfdff;
+}
+
+.container-row {
+  cursor: pointer;
+}
+
+.name-cell {
+  display: grid;
+  gap: 1px;
+  min-width: 160px;
+}
+
+.name-cell strong,
+.container-link {
+  color: #16264a;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.container-link:hover {
+  color: #0b63f6;
+  text-decoration: none;
+}
+
+.name-cell small {
+  color: #94a3bd;
+  font-size: 10.5px;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.pill i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentcolor;
+}
+
+.pill.ok {
+  background: #e7f9f1;
+  color: #0a9b6a;
+}
+
+.pill.bad {
+  background: #fef0ef;
+  color: #d92d20;
+}
+
+.pill.warn {
+  background: #fff4e6;
+  color: #e07c00;
+}
+
+.pill.off {
+  background: #f0f3f9;
+  color: #8595b2;
+}
+
+.health {
+  display: block;
+  margin-top: 2px;
+  color: #94a3bd;
+  font-size: 9.5px;
+}
+
+.stack {
+  color: #2f6fe4;
+  font-size: 11.5px;
+}
+
+.muted {
+  color: #94a3bd;
+}
+
+.image-cell {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ports-cell {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.actions-col {
+  width: 1%;
+  text-align: right;
+}
+
+.detail-link {
+  border: 0;
+  background: none;
+  color: #2f6fe4;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.detail-link:hover {
+  color: #0755d8;
+}
+
+.empty {
+  display: grid;
+  place-items: center;
+  min-height: 150px;
+  color: #94a3bd;
+  font-size: 12.5px;
+  text-align: center;
+}
+
+@media (max-width: 1000px) {
+  .readings {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .title-line h1 {
+    font-size: 22px;
+  }
+
+  .readings {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .tab-body {
+    padding: 14px 14px 18px;
+  }
+
+  .tabs {
+    padding: 0 14px;
+  }
+}
+</style>

@@ -1107,15 +1107,21 @@ func splitInventory(inventory protocol.Inventory) ([]protocol.InventoryBatch, er
 		encoded = append(encoded, data)
 	}
 
-	// Every batch carries the same fields around its containers, so the
-	// size of that part is known before the split.
+	// Every batch carries the same fields around its containers, and the
+	// first one carries the swarm facts and the networks as well. The
+	// template holds all of them, so the split leaves room for the batch
+	// that is the largest.
 	template, err := json.Marshal(protocol.InventoryBatch{
-		SnapshotID:  snapshotID,
-		BatchIndex:  0,
-		BatchCount:  1,
-		Complete:    true,
-		Identity:    inventory.Identity,
-		CollectedAt: inventory.CollectedAt,
+		SnapshotID:    snapshotID,
+		BatchIndex:    0,
+		BatchCount:    1,
+		Complete:      true,
+		Identity:      inventory.Identity,
+		SwarmNodes:    inventory.SwarmNodes,
+		SwarmServices: inventory.SwarmServices,
+		SwarmTasks:    inventory.SwarmTasks,
+		Networks:      inventory.Networks,
+		CollectedAt:   inventory.CollectedAt,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("agent: encode the inventory batch: %w", err)
@@ -1150,6 +1156,14 @@ func splitInventory(inventory protocol.Inventory) ([]protocol.InventoryBatch, er
 	for index := range batches {
 		batches[index].BatchCount = len(batches)
 		batches[index].Complete = index == len(batches)-1
+	}
+	// The facts around the containers travel once, in the first batch, so
+	// a snapshot with many containers does not repeat them in every part.
+	if len(batches) > 0 {
+		batches[0].SwarmNodes = inventory.SwarmNodes
+		batches[0].SwarmServices = inventory.SwarmServices
+		batches[0].SwarmTasks = inventory.SwarmTasks
+		batches[0].Networks = inventory.Networks
 	}
 	for index, batch := range batches {
 		data, err := json.Marshal(batch)

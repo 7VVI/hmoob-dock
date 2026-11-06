@@ -757,18 +757,38 @@ func (c *connection) acceptInventory(envelope protocol.Envelope) error {
 	}
 
 	containers := make([]protocol.Container, 0, len(pending.batches))
+	var networks []protocol.Network
+	var swarmNodes []protocol.SwarmNode
+	var swarmServices []protocol.SwarmService
+	var swarmTasks []protocol.SwarmTask
 	var collectedAt time.Time
 	for index := 0; index < pending.count; index++ {
 		part := pending.batches[index]
 		containers = append(containers, part.Containers...)
+		if len(part.Networks) > 0 {
+			networks = part.Networks
+		}
+		if len(part.SwarmNodes) > 0 {
+			swarmNodes = part.SwarmNodes
+		}
+		if len(part.SwarmServices) > 0 {
+			swarmServices = part.SwarmServices
+		}
+		if len(part.SwarmTasks) > 0 {
+			swarmTasks = part.SwarmTasks
+		}
 		if collectedAt.IsZero() {
 			collectedAt = part.CollectedAt
 		}
 	}
 	c.inventory = &protocol.Inventory{
-		Identity:    pending.batches[0].Identity,
-		Containers:  containers,
-		CollectedAt: collectedAt,
+		Identity:      pending.batches[0].Identity,
+		Containers:    containers,
+		SwarmNodes:    swarmNodes,
+		SwarmServices: swarmServices,
+		SwarmTasks:    swarmTasks,
+		Networks:      networks,
+		CollectedAt:   collectedAt,
 	}
 	c.inventoryAt = now
 	delete(c.pending, batch.SnapshotID)

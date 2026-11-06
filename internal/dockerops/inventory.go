@@ -10,11 +10,13 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	networkapi "github.com/docker/docker/api/types/network"
 	swarmapi "github.com/docker/docker/api/types/swarm"
 	"github.com/docker/docker/api/types/system"
 	"github.com/docker/docker/client"
@@ -144,6 +146,14 @@ func (l *Local) Inventory(ctx context.Context) (protocol.Inventory, error) {
 		CollectedAt: time.Now().UTC(),
 	}
 
+	// The networks belong to the node, not to its cluster, so they are
+	// read for every node.
+	networks, err := l.Networks(ctx)
+	if err != nil {
+		return protocol.Inventory{}, err
+	}
+	inventory.Networks = networks
+
 	if info.Swarm.NodeID == "" {
 		// The node does not belong to a cluster, so it has no swarm facts.
 		return inventory, nil
@@ -177,6 +187,34 @@ func (l *Local) SwarmNodes(ctx context.Context) ([]swarmapi.Node, error) {
 		return nil, fmt.Errorf("dockerops: list the nodes of the cluster: %w", err)
 	}
 	return nodes, nil
+}
+
+// Networks returns the networks of the local Docker engine.
+//
+// The networks are the facts of the Docker SDK. The platform reads them to
+// show the administrator what the containers of the node are attached to.
+func (l *Local) Networks(ctx context.Context) ([]protocol.Network, error) {
+	listed, err := l.client.NetworkList(ctx, networkapi.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("dockerops: list the networks of the engine: %w", err)
+	}
+	networks := make([]protocol.Network, 0, len(listed))
+	for _, network := range listed {
+		networks = append(networks, protocol.Network{
+			ID:         network.ID,
+			Name:       network.Name,
+			Driver:     network.Driver,
+			Scope:      network.Scope,
+			Internal:   network.Internal,
+			Attachable: network.Attachable,
+			Created:    network.Created.Format(time.RFC3339Nano),
+			Containers: len(network.Containers),
+		})
+	}
+	sort.SliceStable(networks, func(i, j int) bool {
+		return networks[i].Name < networks[j].Name
+	})
+	return networks, nil
 }
 
 // SwarmServices returns the services of the Swarm cluster of the local engine.
@@ -249,6 +287,22 @@ func swarmServicesOf(services []swarmapi.Service, tasks []swarmapi.Task, nodes [
 			// reports the replicas the service asks for and nothing more.
 			target = replicasOf(service)
 		}
+		image := ""
+		if service.Spec.TaskTemplate.ContainerSpec != nil {
+			image = service.Spec.TaskTemplate.ContainerSpec.Image
+		}
+		ports := make([]protocol.PortMapping, 0, len(service.Endpoint.Ports))
+		for _, port := range service.Endpoint.Ports {
+			ports = append(ports, protocol.PortMapping{
+				PrivatePort: uint16(port.TargetPort),
+				PublicPort:  uint16(port.PublishedPort),
+				Type:        string(port.Protocol),
+			})
+		}
+		updatedAt := ""
+		if !service.UpdatedAt.IsZero() {
+			updatedAt = service.UpdatedAt.Format(time.RFC3339Nano)
+		}
 		projected = append(projected, protocol.SwarmService{
 			ID:          service.ID,
 			Name:        service.Spec.Name,
@@ -257,6 +311,9 @@ func swarmServicesOf(services []swarmapi.Service, tasks []swarmapi.Task, nodes [
 			Desired:     target,
 			Running:     runningTasksOf(tasks, service.ID),
 			Labels:      labels,
+			Image:       image,
+			Ports:       ports,
+			UpdatedAt:   updatedAt,
 		})
 	}
 	return projected
@@ -378,6 +435,7 @@ func containerOf(summary container.Summary, details container.InspectResponse) p
 	health := ""
 	restarts := 0
 	var exitCode *int
+	startedAt := ""
 	if details.Config != nil {
 		if details.Config.Image != "" {
 			image = details.Config.Image
@@ -388,6 +446,7 @@ func containerOf(summary container.Summary, details container.InspectResponse) p
 	}
 	if details.State != nil {
 		state = details.State.Status
+		startedAt = details.State.StartedAt
 		if details.State.Health != nil {
 			health = details.State.Health.Status
 		}
@@ -402,6 +461,33 @@ func containerOf(summary container.Summary, details container.InspectResponse) p
 		restarts = details.RestartCount
 	}
 
+	ports := make([]protocol.PortMapping, 0, len(summary.Ports))
+	for _, port := range summary.Ports {
+		ports = append(ports, protocol.PortMapping{
+			PrivatePort: port.PrivatePort,
+			PublicPort:  port.PublicPort,
+			Type:        port.Type,
+			IP:          port.IP,
+		})
+	}
+	sort.SliceStable(ports, func(i, j int) bool {
+		if ports[i].PrivatePort != ports[j].PrivatePort {
+			return ports[i].PrivatePort < ports[j].PrivatePort
+		}
+		return ports[i].PublicPort < ports[j].PublicPort
+	})
+
+	mounts := make([]protocol.Mount, 0, len(details.Mounts))
+	for _, mount := range details.Mounts {
+		mounts = append(mounts, protocol.Mount{
+			Type:        string(mount.Type),
+			Source:      mount.Source,
+			Destination: mount.Destination,
+			Mode:        mount.Mode,
+			ReadWrite:   mount.RW,
+		})
+	}
+
 	return protocol.Container{
 		ID:           summary.ID,
 		Name:         name,
@@ -412,5 +498,30 @@ func containerOf(summary container.Summary, details container.InspectResponse) p
 		Service:      labels[ComposeServiceLabel],
 		ExitCode:     exitCode,
 		RestartCount: restarts,
+		Created:      details.Created,
+		StartedAt:    startedAt,
+		IP:           firstIP(details.NetworkSettings),
+		Ports:        ports,
+		Mounts:       mounts,
 	}
+}
+
+// firstIP returns the address of the container in its first network. A
+// container that is not attached to a network has no address.
+func firstIP(settings *container.NetworkSettings) string {
+	if settings == nil {
+		return ""
+	}
+	names := make([]string, 0, len(settings.Networks))
+	for name := range settings.Networks {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		endpoint := settings.Networks[name]
+		if endpoint != nil && endpoint.IPAddress != "" {
+			return endpoint.IPAddress
+		}
+	}
+	return ""
 }

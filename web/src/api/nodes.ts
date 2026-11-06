@@ -10,13 +10,23 @@
 // the session of the administrator travels in the cookie of the browser and
 // no token ever appears in the address of a request.
 import { api } from './client'
+import type { ContainerSummary } from './metrics'
 import type {
   ContainerAction,
+  ContainerMount,
   ContainerOpResult,
   NodeDetailPayload,
   NodeListPayload,
+  NodeNetwork,
+  NodeService,
   NodeSummary,
 } from './types'
+
+// ContainerDetail is one container with the facts of its details.
+export interface ContainerDetail extends ContainerSummary {
+  mounts: ContainerMount[]
+  labels: Record<string, string>
+}
 
 // listNodes reads the enrolled nodes and their live state.
 export async function listNodes(): Promise<NodeSummary[]> {
@@ -48,6 +58,37 @@ export async function containerOp(
     `/api/v1/nodes/${encodeURIComponent(nodeID)}/containers/${encodeURIComponent(containerID)}/op`,
     { method: 'POST', body: JSON.stringify({ action }) },
   ).then((payload) => payload.result)
+}
+
+// listNodeServices reads the services of one node.
+//
+// A node of a Swarm cluster answers with the services of the cluster. A
+// standalone node answers with the services its Compose containers belong
+// to, so the page has an answer for both kinds of node.
+export async function listNodeServices(nodeID: string): Promise<NodeService[]> {
+  const payload = await api<{ services: NodeService[]; collected_at?: string }>(
+    `/api/v1/nodes/${encodeURIComponent(nodeID)}/services`,
+  )
+  return payload.services ?? []
+}
+
+// listNodeNetworks reads the networks of the Docker engine of one node.
+export async function listNodeNetworks(nodeID: string): Promise<NodeNetwork[]> {
+  const payload = await api<{ networks: NodeNetwork[]; collected_at?: string }>(
+    `/api/v1/nodes/${encodeURIComponent(nodeID)}/networks`,
+  )
+  return payload.networks ?? []
+}
+
+// getNodeContainer reads one container of a node with its details.
+export async function getNodeContainer(
+  nodeID: string,
+  containerID: string,
+): Promise<ContainerDetail> {
+  const payload = await api<{ container: ContainerDetail }>(
+    `/api/v1/nodes/${encodeURIComponent(nodeID)}/containers/${encodeURIComponent(containerID)}`,
+  )
+  return payload.container
 }
 
 // roleLabel names the role of a node the way the administrator reads it.

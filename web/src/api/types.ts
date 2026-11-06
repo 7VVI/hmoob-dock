@@ -78,6 +78,52 @@ export interface NodeListPayload {
   nodes: NodeSummary[]
 }
 
+// PortMapping is one port of a container or of a service.
+export interface PortMapping {
+  private_port: number
+  public_port?: number
+  type?: string
+  ip?: string
+}
+
+// ContainerMount is one mount of a container.
+export interface ContainerMount {
+  type?: string
+  source?: string
+  destination?: string
+  mode?: string
+  read_write?: boolean
+}
+
+// NodeService is one service of a node: a service of a Swarm cluster or a
+// service derived from the containers of a Compose project.
+export interface NodeService {
+  id: string
+  name: string
+  stack: string
+  image: string
+  mode: string
+  desired: number
+  running: number
+  update_state: string
+  containers: number
+  ports: PortMapping[]
+  updated_at: string
+  source: 'swarm' | 'compose'
+}
+
+// NodeNetwork is one network of the Docker engine of a node.
+export interface NodeNetwork {
+  id: string
+  name: string
+  driver: string
+  scope: string
+  internal: boolean
+  attachable: boolean
+  created: string
+  containers: number
+}
+
 // NodeDetailPayload is the answer of the detail of a node.
 export interface NodeDetailPayload {
   node: NodeSummary
