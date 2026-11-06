@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs'
+import https from 'node:https'
 import vue from '@vitejs/plugin-vue'
+import tailwindcss from '@tailwindcss/vite'
 import { defineConfig } from 'vitest/config'
 
 // The address of the control端 of the development environment. It can be
@@ -13,7 +15,7 @@ const certificate = process.env.HMOOB_DEV_CERT
 const certificateKey = process.env.HMOOB_DEV_KEY
 
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [vue(), tailwindcss()],
   server: {
     host: 'localhost',
     port: 5173,
@@ -23,6 +25,15 @@ export default defineConfig({
         ? { cert: readFileSync(certificate), key: readFileSync(certificateKey) }
         : undefined,
     proxy: {
+      // The stream of the events is a response that never ends. A shared
+      // agent that keeps the socket alive holds the pieces back, so this
+      // route gets an agent of its own that never buffers.
+      '/api/v1/events': {
+        target: controlURL,
+        changeOrigin: false,
+        secure: false,
+        agent: new https.Agent({ keepAlive: false, rejectUnauthorized: false }),
+      },
       '/api': {
         target: controlURL,
         // The control端 compares the host of the request with the host of

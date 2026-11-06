@@ -37,7 +37,7 @@ const (
 
 // The length limits of a password in characters.
 const (
-	MinPasswordLength = 12
+	MinPasswordLength = 6
 	MaxPasswordLength = 128
 )
 

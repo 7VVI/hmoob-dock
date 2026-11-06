@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { NAlert, NButton, NInput } from 'naive-ui'
+import AuthLayout from '../components/AuthLayout.vue'
 import { api } from '../api/client'
 import { describeError, type LoginPayload } from '../api/types'
 import { beginSession } from '../auth/session'
@@ -43,27 +45,52 @@ async function submit() {
 </script>
 
 <template>
-  <main class="page page--narrow">
-    <p class="shell__brand">轻量部署平台</p>
-    <h1 class="page__title">登录</h1>
-    <p v-if="notice" class="notice">{{ notice }}</p>
-    <form class="form" novalidate @submit.prevent="submit">
-      <div class="field">
-        <label class="field__label" for="password">管理员密码</label>
-        <input
-          id="password"
-          v-model="password"
-          class="field__input"
+  <AuthLayout>
+    <header class="gate-head">
+      <p class="gate-eyebrow">ADMIN CONSOLE</p>
+      <h1>登录</h1>
+      <p>使用管理员密码进入 Docker 集群监控平台。</p>
+    </header>
+
+    <NAlert v-if="notice" class="mb-4" type="info" :show-icon="false">{{ notice }}</NAlert>
+
+    <form class="gate-form" novalidate @submit.prevent="submit">
+      <div class="gate-field">
+        <label for="admin-password">管理员密码</label>
+        <NInput
+          v-model:value="password"
           type="password"
-          name="password"
+          size="large"
+          show-password-on="click"
+          placeholder="请输入管理员密码"
           autocomplete="current-password"
-          required
+          :input-props="{ id: 'admin-password', name: 'password' }"
+          @keyup.enter="submit"
         />
       </div>
-      <p v-if="error" class="alert" role="alert">{{ error }}</p>
-      <button class="button button--primary" type="submit" :disabled="busy">
+
+      <p v-if="error" role="alert" class="gate-error">{{ error }}</p>
+
+      <NButton
+        class="gate-submit"
+        type="primary"
+        size="large"
+        attr-type="submit"
+        :disabled="busy"
+        :loading="busy"
+        @click="submit"
+      >
         {{ busy ? '登录中…' : '登录' }}
-      </button>
+      </NButton>
     </form>
-  </main>
+
+    <p class="gate-hint">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="5" y="10" width="14" height="10" rx="2.4" />
+        <path d="M8 10V7.6a4 4 0 0 1 8 0V10" />
+      </svg>
+      单管理员账户 · 密码由部署时设置
+    </p>
+  </AuthLayout>
 </template>
+

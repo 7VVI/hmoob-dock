@@ -34,14 +34,31 @@ type nodeSummary struct {
 	ID string `json:"id"`
 	// Hostname is the name of the host of the node.
 	Hostname string `json:"hostname"`
+	// Role is the role of the node inside its Swarm cluster. A node that
+	// belongs to no cluster is standalone.
+	Role string `json:"role"`
 	// Connected reports whether the agent of the node is connected.
 	Connected bool `json:"connected"`
+	// Revoked reports whether the credential of the node was withdrawn.
+	Revoked bool `json:"revoked"`
+	// DockerVersion is the version of the Docker engine, as the node
+	// reported it with its last inventory.
+	DockerVersion string `json:"docker_version"`
+	// OSType is the type of the operating system of the engine.
+	OSType string `json:"os_type"`
+	// OSArch is the architecture of the engine host.
+	OSArch string `json:"os_arch"`
+	// AgentVersion is the version of the agent, as the last connection
+	// reported it.
+	AgentVersion string `json:"agent_version"`
 	// ContainerCount is the number of containers of the last complete
 	// inventory. It is zero while the node sent no inventory.
 	ContainerCount int `json:"container_count"`
 	// LastSeen is the time the control端 received the last heartbeat of
 	// the node. It is nil while the node never sent one.
 	LastSeen *string `json:"last_seen"`
+	// CreatedAt is the time the node was enrolled.
+	CreatedAt string `json:"created_at"`
 }
 
 // registerAgentRoutes mounts the management API of the nodes and the
@@ -54,6 +71,7 @@ type nodeSummary struct {
 func (s *Server) registerAgentRoutes() {
 	s.mux.HandleFunc("/api/v1/agent-tokens", s.handleAgentTokenCreate)
 	s.mux.HandleFunc("/api/v1/nodes", s.handleNodesList)
+	s.mux.HandleFunc("/api/v1/nodes/{id}", s.handleNodeDetail)
 	s.mux.HandleFunc("/api/v1/nodes/{id}/revoke", s.handleNodeRevoke)
 	s.registerContainerRoutes()
 	s.mux.HandleFunc("/api/v1/agent/enroll", s.handleAgentEnroll)
@@ -114,28 +132,107 @@ func (s *Server) handleNodesList(w http.ResponseWriter, r *http.Request) {
 
 	summaries := make([]nodeSummary, 0, len(nodes))
 	for _, node := range nodes {
-		summary := nodeSummary{ID: node.ID, Hostname: node.Hostname}
+		summary := s.summaryOfNode(node, nil)
 		status, live := s.hub.Status(node.ID)
 		if live {
-			summary.Connected = status.Connected
-			// The name of the host is the name the Docker engine reports.
-			// The record holds the name of the enrollment.
-			if status.Identity.Hostname != "" {
-				summary.Hostname = status.Identity.Hostname
-			}
-			// The number of containers comes from the last complete
-			// inventory, so the page never shows a number of a node
-			// that sent no inventory.
-			summary.ContainerCount = status.ContainerCount
-			if !status.LastSeen.IsZero() {
-				lastSeen := formatTimestamp(status.LastSeen)
-				summary.LastSeen = &lastSeen
-			}
+			applyStatus(&summary, status)
 		}
 		summaries = append(summaries, summary)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"nodes": summaries})
+}
+
+// summaryOfNode builds the summary of a node from its enrolled record. The
+// status of a live connection is applied on top by the caller.
+func (s *Server) summaryOfNode(node agentlink.Node, status *agentlink.Status) nodeSummary {
+	summary := nodeSummary{
+		ID:            node.ID,
+		Hostname:      node.Hostname,
+		Role:          node.Role,
+		Revoked:       node.RevokedAt != nil,
+		DockerVersion: node.DockerVersion,
+		OSType:        node.OSType,
+		OSArch:        node.OSArch,
+		AgentVersion:  node.AgentVersion,
+		CreatedAt:     formatTimestamp(node.CreatedAt),
+	}
+	if status != nil {
+		if status.Identity.Hostname != "" {
+			summary.Hostname = status.Identity.Hostname
+		}
+		summary.ContainerCount = status.ContainerCount
+		if !status.LastSeen.IsZero() {
+			lastSeen := formatTimestamp(status.LastSeen)
+			summary.LastSeen = &lastSeen
+		}
+	}
+	return summary
+}
+
+// applyStatus applies the live facts of a connection to a summary. The
+// environment of a connected node prefers the report of its engine over the
+// stored record, because the report is newer.
+func applyStatus(summary *nodeSummary, status agentlink.Status) {
+	summary.Connected = status.Connected
+	if status.Identity.Hostname != "" {
+		summary.Hostname = status.Identity.Hostname
+	}
+	if status.Identity.ServerVersion != "" {
+		summary.DockerVersion = status.Identity.ServerVersion
+	}
+	if status.Identity.OSType != "" {
+		summary.OSType = status.Identity.OSType
+	}
+	if status.Identity.Architecture != "" {
+		summary.OSArch = status.Identity.Architecture
+	}
+	if status.AgentVersion != "" {
+		summary.AgentVersion = status.AgentVersion
+	}
+	summary.ContainerCount = status.ContainerCount
+	if !status.LastSeen.IsZero() {
+		lastSeen := formatTimestamp(status.LastSeen)
+		summary.LastSeen = &lastSeen
+	}
+}
+
+// handleNodeDetail answers with the record of one node and its live state.
+//
+// The environment of an away node is the environment of its last report,
+// and the answer says so: the page never presents an old report as the
+// live state of the machine.
+func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "该端点只接受 GET 请求")
+		return
+	}
+	if _, ok := s.requireSession(w, r); !ok {
+		return
+	}
+
+	nodeID := strings.TrimSpace(r.PathValue("id"))
+	if nodeID == "" {
+		writeError(w, http.StatusBadRequest, "validation_failed", "缺少节点标识")
+		return
+	}
+	node, err := s.enrollment.NodeRecord(r.Context(), nodeID)
+	if err != nil {
+		if errors.Is(err, agentlink.ErrUnknownNode) {
+			writeError(w, http.StatusNotFound, "node_not_found", "未找到该节点")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", "无法读取节点信息")
+		return
+	}
+
+	summary := s.summaryOfNode(node, nil)
+	status, live := s.hub.Status(node.ID)
+	if live {
+		applyStatus(&summary, status)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"node": summary})
 }
 
 // handleNodeRevoke withdraws the credential of a node.

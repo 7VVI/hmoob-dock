@@ -187,7 +187,7 @@ test('reports the reason of a failed request', async () => {
       answer(400, {
         code: 'validation_failed',
         message: '提交的密码不符合要求',
-        fields: { new_password: '密码长度需为 12 到 128 个字符' },
+        fields: { new_password: '密码长度需为 6 到 128 个字符' },
       }),
     ),
   )
@@ -199,7 +199,7 @@ test('reports the reason of a failed request', async () => {
   const error = failure as ApiError
   expect(error.code).toBe('validation_failed')
   expect(error.message).toBe('提交的密码不符合要求')
-  expect(error.fields).toEqual({ new_password: '密码长度需为 12 到 128 个字符' })
+  expect(error.fields).toEqual({ new_password: '密码长度需为 6 到 128 个字符' })
 })
 
 test('reports a control端 that cannot be reached without a technical detail', async () => {

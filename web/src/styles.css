@@ -1,60 +1,55 @@
-/* The design of the control端.
+/* The base of the interface.
  *
- * The page is an instrument, not a dashboard: a single column, hairline
- * rules instead of floating cards, and a monospace face for every number,
- * identifier and timestamp. The one bold element is the state spine, the
- * three pixel bar on the left of a row that carries the state of the object
- * it names. The accent is spent only on the focus ring and the current tab,
- * so a page full of readings stays quiet.
+ * The components come from Naive UI, and the layout and the spacing come
+ * from Tailwind. This file keeps only what both of them expect from the
+ * page: the palette as custom properties, the faces and a few global rules
+ * the library does not own.
  */
 
+@import "tailwindcss";
+
+@theme {
+  --color-page: #f1f6fe;
+  --color-navy: #112a58;
+  --color-navy-soft: #1b3a70;
+  --color-navy-text: #d6e2f4;
+  --color-navy-muted: #8fa6cf;
+  --color-accent: #0b63f6;
+  --color-accent-hover: #0755d8;
+  --color-accent-soft: #e8f1ff;
+  --color-ink: #16264a;
+  --color-ink-soft: #34446b;
+  --color-muted: #7b8aa8;
+  --color-line: #e9eff9;
+  --color-online: #0bbf7a;
+  --color-offline: #f79009;
+  --color-danger: #f04438;
+}
+
 :root {
-  /* The palette. The paper is a cool grey rather than a warm cream: the
-   * product is a machine room, not a magazine. */
-  --color-ink: #0f1416;
-  --color-ink-soft: #2a3236;
-  --color-page: #eff2f1;
+  /* Custom properties kept for the pieces that still read them: the charts
+   * draw on a canvas and cannot read utilities. */
+  --color-ink: #16264a;
+  --color-ink-soft: #34446b;
+  --color-page: #f1f6fe;
   --color-surface: #ffffff;
-  --color-border: #d7dcd9;
-  --color-border-strong: #bfc6c2;
-  --color-text: var(--color-ink);
-  --color-text-muted: #66706c;
-
-  /* The signals. They mark the state of an object and nothing else. */
-  --color-accent: #0b6b63;
-  --color-online: #1c6b4f;
-  --color-offline: #8a6108;
-  --color-danger: #972a2a;
-  --color-danger-soft: #fbf0ef;
-  --color-warn-soft: #fbf5e8;
-
-  /* The rhythm. */
-  --space-1: 0.25rem;
-  --space-2: 0.5rem;
-  --space-3: 0.75rem;
-  --space-4: 1rem;
-  --space-5: 1.5rem;
-  --space-6: 2rem;
-  --space-7: 3rem;
-
-  /* A crisp corner, like a machined panel. */
-  --radius: 2px;
-  --control-height: 2.125rem;
-
-  --width-page: 60rem;
-  --width-form: 26rem;
-  --width-readout: 9rem;
-
-  /* The faces. The monospace carries the data; the sans carries the
-   * sentences. Both fall back to the fonts of the platform, so the page
-   * works on a node without a network. */
-  --font-sans:
-    "IBM Plex Sans", "Segoe UI Variable Text", "Segoe UI", system-ui,
-    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC",
-    sans-serif;
+  --color-border: #e9eff9;
+  --color-border-strong: #d8e3f4;
+  --color-text-muted: #7b8aa8;
+  --color-accent: #0b63f6;
+  --color-accent-soft: #e8f1ff;
+  --color-online: #0bbf7a;
+  --color-danger: #f04438;
+  --color-navy: #112a58;
+  --color-success: #0bbf7a;
+  --color-success-soft: #e7f9f1;
+  --color-warning: #f79009;
+  --color-warning-soft: #fff4e6;
+  --shadow: 0 1px 3px rgb(17 42 88 / 6%);
+  --radius-lg: 12px;
   --font-mono:
-    "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas,
-    "Liberation Mono", monospace;
+    ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono",
+    monospace;
 }
 
 *,
@@ -69,11 +64,18 @@ html {
 
 body {
   margin: 0;
-  background: var(--color-page);
-  color: var(--color-text);
-  font-family: var(--font-sans);
+  /* The page sits on a soft blue wash that deepens toward the top right,
+   * the way the dashboard of the approved design does. */
+  background:
+    radial-gradient(1100px 520px at 88% -8%, #e2eeff 0%, rgb(226 238 255 / 0) 62%),
+    radial-gradient(900px 520px at 18% 108%, #e9f2ff 0%, rgb(233 242 255 / 0) 58%),
+    linear-gradient(180deg, #f4f8ff 0%, #f1f6fe 46%, #f6f9ff 100%);
+  background-attachment: fixed;
+  color: var(--color-ink);
+  font-family: "Segoe UI", system-ui, -apple-system, "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
   font-size: 0.875rem;
-  line-height: 1.55;
+  line-height: 1.6;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -83,8 +85,8 @@ h3,
 h4 {
   margin: 0;
   font-weight: 600;
-  letter-spacing: -0.01em;
-  line-height: 1.25;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
 }
 
 p,
@@ -95,512 +97,19 @@ dd {
   margin: 0;
 }
 
+a {
+  color: var(--color-accent);
+  text-decoration: none;
+}
+
 code,
 kbd,
 pre,
 samp {
   font-family: var(--font-mono);
   font-size: 0.82em;
-}
-
-a {
-  color: inherit;
-}
-
-:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 1px;
-}
-
-/* The layout. */
-
-.page {
-  width: min(100%, var(--width-page));
-  margin: 0 auto;
-  padding: var(--space-6) var(--space-5) var(--space-7);
-  display: grid;
-  gap: var(--space-5);
-  align-content: start;
-}
-
-.page--narrow {
-  width: min(100% - 2rem, var(--width-form));
-  margin: 12vh auto var(--space-7);
-  padding: var(--space-6) var(--space-5);
-  display: grid;
-  align-content: start;
-  gap: var(--space-5);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  background: var(--color-surface);
-}
-
-@media (max-height: 40rem) {
-  .page--narrow {
-    margin-top: var(--space-6);
-  }
-}
-
-.page__title {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-4);
-  font-size: 1.375rem;
-  letter-spacing: -0.015em;
-}
-
-.page__lead {
-  max-width: 42rem;
-  margin-top: calc(var(--space-1) * -1);
-  color: var(--color-text-muted);
-}
-
-/* The shell. */
-
-.shell {
-  min-height: 100dvh;
-}
-
-.shell__header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-5);
-  width: min(100%, var(--width-page));
-  margin: 0 auto;
-  padding: var(--space-4) var(--space-5);
-  border-bottom: 1px solid var(--color-border);
-}
-
-.shell__brand {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: 0.9375rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  white-space: nowrap;
-}
-
-/* The mark repeats the spine of the rows: a panel with the state bar on its
- * left, so the page has one motif. */
-.shell__brand::before {
-  content: "";
-  width: 0.6875rem;
-  height: 0.8125rem;
-  border: 1px solid var(--color-ink);
-  border-left: 3px solid var(--color-ink);
-}
-
-.shell__nav {
-  display: flex;
-  gap: var(--space-4);
-  margin-right: auto;
-}
-
-.shell__link {
-  position: relative;
-  padding: var(--space-1) 0;
-  color: var(--color-text-muted);
-  font-size: 0.875rem;
-  text-decoration: none;
-  transition: color 120ms ease;
-}
-
-.shell__link::after {
-  content: "";
-  position: absolute;
-  inset: auto 0 -1px;
-  height: 2px;
-  background: transparent;
-  transition: background-color 120ms ease;
-}
-
-.shell__link:hover {
-  color: var(--color-ink);
-}
-
-.shell__link.router-link-active {
-  color: var(--color-ink);
-  font-weight: 500;
-}
-
-.shell__link.router-link-active::after {
-  background: var(--color-accent);
-}
-
-.shell__main {
-  display: grid;
-  gap: var(--space-5);
-  align-content: start;
-  width: min(100%, var(--width-page));
-  margin: 0 auto;
-  padding: var(--space-6) var(--space-5) var(--space-7);
-}
-
-/* The panels. A rule, not a shadow: the page reads like one sheet. */
-
-.panel {
-  display: grid;
-  gap: var(--space-4);
-  padding: var(--space-5);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  background: var(--color-surface);
-}
-
-.panel__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  padding-bottom: var(--space-3);
-  border-bottom: 1px solid var(--color-border);
-}
-
-.panel__title {
-  font-size: 0.9375rem;
-}
-
-.panel__actions {
-  display: flex;
-  gap: var(--space-2);
-}
-
-/* The forms. */
-
-.form {
-  display: grid;
-  gap: var(--space-4);
-}
-
-.form--inline {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: end;
-  gap: var(--space-3);
-}
-
-.field {
-  display: grid;
-  gap: var(--space-1);
-  align-content: start;
-}
-
-.field__label {
-  font-size: 0.75rem;
-  font-weight: 500;
-  letter-spacing: 0.02em;
-  color: var(--color-text-muted);
-}
-
-.field__input {
-  height: var(--control-height);
-  padding: 0 var(--space-3);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius);
-  background: var(--color-surface);
-  color: var(--color-text);
-  font: inherit;
-  transition:
-    border-color 120ms ease,
-    box-shadow 120ms ease;
-}
-
-textarea.field__input,
-select.field__input {
-  height: auto;
-  min-height: var(--control-height);
-  padding: var(--space-2) var(--space-3);
-}
-
-select.field__input {
-  padding-right: var(--space-2);
-}
-
-.field__input:hover {
-  border-color: var(--color-ink-soft);
-}
-
-.field__input:focus-visible {
-  outline: none;
-  border-color: var(--color-accent);
-  box-shadow: 0 0 0 3px rgb(11 107 99 / 12%);
-}
-
-.field__input:disabled {
-  background: var(--color-page);
-  color: var(--color-text-muted);
-}
-
-.field__hint {
-  color: var(--color-text-muted);
-  font-size: 0.78125rem;
-}
-
-.field__error {
-  color: var(--color-danger);
-  font-size: 0.78125rem;
-}
-
-.field__check {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: 0.8125rem;
-}
-
-/* The buttons. The primary action is the ink of the page, not a colour:
- * the accent belongs to the focus and the current tab. */
-
-.button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: var(--control-height);
-  padding: 0 var(--space-3);
-  border: 1px solid transparent;
-  border-radius: var(--radius);
-  background: transparent;
-  color: var(--color-ink);
-  font: inherit;
-  font-size: 0.8125rem;
-  font-weight: 500;
-  cursor: pointer;
-  transition:
-    background-color 120ms ease,
-    border-color 120ms ease,
-    color 120ms ease;
-}
-
-.button:disabled {
-  cursor: not-allowed;
-  opacity: 0.45;
-}
-
-.button--primary {
-  background: var(--color-ink);
-  color: #fff;
-}
-
-.button--primary:hover:not(:disabled) {
-  background: #22302f;
-}
-
-.button--quiet {
-  border-color: var(--color-border-strong);
-  color: var(--color-ink-soft);
-}
-
-.button--quiet:hover:not(:disabled) {
-  border-color: var(--color-ink-soft);
-  background: var(--color-page);
-}
-
-.button--danger {
-  border-color: var(--color-danger);
-  color: var(--color-danger);
-}
-
-.button--danger:hover:not(:disabled) {
-  background: var(--color-danger-soft);
-}
-
-/* The text. */
-
-.muted {
-  color: var(--color-text-muted);
-}
-
-.empty {
-  padding: var(--space-5) 0;
-  color: var(--color-text-muted);
-}
-
-.alert {
-  display: grid;
-  gap: var(--space-2);
-  padding: var(--space-3) var(--space-4);
-  border: 1px solid var(--color-danger);
-  border-left-width: 3px;
-  border-radius: var(--radius);
-  background: var(--color-danger-soft);
-  color: var(--color-danger);
-}
-
-.alert__list {
-  padding-left: var(--space-4);
-}
-
-.notice {
-  padding: var(--space-3) var(--space-4);
-  border: 1px solid var(--color-border);
-  border-left: 3px solid var(--color-offline);
-  border-radius: var(--radius);
-  background: var(--color-warn-soft);
-}
-
-.notice__actions {
-  display: flex;
-  gap: var(--space-2);
-  margin-top: var(--space-2);
-}
-
-/* The tables. The first cell carries the spine, the readings line up in the
- * monospace face with tabular figures. */
-
-.table-scroll {
-  overflow-x: auto;
-}
-
-.nodes {
-  width: 100%;
-  border-collapse: collapse;
-  text-align: left;
-}
-
-.nodes thead th {
-  padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--color-border-strong);
-  color: var(--color-text-muted);
-  font-size: 0.6875rem;
-  font-weight: 500;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-
-.nodes tbody th,
-.nodes tbody td {
-  padding: var(--space-3);
-  border-bottom: 1px solid var(--color-border);
-  vertical-align: middle;
-}
-
-.nodes tbody tr:last-child > * {
-  border-bottom: none;
-}
-
-.nodes tbody tr:hover > * {
-  background: #fafbfa;
-}
-
-.nodes__host {
-  font-weight: 500;
-  font-family: var(--font-mono);
-  font-size: 0.8125rem;
-  letter-spacing: -0.01em;
-  white-space: nowrap;
-}
-
-.nodes__count,
-.nodes__seen {
-  font-family: var(--font-mono);
-  font-size: 0.78125rem;
-  font-variant-numeric: tabular-nums;
-  color: var(--color-text-muted);
-  white-space: nowrap;
-}
-
-.nodes__count {
-  text-align: right;
-}
-
-.nodes__actions {
-  text-align: right;
-  white-space: nowrap;
-}
-
-/* The spine: three pixels that name the state of the row without a word. */
-
-.nodes tbody tr[data-state] > :first-child {
-  box-shadow: inset 3px 0 0 var(--color-border-strong);
-}
-
-.nodes tbody tr[data-state="online"] > :first-child {
-  box-shadow: inset 3px 0 0 var(--color-online);
-}
-
-.nodes tbody tr[data-state="offline"] > :first-child {
-  box-shadow: inset 3px 0 0 var(--color-offline);
-}
-
-.nodes tbody tr[data-state="running"] > :first-child {
-  box-shadow: inset 3px 0 0 var(--color-online);
-}
-
-.nodes tbody tr[data-state="stopped"] > :first-child {
-  box-shadow: inset 3px 0 0 var(--color-border-strong);
-}
-
-.nodes tbody tr[data-state="failed"] > :first-child {
-  box-shadow: inset 3px 0 0 var(--color-danger);
-}
-
-/* The state of an object. The dot is the signal, the word names it. */
-
-.state {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: 0.8125rem;
-  white-space: nowrap;
-}
-
-.state::before {
-  content: "";
-  width: 0.4375rem;
-  height: 0.4375rem;
-  border-radius: 50%;
-  background: currentcolor;
-}
-
-.state--online {
-  color: var(--color-online);
-}
-
-.state--offline {
-  color: var(--color-offline);
-}
-
-/* The token and the command of the enrollment. */
-
-.token {
-  display: grid;
-  gap: var(--space-3);
-  justify-items: start;
-}
-
-.token__hint {
-  font-size: 0.8125rem;
-}
-
-.token__value code,
-.token__command code {
-  display: block;
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--color-border);
-  border-left: 3px solid var(--color-border-strong);
-  border-radius: var(--radius);
-  background: var(--color-page);
-  font-size: 0.78125rem;
   overflow-wrap: anywhere;
-}
-
-.steps {
-  display: grid;
-  gap: var(--space-1);
-  padding-left: var(--space-5);
-  color: var(--color-text-muted);
-  font-size: 0.8125rem;
-}
-
-.observations {
-  display: grid;
-  gap: var(--space-2);
-  padding-left: var(--space-5);
-  color: var(--color-text-muted);
-  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
 }
 
 /* The text that only a screen reader reads. */
@@ -615,64 +124,122 @@ select.field__input {
   white-space: nowrap;
 }
 
-/* A tab panel arrives instead of appearing, so the page does not jump. */
-@keyframes panel-in {
-  from {
-    opacity: 0;
-    transform: translateY(2px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
+::selection {
+  background: rgb(11 99 246 / 18%);
 }
 
-.panel {
-  animation: panel-in 140ms ease-out;
+/* A slim scrollbar that belongs to the light surfaces. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd8ea transparent;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-  }
-
-  .panel {
-    animation: none;
-  }
+/* The head of a page of the management: the title of the section and the
+ * sentence that explains what the page holds. */
+.page-title {
+  color: #132a56;
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
 }
 
-/* A narrow screen keeps the columns readable instead of squeezing them. */
-@media (max-width: 40rem) {
-  .page,
-  .shell__main {
-    padding: var(--space-5) var(--space-4);
-  }
+.page-subtitle {
+  margin: 6px 0 24px;
+  color: #7b8aa8;
+  font-size: 13px;
+  line-height: 1.7;
+}
 
-  .shell__header {
-    flex-wrap: wrap;
-    gap: var(--space-3);
-    padding: var(--space-3) var(--space-4);
-  }
+/* The form of the gate pages: the login and the initialization share the
+ * typography of the fields and of their hints. */
+.gate-head {
+  margin-bottom: 28px;
+}
 
-  .shell__nav {
-    order: 3;
-    width: 100%;
-    margin-right: 0;
-    gap: var(--space-4);
-    overflow-x: auto;
-  }
+.gate-eyebrow {
+  color: #2f6fe4;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+}
 
-  .panel {
-    padding: var(--space-4);
-  }
+.gate-head h1 {
+  margin-top: 8px;
+  color: #132a56;
+  font-size: 32px;
+  font-weight: 800;
+  letter-spacing: -0.025em;
+  line-height: 1.2;
+}
 
-  .nodes thead th,
-  .nodes tbody th,
-  .nodes tbody td {
-    padding: var(--space-2) var(--space-3);
-  }
+.gate-head > p:last-child {
+  margin-top: 10px;
+  color: #7b8aa8;
+  font-size: 14px;
+}
+
+.gate-form {
+  display: grid;
+  gap: 18px;
+  margin-top: 6px;
+}
+
+.gate-field {
+  display: grid;
+  gap: 8px;
+}
+
+.gate-field label {
+  color: #34446b;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.gate-field-hint {
+  color: #94a3bd;
+  font-size: 11.5px;
+  line-height: 1.7;
+}
+
+.gate-field-error {
+  color: #d92d20;
+  font-size: 11.5px;
+  line-height: 1.7;
+}
+
+.gate-error {
+  padding: 10px 13px;
+  border-radius: 10px;
+  background: #fef0ef;
+  color: #d92d20;
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.gate-submit {
+  width: 100%;
+  height: 44px;
+  font-size: 14.5px;
+  font-weight: 600;
+}
+
+.gate-hint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin-top: 28px;
+  color: #94a3bd;
+  font-size: 12px;
+}
+
+.gate-hint svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }

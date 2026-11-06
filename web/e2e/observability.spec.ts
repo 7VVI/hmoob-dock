@@ -167,7 +167,7 @@ test('lists the alerts and acknowledges one', async ({ page }) => {
   await installApi(page, state)
   await logIn(page)
 
-  await page.getByRole('link', { name: '告警', exact: true }).click()
+  await page.getByRole('link', { name: '告警管理' }).click()
   await expect(page).toHaveURL(/\/alerts$/)
 
   // The open event and its summary are visible.

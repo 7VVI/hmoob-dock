@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { NAlert, NButton, NCard, NCheckbox } from 'naive-ui'
 import AppShell from '../components/AppShell.vue'
 import AlertRuleForm from '../components/AlertRuleForm.vue'
 import {
@@ -289,327 +290,228 @@ async function sendTest(): Promise<void> {
 }
 
 onMounted(load)
+
+// The face of the inputs of the form of the target.
+const inputClass =
+  'h-[38px] w-full rounded-lg border border-[#d3dcec] bg-white px-3 text-sm outline-none focus:border-[#025ffb]'
 </script>
 
 <template>
   <AppShell>
-    <h1 class="page__title">告警</h1>
+    <h1 class="page-title">告警管理</h1>
+    <p class="page-subtitle">查看异常事件与告警规则。确认只表示已查看，事件保留到恢复为止。</p>
 
-    <p v-if="loading" class="muted">正在读取告警…</p>
+    <p v-if="loading" class="text-[#667085]">正在读取告警…</p>
 
-    <div v-else-if="error" class="alert" role="alert">
+    <NAlert v-else-if="error" type="error" :show-icon="false">
       <p>{{ error }}</p>
-      <button type="button" class="button button--quiet" @click="load">重试</button>
-    </div>
+      <NButton quaternary type="primary" class="mt-2" @click="load">重试</NButton>
+    </NAlert>
 
     <template v-else>
-      <p v-if="notice" class="notice">{{ notice }}</p>
+      <NAlert v-if="notice" type="success" :show-icon="false" class="mb-6">{{ notice }}</NAlert>
 
-      <section class="panel">
-        <div class="panel__head">
-          <h2 class="panel__title">异常</h2>
-          <button type="button" class="button button--quiet" @click="load">刷新</button>
-        </div>
+      <section class="mb-6">
+        <NCard title="异常">
+          <template #header-extra>
+            <NButton quaternary type="primary" @click="load">刷新</NButton>
+          </template>
 
-        <nav class="filters" aria-label="异常列表">
-          <button
-            v-for="item in filters"
-            :key="item.key"
-            type="button"
-            class="filters__item"
-            :class="{ 'filters__item--active': filter === item.key }"
-            :aria-pressed="filter === item.key"
-            @click="filter = item.key"
-          >
-            {{ item.label }}（{{ countOf(item.key) }}）
-          </button>
-        </nav>
-
-        <p v-if="shownEvents.length === 0" class="empty">这里没有异常。</p>
-        <ul v-else class="events">
-          <li v-for="event in shownEvents" :key="event.id" class="events__row">
-            <div class="events__main">
-              <p class="events__summary">{{ event.summary }}</p>
-              <p class="muted">
-                对象 <code>{{ event.object_id }}</code> · 规则 <code>{{ event.rule_id }}</code> ·
-                开始于 {{ formatTimestamp(event.started_at) }}
-                <template v-if="event.resolved_at">
-                  · 恢复于 {{ formatTimestamp(event.resolved_at) }}
-                </template>
-              </p>
-              <p v-if="event.acknowledged_at" class="muted">
-                已确认于 {{ formatTimestamp(event.acknowledged_at) }}
-              </p>
-            </div>
-            <div class="events__actions">
-              <button
-                v-if="!event.acknowledged_at"
-                type="button"
-                class="button button--quiet"
-                :disabled="acknowledging !== ''"
-                @click="acknowledge(event)"
-              >
-                确认
-              </button>
-              <span v-else class="muted">已确认</span>
-            </div>
-          </li>
-        </ul>
-
-        <p v-if="acknowledgeError" class="alert" role="alert">{{ acknowledgeError }}</p>
-      </section>
-
-      <section class="panel">
-        <div class="panel__head">
-          <h2 class="panel__title">告警规则</h2>
-          <button type="button" class="button button--quiet" @click="openForm(null)">
-            新建规则
-          </button>
-        </div>
-
-        <p v-if="rules.length === 0" class="empty">还没有告警规则。</p>
-        <ul v-else class="rules">
-          <li v-for="rule in rules" :key="rule.id" class="rules__row">
-            <div class="rules__main">
-              <p class="rules__kind">{{ kindLabels[rule.kind] ?? rule.kind }}</p>
-              <p class="muted">
-                对象 <code>{{ rule.scope_id }}</code>
-                <template v-if="rule.kind === 'resource'">
-                  · 指标 {{ rule.metric }} · 阈值 {{ rule.threshold }} · 持续
-                  {{ rule.for_seconds }} 秒
-                </template>
-                <template v-else> · 持续 {{ rule.for_seconds }} 秒</template>
-                <template v-if="!rule.enabled"> · 已停用</template>
-              </p>
-            </div>
-            <div class="rules__actions">
-              <button type="button" class="button button--quiet" @click="openForm(rule)">编辑</button>
-              <template v-if="removing !== rule.id">
-                <button type="button" class="button button--quiet" @click="askForRemove(rule)">
-                  删除
-                </button>
-              </template>
-              <template v-else>
-                <span class="muted">确认删除？</span>
-                <button type="button" class="button button--danger" @click="remove(rule)">确认</button>
-                <button type="button" class="button button--quiet" @click="cancelRemove">取消</button>
-              </template>
-            </div>
-          </li>
-        </ul>
-
-        <p v-if="removeError" class="alert" role="alert">{{ removeError }}</p>
-
-        <template v-if="formOpen">
-          <h3 class="panel__title">{{ editing ? '编辑规则' : '新建规则' }}</h3>
-          <AlertRuleForm
-            :rule="editing"
-            :errors="ruleErrors"
-            :busy="ruleBusy"
-            @save="saveRule"
-            @cancel="cancelForm"
-          />
-          <p v-if="ruleError" class="alert" role="alert">{{ ruleError }}</p>
-        </template>
-      </section>
-
-      <section class="panel">
-        <h2 class="panel__title">通知</h2>
-
-        <dl class="facts">
-          <div class="facts__row">
-            <dt>通知地址</dt>
-            <dd>
-              <template v-if="webhook?.configured">
-                <code>{{ webhook.url_masked }}</code>
-                <span class="muted"> · 地址只显示脱敏后的形式</span>
-              </template>
-              <template v-else>还没有配置通知地址。</template>
-            </dd>
-          </div>
-          <div class="facts__row">
-            <dt>允许的内网</dt>
-            <dd>
-              <code v-if="webhook && webhook.allowed_private_cidrs.length > 0">
-                {{ webhook.allowed_private_cidrs.join(', ') }}
-              </code>
-              <template v-else>没有允许的内网地址。</template>
-            </dd>
-          </div>
-          <div class="facts__row">
-            <dt>通知结果</dt>
-            <dd v-if="notifications">
-              等待中 {{ notifications.pending }} · 已送达 {{ notifications.delivered }} · 失败
-              {{ notifications.failed }} · 已跳过 {{ notifications.skipped }}
-              <span v-if="notifications.last_delivered_at" class="muted">
-                · 最近送达于 {{ formatTimestamp(notifications.last_delivered_at) }}
-              </span>
-            </dd>
-            <dd v-else>—</dd>
-          </div>
-        </dl>
-
-        <form class="form" novalidate @submit.prevent="saveTarget">
-          <div class="field">
-            <label class="field__label" for="webhook-url">新的通知地址</label>
-            <input
-              id="webhook-url"
-              v-model="url"
-              class="field__input"
-              type="url"
-              name="webhook-url"
-              autocomplete="off"
-              placeholder="留空表示保持现在的地址"
-            />
-            <p class="field__hint">地址里可以带凭据，平台只以脱敏的形式显示它。</p>
-          </div>
-
-          <div class="field">
-            <label class="field__label" for="webhook-cidrs">新增允许的内网网段</label>
-            <input
-              id="webhook-cidrs"
-              v-model="cidrs"
-              class="field__input"
-              type="text"
-              name="webhook-cidrs"
-              autocomplete="off"
-              placeholder="例如 10.0.0.0/8"
-            />
-            <p class="field__hint">
-              允许内网地址后，通知会发送到这些网段里的地址。只填写你信任的网段，平台不会把通知转发到其它地方。
-            </p>
-          </div>
-
-          <div class="field">
-            <label class="field__check">
-              <input v-model="enabled" type="checkbox" name="webhook-enabled" />
-              <span>启用通知</span>
-            </label>
-          </div>
-
-          <p v-if="webhookError" class="alert" role="alert">{{ webhookError }}</p>
-          <p v-if="testNotice" class="notice">{{ testNotice }}</p>
-
-          <div class="notice__actions">
-            <button class="button button--primary" type="submit" :disabled="webhookBusy">
-              {{ webhookBusy ? '保存中…' : '保存通知设置' }}
-            </button>
+          <nav class="mb-4 flex flex-wrap gap-4 border-b border-[#e6ecf7]" aria-label="异常列表">
             <button
+              v-for="item in filters"
+              :key="item.key"
               type="button"
-              class="button button--quiet"
-              :disabled="testBusy || !webhook?.configured"
-              @click="sendTest"
+              class="border-0 border-b-2 border-transparent bg-transparent px-1 pb-2 text-sm text-[#667085]"
+              :class="filter === item.key ? 'border-[#025ffb] font-semibold text-[#101828]' : 'cursor-pointer'"
+              :aria-pressed="filter === item.key"
+              @click="filter = item.key"
             >
-              {{ testBusy ? '发送中…' : '发送测试通知' }}
+              {{ item.label }}（{{ countOf(item.key) }}）
             </button>
-          </div>
-        </form>
+          </nav>
+
+          <p v-if="shownEvents.length === 0" class="py-6 text-center text-[#667085]">这里没有异常。</p>
+          <ul v-else class="grid gap-3">
+            <li
+              v-for="event in shownEvents"
+              :key="event.id"
+              class="flex flex-wrap items-start justify-between gap-3 border-b border-[#e6ecf7] py-3 last:border-b-0"
+            >
+              <div class="grid min-w-0 flex-1 basis-72 gap-1">
+                <p class="font-semibold">{{ event.summary }}</p>
+                <p class="text-xs text-[#667085]">
+                  对象 <code>{{ event.object_id }}</code> · 规则 <code>{{ event.rule_id }}</code> ·
+                  开始于 {{ formatTimestamp(event.started_at) }}
+                  <template v-if="event.resolved_at">
+                    · 恢复于 {{ formatTimestamp(event.resolved_at) }}
+                  </template>
+                </p>
+                <p v-if="event.acknowledged_at" class="text-xs text-[#667085]">
+                  已确认于 {{ formatTimestamp(event.acknowledged_at) }}
+                </p>
+              </div>
+              <div class="whitespace-nowrap">
+                <NButton
+                  v-if="!event.acknowledged_at"
+                  quaternary
+                  type="primary"
+                  size="small"
+                  :disabled="acknowledging !== ''"
+                  @click="acknowledge(event)"
+                >
+                  确认
+                </NButton>
+                <span v-else class="text-xs text-[#667085]">已确认</span>
+              </div>
+            </li>
+          </ul>
+
+          <NAlert v-if="acknowledgeError" type="error" :show-icon="false" class="mt-4">{{ acknowledgeError }}</NAlert>
+        </NCard>
+      </section>
+
+      <section class="mb-6">
+        <NCard title="告警规则">
+          <template #header-extra>
+            <NButton quaternary type="primary" @click="openForm(null)">新建规则</NButton>
+          </template>
+
+          <p v-if="rules.length === 0" class="py-6 text-center text-[#667085]">还没有告警规则。</p>
+          <ul v-else class="grid gap-3">
+            <li
+              v-for="rule in rules"
+              :key="rule.id"
+              class="flex flex-wrap items-start justify-between gap-3 border-b border-[#e6ecf7] py-3 last:border-b-0"
+            >
+              <div class="grid min-w-0 flex-1 basis-72 gap-1">
+                <p class="font-semibold">{{ kindLabels[rule.kind] ?? rule.kind }}</p>
+                <p class="text-xs text-[#667085]">
+                  对象 <code>{{ rule.scope_id }}</code>
+                  <template v-if="rule.kind === 'resource'">
+                    · 指标 {{ rule.metric }} · 阈值 {{ rule.threshold }} · 持续
+                    {{ rule.for_seconds }} 秒
+                  </template>
+                  <template v-else> · 持续 {{ rule.for_seconds }} 秒</template>
+                  <template v-if="!rule.enabled"> · 已停用</template>
+                </p>
+              </div>
+              <div class="flex items-center gap-2 whitespace-nowrap">
+                <NButton quaternary type="primary" size="small" @click="openForm(rule)">编辑</NButton>
+                <template v-if="removing !== rule.id">
+                  <NButton quaternary type="error" size="small" @click="askForRemove(rule)">删除</NButton>
+                </template>
+                <template v-else>
+                  <span class="text-xs text-[#667085]">确认删除？</span>
+                  <NButton size="small" type="error" @click="remove(rule)">确认</NButton>
+                  <NButton size="small" quaternary @click="cancelRemove">取消</NButton>
+                </template>
+              </div>
+            </li>
+          </ul>
+
+          <NAlert v-if="removeError" type="error" :show-icon="false" class="mt-4">{{ removeError }}</NAlert>
+
+          <template v-if="formOpen">
+            <h3 class="mb-3 mt-6 text-base font-semibold">{{ editing ? '编辑规则' : '新建规则' }}</h3>
+            <AlertRuleForm
+              :rule="editing"
+              :errors="ruleErrors"
+              :busy="ruleBusy"
+              @save="saveRule"
+              @cancel="cancelForm"
+            />
+            <NAlert v-if="ruleError" type="error" :show-icon="false" class="mt-4">{{ ruleError }}</NAlert>
+          </template>
+        </NCard>
+      </section>
+
+      <section>
+        <NCard title="通知">
+          <dl class="mb-5 grid gap-3">
+            <div class="grid grid-cols-[8rem_1fr] items-baseline gap-3">
+              <dt class="text-[13px] text-[#667085]">通知地址</dt>
+              <dd class="break-all">
+                <template v-if="webhook?.configured">
+                  <code>{{ webhook.url_masked }}</code>
+                  <span class="text-xs text-[#667085]"> · 地址只显示脱敏后的形式</span>
+                </template>
+                <template v-else>还没有配置通知地址。</template>
+              </dd>
+            </div>
+            <div class="grid grid-cols-[8rem_1fr] items-baseline gap-3">
+              <dt class="text-[13px] text-[#667085]">允许的内网</dt>
+              <dd class="break-all">
+                <code v-if="webhook && webhook.allowed_private_cidrs.length > 0">
+                  {{ webhook.allowed_private_cidrs.join(', ') }}
+                </code>
+                <template v-else>没有允许的内网地址。</template>
+              </dd>
+            </div>
+            <div class="grid grid-cols-[8rem_1fr] items-baseline gap-3">
+              <dt class="text-[13px] text-[#667085]">通知结果</dt>
+              <dd v-if="notifications">
+                等待中 {{ notifications.pending }} · 已送达 {{ notifications.delivered }} · 失败
+                {{ notifications.failed }} · 已跳过 {{ notifications.skipped }}
+                <span v-if="notifications.last_delivered_at" class="text-xs text-[#667085]">
+                  · 最近送达于 {{ formatTimestamp(notifications.last_delivered_at) }}
+                </span>
+              </dd>
+              <dd v-else>—</dd>
+            </div>
+          </dl>
+
+          <form class="grid max-w-2xl gap-4" novalidate @submit.prevent="saveTarget">
+            <div class="grid gap-1">
+              <label class="text-xs font-medium text-[#344054]" for="webhook-url">新的通知地址</label>
+              <input
+                id="webhook-url"
+                v-model="url"
+                :class="inputClass"
+                type="url"
+                name="webhook-url"
+                autocomplete="off"
+                placeholder="留空表示保持现在的地址"
+              />
+              <p class="text-xs text-[#667085]">地址里可以带凭据，平台只以脱敏的形式显示它。</p>
+            </div>
+
+            <div class="grid gap-1">
+              <label class="text-xs font-medium text-[#344054]" for="webhook-cidrs">新增允许的内网网段</label>
+              <input
+                id="webhook-cidrs"
+                v-model="cidrs"
+                :class="inputClass"
+                type="text"
+                name="webhook-cidrs"
+                autocomplete="off"
+                placeholder="例如 10.0.0.0/8"
+              />
+              <p class="text-xs text-[#667085]">
+                允许内网地址后，通知会发送到这些网段里的地址。只填写你信任的网段，平台不会把通知转发到其它地方。
+              </p>
+            </div>
+
+            <NCheckbox v-model:checked="enabled">启用通知</NCheckbox>
+
+            <NAlert v-if="webhookError" type="error" :show-icon="false">{{ webhookError }}</NAlert>
+            <NAlert v-if="testNotice" type="success" :show-icon="false">{{ testNotice }}</NAlert>
+
+            <div class="flex flex-wrap gap-3">
+              <NButton type="primary" attr-type="submit" :loading="webhookBusy">保存通知设置</NButton>
+              <NButton
+                quaternary
+                type="primary"
+                :disabled="testBusy || !webhook?.configured"
+                :loading="testBusy"
+                @click="sendTest"
+              >
+                发送测试通知
+              </NButton>
+            </div>
+          </form>
+        </NCard>
       </section>
     </template>
   </AppShell>
 </template>
-
-<style scoped>
-.filters {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-4);
-  margin-bottom: var(--space-3);
-  border-bottom: 1px solid var(--color-border);
-}
-
-.filters__item {
-  font: inherit;
-  background: transparent;
-  border: none;
-  border-bottom: 2px solid transparent;
-  padding: var(--space-2) 0;
-  color: var(--color-text-muted);
-  cursor: pointer;
-}
-
-.filters__item--active {
-  color: var(--color-text);
-  border-bottom-color: var(--color-accent);
-  font-weight: 600;
-}
-
-.events,
-.rules {
-  display: grid;
-  gap: var(--space-3);
-  padding: 0;
-  margin: 0;
-  list-style: none;
-}
-
-.events__row,
-.rules__row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-3);
-  padding: var(--space-3) 0;
-  border-bottom: 1px solid var(--color-border);
-}
-
-.events__main,
-.rules__main {
-  flex: 1 1 18rem;
-  display: grid;
-  gap: var(--space-1);
-}
-
-.events__summary {
-  font-weight: 600;
-}
-
-.rules__kind {
-  font-weight: 600;
-}
-
-.events__actions,
-.rules__actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  white-space: nowrap;
-}
-
-.facts {
-  display: grid;
-  gap: var(--space-3);
-  margin: 0 0 var(--space-4);
-}
-
-.facts__row {
-  display: grid;
-  grid-template-columns: 8rem 1fr;
-  gap: var(--space-3);
-  align-items: baseline;
-}
-
-.facts__row dt {
-  color: var(--color-text-muted);
-  font-size: 0.9rem;
-}
-
-.facts__row dd {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.notice__actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-3);
-}
-
-.field__check {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: 0.9rem;
-}
-</style>

@@ -97,6 +97,10 @@ type Status struct {
 	HasInventory bool
 	// Identity is the identity of the node.
 	Identity protocol.NodeIdentity
+	// AgentVersion is the version of the agent the hello of the
+	// connection reported. It is empty while the agent did not report
+	// one.
+	AgentVersion string
 }
 
 // subscriber is a callback that receives the frames of the agents.
@@ -132,6 +136,13 @@ type Hub struct {
 	// onDisconnect holds the callbacks that run when the live connection of
 	// a node ends.
 	onDisconnect []func(string)
+
+	// pendingMu guards the requests that wait for the result of a node.
+	// It is a mutex of its own, so a request that starts or ends never
+	// holds the fan-out of the frames.
+	pendingMu sync.Mutex
+	// pending holds the requests by the ID the node carries back.
+	pending map[string]*pendingRequest
 }
 
 // NewHub builds the hub of the agent connections.
@@ -141,6 +152,7 @@ func NewHub(db *sql.DB) *Hub {
 		now:         time.Now,
 		connections: make(map[string]*connection),
 		subscribers: make(map[string][]subscriber),
+		pending:     make(map[string]*pendingRequest),
 	}
 }
 
@@ -363,7 +375,7 @@ func (h *Hub) connection(nodeID string) (*connection, bool) {
 func (h *Hub) Serve(ctx context.Context, nodeID string, conn *websocket.Conn) error {
 	conn.SetReadLimit(int64(protocol.MaxMessageSize))
 
-	identity, err := h.readHello(ctx, conn)
+	identity, agentVersion, err := h.readHello(ctx, conn)
 	if err != nil {
 		_ = conn.Close(websocket.StatusPolicyViolation, "the hello of the agent is missing")
 		return err
@@ -391,7 +403,7 @@ func (h *Hub) Serve(ctx context.Context, nodeID string, conn *websocket.Conn) er
 	identity.SwarmID = record.SwarmID
 	identity.Role = record.Role
 
-	node := newConnection(h, nodeID, conn, identity, record)
+	node := newConnection(h, nodeID, conn, identity, record, agentVersion)
 	// The hello proves that the agent is alive.
 	node.markSeen()
 	h.register(node)
@@ -426,33 +438,33 @@ func sameRoleAndCluster(identity protocol.NodeIdentity, record Node) bool {
 
 // readHello reads the hello of the agent and returns the identity it
 // names.
-func (h *Hub) readHello(ctx context.Context, conn *websocket.Conn) (protocol.NodeIdentity, error) {
+func (h *Hub) readHello(ctx context.Context, conn *websocket.Conn) (protocol.NodeIdentity, string, error) {
 	handshakeCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
 
 	_, data, err := conn.Read(handshakeCtx)
 	if err != nil {
-		return protocol.NodeIdentity{}, fmt.Errorf("%w: %v", ErrNoHandshake, err)
+		return protocol.NodeIdentity{}, "", fmt.Errorf("%w: %v", ErrNoHandshake, err)
 	}
 	envelope, err := protocol.Decode(data)
 	if err != nil {
-		return protocol.NodeIdentity{}, err
+		return protocol.NodeIdentity{}, "", err
 	}
 	if err := envelope.Validate(); err != nil {
-		return protocol.NodeIdentity{}, err
+		return protocol.NodeIdentity{}, "", err
 	}
 	if envelope.Type != protocol.TypeHello {
-		return protocol.NodeIdentity{}, fmt.Errorf("%w: the first message is a %s", ErrNoHandshake, envelope.Type)
+		return protocol.NodeIdentity{}, "", fmt.Errorf("%w: the first message is a %s", ErrNoHandshake, envelope.Type)
 	}
 
 	var hello protocol.Hello
 	if err := json.Unmarshal(envelope.Payload, &hello); err != nil {
-		return protocol.NodeIdentity{}, fmt.Errorf("agentlink: decode the hello: %w", err)
+		return protocol.NodeIdentity{}, "", fmt.Errorf("agentlink: decode the hello: %w", err)
 	}
 	if strings.TrimSpace(hello.Identity.EngineID) == "" {
-		return protocol.NodeIdentity{}, fmt.Errorf("%w: the hello names no engine", ErrIdentityMismatch)
+		return protocol.NodeIdentity{}, "", fmt.Errorf("%w: the hello names no engine", ErrIdentityMismatch)
 	}
-	return hello.Identity, nil
+	return hello.Identity, strings.TrimSpace(hello.AgentVersion), nil
 }
 
 // record reads the enrolled record of a node.
@@ -508,6 +520,14 @@ func (h *Hub) unregister(node *connection) bool {
 
 // notify hands a frame of an agent to the subscribers of its type.
 func (h *Hub) notify(ctx context.Context, nodeID string, envelope protocol.Envelope) {
+	// The result of a container operation belongs to the request that
+	// waits for it. It reaches no subscriber, so the resolution runs
+	// before the fan-out and the frame ends here.
+	if envelope.Type == protocol.TypeContainerResult {
+		h.resolvePending(nodeID, envelope)
+		return
+	}
+
 	h.mu.RLock()
 	subscribers := make([]subscriber, len(h.subscribers[envelope.Type]))
 	copy(subscribers, h.subscribers[envelope.Type])
@@ -555,6 +575,8 @@ type connection struct {
 	// identity is the identity the agent named in its hello. Its role and
 	// its cluster are the ones of the enrolled record.
 	identity protocol.NodeIdentity
+	// agentVersion is the version of the agent the hello reported.
+	agentVersion string
 	// lastSeen is the time the control端 received the last sign of life
 	// of the agent.
 	lastSeen time.Time
@@ -582,7 +604,7 @@ type pendingSnapshot struct {
 // The record is the enrolled record of the node. It decides about the role
 // and the cluster of the node, so the identity of the connection carries
 // the values of the record and not the ones of the hello.
-func newConnection(hub *Hub, nodeID string, conn *websocket.Conn, identity protocol.NodeIdentity, record Node) *connection {
+func newConnection(hub *Hub, nodeID string, conn *websocket.Conn, identity protocol.NodeIdentity, record Node, agentVersion string) *connection {
 	return &connection{
 		hub:            hub,
 		nodeID:         nodeID,
@@ -594,6 +616,7 @@ func newConnection(hub *Hub, nodeID string, conn *websocket.Conn, identity proto
 		done:           make(chan struct{}),
 		record:         record,
 		identity:       identity,
+		agentVersion:   agentVersion,
 		pending:        make(map[string]*pendingSnapshot),
 	}
 }
@@ -668,10 +691,12 @@ func (c *connection) accept(envelope protocol.Envelope) error {
 	case protocol.TypeInventory:
 		return c.acceptInventory(envelope)
 	case protocol.TypeDeployReceipt, protocol.TypeDeployQueryResult, protocol.TypeDeployOutput,
+		protocol.TypeContainerResult,
 		protocol.TypeMetricsSample, protocol.TypeContainerEvent, protocol.TypeLogsFrame:
-		// The report of a task, the sample of a container, the event of a
-		// container and the piece of a log reach the subscribers of the
-		// hub. The hub does not judge them itself.
+		// The report of a task, the result of an operation, the sample of
+		// a container, the event of a container and the piece of a log
+		// reach the subscribers of the hub. The hub does not judge them
+		// itself.
 		return nil
 	default:
 		return fmt.Errorf("agentlink: the message type %s is not accepted", envelope.Type)
@@ -873,6 +898,7 @@ func (c *connection) status(now time.Time) Status {
 		LastSeen:     c.lastSeen,
 		HasInventory: c.inventory != nil,
 		Identity:     c.identity,
+		AgentVersion: c.agentVersion,
 	}
 	if c.inventory != nil {
 		status.ContainerCount = len(c.inventory.Containers)

@@ -92,6 +92,10 @@ const (
 // does not have to wait for it.
 var busyRetryInterval = 5 * time.Second
 
+// AgentVersion is the version of the agent. The hello of a connection
+// reports it, so the control端 can store it with the node record.
+var AgentVersion = "1.1.0"
+
 // errRejected reports that the control端 refused the credential of the
 // agent. Reconnecting does not help then, the node has to be registered
 // again by the administrator.
@@ -713,6 +717,10 @@ func session(ctx context.Context, cfg config.Agent, client *http.Client, credent
 	done := make(chan struct{})
 	control := make(chan []byte, controlBuffer)
 	logs := make(chan []byte, logBuffer)
+	// inventoryRefresh carries a sign from the container operations to the
+	// report of the inventory, so the next report leaves at once instead
+	// of waiting for the tick.
+	inventoryRefresh := make(chan struct{}, 1)
 	frames := &framer{}
 	out := &sessionSender{ctx: sessionCtx, frames: frames, control: control, logs: logs, done: done}
 
@@ -722,7 +730,7 @@ func session(ctx context.Context, cfg config.Agent, client *http.Client, credent
 	if err != nil {
 		return true, err
 	}
-	hello, err := frames.envelope(protocol.TypeHello, protocol.Hello{Identity: identity})
+	hello, err := frames.envelope(protocol.TypeHello, protocol.Hello{Identity: identity, AgentVersion: AgentVersion})
 	if err != nil {
 		return true, err
 	}
@@ -743,7 +751,7 @@ func session(ctx context.Context, cfg config.Agent, client *http.Client, credent
 	}()
 	go func() {
 		defer workers.Done()
-		reportInventory(sessionCtx, frames, logs, done, engine)
+		reportInventory(sessionCtx, frames, logs, done, inventoryRefresh, engine)
 	}()
 
 	// The telemetry runs only when the engine of the node provides it. A
@@ -771,6 +779,23 @@ func session(ctx context.Context, cfg config.Agent, client *http.Client, credent
 		logManager = newLogManager(sessionCtx, source, out)
 	}
 
+	// The operations on single containers are answered only when the
+	// engine of the node can perform them. A test engine without the
+	// controller refuses nothing here: the frames simply do not reach a
+	// manager that does not exist. An operation that ended asks the report
+	// of the inventory to leave at once, so the control端 sees the state
+	// that follows the operation within moments.
+	var ops *opsManager
+	if controller, ok := engine.(dockerops.ContainerController); ok {
+		ops = newOpsManager(sessionCtx, controller)
+		ops.refreshInventory = func() {
+			select {
+			case inventoryRefresh <- struct{}{}:
+			default:
+			}
+		}
+	}
+
 	err = readControl(sessionCtx, conn, func(ctx context.Context, envelope protocol.Envelope) {
 		switch envelope.Type {
 		case protocol.TypeLogsSubscribe, protocol.TypeLogsUnsubscribe:
@@ -779,6 +804,12 @@ func session(ctx context.Context, cfg config.Agent, client *http.Client, credent
 				return
 			}
 			logManager.handle(envelope)
+		case protocol.TypeContainerCommand:
+			if ops == nil {
+				log.Printf("agent: the control端 asks for a container operation, but the node does not provide them")
+				return
+			}
+			ops.handle(envelope, out)
 		default:
 			handler.handle(ctx, envelope, out)
 		}
@@ -791,6 +822,7 @@ func session(ctx context.Context, cfg config.Agent, client *http.Client, credent
 	if logManager != nil {
 		logManager.Close()
 	}
+	ops.Close()
 	workers.Wait()
 	return true, err
 }
@@ -1014,7 +1046,7 @@ func reportHeartbeats(ctx context.Context, frames *framer, outbound chan<- []byt
 // A snapshot that does not fit into one message is sent in several
 // batches, so the control端 never receives a truncated inventory that
 // looks like a complete one.
-func reportInventory(ctx context.Context, frames *framer, outbound chan<- []byte, done <-chan struct{}, engine source) {
+func reportInventory(ctx context.Context, frames *framer, outbound chan<- []byte, done <-chan struct{}, refresh <-chan struct{}, engine source) {
 	ticker := time.NewTicker(inventoryInterval)
 	defer ticker.Stop()
 
@@ -1046,6 +1078,10 @@ func reportInventory(ctx context.Context, frames *framer, outbound chan<- []byte
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		case <-refresh:
+			// A container operation just ended: the control端 holds an
+			// inventory that is seconds old, and the page that showed the
+			// operation waits for the state that follows it.
 		}
 	}
 }

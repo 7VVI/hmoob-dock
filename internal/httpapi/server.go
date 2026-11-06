@@ -233,6 +233,13 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 	server.hub.Subscribe(protocol.TypeContainerEvent, server.handleContainerEvent)
 	go server.watchHeartbeats(server.ctx)
 
+	// The environment of a node is stored with the record of the node, so
+	// the page of a node shows the facts of the last report even while the
+	// node is away. The changes of the containers of a node reach the
+	// pages as events, so a list of the containers refreshes itself.
+	server.hub.Subscribe(protocol.TypeInventory, server.handleNodeEnvironment)
+	server.hub.Subscribe(protocol.TypeContainerEvent, server.publishContainerEvent)
+
 	// The pieces of the logs of the agents reach the subscriptions of the
 	// browser through the event stream.
 	server.logs = newLogSubscriptions(server.hub, server.events)

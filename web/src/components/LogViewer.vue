@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
+import { NButton } from 'naive-ui'
 
 const props = defineProps<{
   // lines are the pieces of the log of the container.
@@ -75,55 +76,23 @@ watch(
 </script>
 
 <template>
-  <div class="logs">
-    <p v-if="truncated" class="logs__gap">部分日志缺失，上面的内容不是连续的。</p>
-    <p v-if="lines.length === 0" class="empty">还没有日志。</p>
+  <div class="grid gap-2">
+    <p
+      v-if="truncated"
+      class="m-0 rounded-lg border border-[#d3dcec] bg-[#fffaeb] px-3 py-2 text-[13px] text-[#b54708]"
+    >
+      部分日志缺失，上面的内容不是连续的。
+    </p>
+    <p v-if="lines.length === 0" class="py-4 text-[#667085]">还没有日志。</p>
     <template v-else>
-      <pre ref="scroller" class="logs__text" @scroll="onScroll">{{ text }}</pre>
-      <button
-        v-if="!following"
-        type="button"
-        class="button button--quiet logs__follow"
-        @click="follow"
-      >
+      <pre
+        ref="scroller"
+        class="m-0 max-h-[26rem] overflow-auto rounded-lg border border-[#e6ecf7] bg-[#f2f6fe] p-3 font-mono text-[12.8px] leading-relaxed whitespace-pre-wrap break-all"
+        @scroll="onScroll"
+      >{{ text }}</pre>
+      <NButton v-if="!following" quaternary type="primary" size="small" class="justify-self-start" @click="follow">
         跟随最新
-      </button>
+      </NButton>
     </template>
   </div>
 </template>
-
-<style scoped>
-.logs {
-  display: grid;
-  gap: var(--space-2);
-}
-
-.logs__gap {
-  margin: 0;
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius);
-  background: var(--color-warn-soft);
-  color: var(--color-offline);
-  font-size: 0.85rem;
-}
-
-.logs__text {
-  max-height: 26rem;
-  overflow: auto;
-  margin: 0;
-  padding: var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  background: var(--color-page);
-  font-family: var(--font-mono);
-  font-size: 0.8rem;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.logs__follow {
-  justify-self: start;
-}
-</style>

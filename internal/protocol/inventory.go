@@ -29,6 +29,15 @@ type NodeIdentity struct {
 	Role string `json:"role,omitempty"`
 	// Hostname is the name of the host of the node.
 	Hostname string `json:"hostname,omitempty"`
+	// ServerVersion is the version of the Docker engine of the node, as
+	// the engine reported it with its last inventory.
+	ServerVersion string `json:"server_version,omitempty"`
+	// OSType is the type of the operating system of the engine, for
+	// example linux or windows.
+	OSType string `json:"os_type,omitempty"`
+	// Architecture is the architecture of the engine host, for example
+	// x86_64.
+	Architecture string `json:"architecture,omitempty"`
 }
 
 // Container is a container of an inventory.
@@ -143,6 +152,9 @@ type Inventory struct {
 type Hello struct {
 	// Identity is the identity of the agent.
 	Identity NodeIdentity `json:"identity"`
+	// AgentVersion is the version of the agent that reports. It is
+	// informational: the control端 stores it with the node record.
+	AgentVersion string `json:"agent_version,omitempty"`
 }
 
 // Heartbeat reports that the agent is alive.

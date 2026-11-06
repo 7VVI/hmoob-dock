@@ -102,6 +102,17 @@ type Node struct {
 	Role string
 	// Hostname is the name of the host of the node.
 	Hostname string
+	// DockerVersion is the version of the Docker engine, as the node
+	// reported it with its last inventory.
+	DockerVersion string
+	// OSType is the type of the operating system of the engine, for
+	// example linux.
+	OSType string
+	// OSArch is the architecture of the engine host, for example x86_64.
+	OSArch string
+	// AgentVersion is the version of the agent, as the hello of the last
+	// connection reported it.
+	AgentVersion string
 	// CreatedAt is the time the node was enrolled.
 	CreatedAt time.Time
 	// RevokedAt is the time the credential of the node was revoked. It is
@@ -374,11 +385,32 @@ func (e *Enrollment) Authenticate(ctx context.Context, token string) (Credential
 	return Credential{NodeID: id, Token: token}, nil
 }
 
+// nodeColumns are the columns every reader of a node selects.
+const nodeColumns = `id, engine_id, swarm_id, swarm_node_id, role, hostname,
+	docker_version, os_type, os_arch, agent_version, created_at, revoked_at`
+
+// scanNode reads one row of the nodes table into the given node.
+func scanNode(scanner interface{ Scan(...any) error }) (Node, error) {
+	var node Node
+	var createdAt int64
+	var revokedAt sql.NullInt64
+	if err := scanner.Scan(&node.ID, &node.EngineID, &node.SwarmID, &node.SwarmNodeID, &node.Role, &node.Hostname,
+		&node.DockerVersion, &node.OSType, &node.OSArch, &node.AgentVersion,
+		&createdAt, &revokedAt); err != nil {
+		return Node{}, err
+	}
+	node.CreatedAt = store.TimeFromMillis(createdAt)
+	if revokedAt.Valid {
+		revoked := store.TimeFromMillis(revokedAt.Int64)
+		node.RevokedAt = &revoked
+	}
+	return node, nil
+}
+
 // ListNodes returns the enrolled nodes.
 func (e *Enrollment) ListNodes(ctx context.Context) ([]Node, error) {
 	rows, err := e.db.QueryContext(ctx,
-		`SELECT id, engine_id, swarm_id, swarm_node_id, role, hostname, created_at, revoked_at
-		 FROM nodes ORDER BY created_at, id`)
+		`SELECT `+nodeColumns+` FROM nodes ORDER BY created_at, id`)
 	if err != nil {
 		return nil, fmt.Errorf("agentlink: read the nodes: %w", err)
 	}
@@ -386,17 +418,9 @@ func (e *Enrollment) ListNodes(ctx context.Context) ([]Node, error) {
 
 	var nodes []Node
 	for rows.Next() {
-		var node Node
-		var createdAt int64
-		var revokedAt sql.NullInt64
-		if err := rows.Scan(&node.ID, &node.EngineID, &node.SwarmID, &node.SwarmNodeID,
-			&node.Role, &node.Hostname, &createdAt, &revokedAt); err != nil {
+		node, err := scanNode(rows)
+		if err != nil {
 			return nil, fmt.Errorf("agentlink: scan the node: %w", err)
-		}
-		node.CreatedAt = store.TimeFromMillis(createdAt)
-		if revokedAt.Valid {
-			revoked := store.TimeFromMillis(revokedAt.Int64)
-			node.RevokedAt = &revoked
 		}
 		nodes = append(nodes, node)
 	}
@@ -408,26 +432,39 @@ func (e *Enrollment) ListNodes(ctx context.Context) ([]Node, error) {
 
 // NodeRecord returns the record of a node.
 func (e *Enrollment) NodeRecord(ctx context.Context, nodeID string) (Node, error) {
-	var node Node
-	var createdAt int64
-	var revokedAt sql.NullInt64
-	err := e.db.QueryRowContext(ctx,
-		`SELECT id, engine_id, swarm_id, swarm_node_id, role, hostname, created_at, revoked_at
-		 FROM nodes WHERE id = ?`, nodeID).
-		Scan(&node.ID, &node.EngineID, &node.SwarmID, &node.SwarmNodeID, &node.Role, &node.Hostname,
-			&createdAt, &revokedAt)
+	node, err := scanNode(e.db.QueryRowContext(ctx,
+		`SELECT `+nodeColumns+` FROM nodes WHERE id = ?`, nodeID))
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return Node{}, ErrUnknownNode
 	case err != nil:
 		return Node{}, fmt.Errorf("agentlink: read the node: %w", err)
 	}
-	node.CreatedAt = store.TimeFromMillis(createdAt)
-	if revokedAt.Valid {
-		revoked := store.TimeFromMillis(revokedAt.Int64)
-		node.RevokedAt = &revoked
-	}
 	return node, nil
+}
+
+// UpdateNodeEnvironment stores the environment a node reported with its
+// last inventory.
+//
+// The write keeps only the facts of the report. It runs for every
+// inventory that arrives, so it is deliberately cheap: a single row is
+// updated only when the report differs from the stored one, and a node
+// that is away keeps the facts of its last report.
+func (e *Enrollment) UpdateNodeEnvironment(ctx context.Context, nodeID string, identity protocol.NodeIdentity, agentVersion string) error {
+	if strings.TrimSpace(nodeID) == "" {
+		return ErrUnknownNode
+	}
+	result, err := e.db.ExecContext(ctx,
+		`UPDATE nodes SET docker_version = ?, os_type = ?, os_arch = ?, agent_version = ?
+		 WHERE id = ?`,
+		identity.ServerVersion, identity.OSType, identity.Architecture, agentVersion, nodeID)
+	if err != nil {
+		return fmt.Errorf("agentlink: store the environment of the node: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err == nil && affected == 0 {
+		return ErrUnknownNode
+	}
+	return nil
 }
 
 // findToken returns the identifier of the enrollment token that matches the

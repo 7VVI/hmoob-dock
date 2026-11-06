@@ -1,0 +1,1338 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hmoob dock · 控制台原型</title>
+<style>
+  /* ------------------------------------------------------------------
+   * hmoob dock —— 工作台原型
+   *
+   * 一个管理员，一台机器。界面的任务是让状态在余光里也能读到：
+   * 每个有状态的对象左侧都带一根 3px 的脊线，在线是青绿，离线是琥珀，
+   * 失败是砖红，没有状态就是一根几乎看不见的灰线。脊线是全站唯一的
+   * 图形语言，所以其他部分保持安静：细线、留白、等宽数字。
+   * ------------------------------------------------------------------ */
+
+  :root {
+    --ink: #0c1413;
+    --ink-soft: #26312e;
+    --paper: #edf0ee;
+    --surface: #fff;
+    --line: #d5dbd8;
+    --line-strong: #b4bdb8;
+    --muted: #5f6b66;
+
+    --accent: #0b6b63;
+    --accent-wash: rgb(11 107 99 / 8%);
+    --online: #1c6b4f;
+    --offline: #8f5d0e;
+    --danger: #8e2b2b;
+
+    --rail: #0f1917;
+    --rail-line: #24322e;
+    --rail-text: #93a49d;
+    --rail-text-hi: #eef3f0;
+
+    --space-1: 0.25rem;
+    --space-2: 0.5rem;
+    --space-3: 0.75rem;
+    --space-4: 1rem;
+    --space-5: 1.5rem;
+    --space-6: 2rem;
+    --space-7: 3rem;
+
+    --rail-width: 14rem;
+    --stage-width: 68rem;
+    --control-height: 2.125rem;
+
+    --font-sans: "Segoe UI", system-ui, "PingFang SC", "Microsoft YaHei",
+      "Noto Sans SC", sans-serif;
+    --font-mono: ui-monospace, "SFMono-Regular", Menlo, Consolas,
+      "Liberation Mono", monospace;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+
+  html { -webkit-text-size-adjust: 100%; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font: 400 0.875rem/1.55 var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1, h2, h3 { margin: 0; font-weight: 600; line-height: 1.25; letter-spacing: -0.01em; }
+  p, ul, ol, dl, dd { margin: 0; }
+  ul, ol { padding-left: 1.25rem; }
+  a { color: inherit; }
+  code, kbd, pre { font-family: var(--font-mono); }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* ---------------------------------------------------------------- 骨架 */
+
+  .workbench {
+    display: grid;
+    grid-template-columns: var(--rail-width) minmax(0, 1fr);
+    min-height: 100dvh;
+  }
+
+  .workbench[hidden], .gate[hidden] { display: none; }
+
+  .rail {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-6);
+    padding: var(--space-5) 0 var(--space-4);
+    background: var(--rail);
+    color: var(--rail-text);
+    border-right: 1px solid var(--rail-line);
+    position: sticky;
+    top: 0;
+    height: 100dvh;
+  }
+
+  .rail__brand {
+    display: grid;
+    gap: 0.125rem;
+    padding: 0 var(--space-5);
+    color: var(--rail-text-hi);
+  }
+
+  .rail__word {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+
+  /* 脊线的源头：品牌标记就是这个应用的脊线。 */
+  .rail__word::before {
+    content: "";
+    width: 3px;
+    height: 1.125rem;
+    background: var(--accent);
+  }
+
+  .rail__product {
+    font-size: 0.8125rem;
+    color: var(--rail-text);
+    letter-spacing: 0.02em;
+  }
+
+  .rail__nav {
+    display: grid;
+    gap: 1px;
+  }
+
+  .rail__word, .rail__link, .rail__signout { white-space: nowrap; }
+
+  .rail__link {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    min-height: 2.75rem;
+    padding: 0 var(--space-5) 0 calc(var(--space-5) - 3px);
+    color: var(--rail-text);
+    font-size: 0.875rem;
+    text-decoration: none;
+    border-left: 3px solid transparent;
+    transition: color 120ms ease, background-color 120ms ease;
+  }
+
+  .rail__link:hover { color: var(--rail-text-hi); background: rgb(255 255 255 / 3%); }
+
+  .rail__link[aria-current="page"] {
+    color: var(--rail-text-hi);
+    border-left-color: var(--accent);
+    background: rgb(255 255 255 / 5%);
+    font-weight: 500;
+  }
+
+  .rail__index {
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    letter-spacing: 0.08em;
+    color: #62706b;
+  }
+
+  .rail__link[aria-current="page"] .rail__index { color: var(--accent); }
+
+  .rail__foot {
+    display: grid;
+    gap: var(--space-3);
+    margin-top: auto;
+    padding: var(--space-4) var(--space-5) 0;
+    border-top: 1px solid var(--rail-line);
+    font-size: 0.75rem;
+  }
+
+  .rail__node {
+    display: grid;
+    gap: 0.125rem;
+    font-family: var(--font-mono);
+    font-size: 0.71875rem;
+    letter-spacing: 0.02em;
+  }
+
+  .rail__node strong {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--rail-text-hi);
+    font-weight: 500;
+  }
+
+  .rail__node strong::before {
+    content: "";
+    width: 0.375rem;
+    height: 0.375rem;
+    border-radius: 50%;
+    background: #46b083;
+  }
+
+  .rail__signout {
+    justify-self: start;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--rail-text);
+    font: inherit;
+    font-size: 0.75rem;
+    text-decoration: underline;
+    text-underline-offset: 0.25em;
+    cursor: pointer;
+  }
+
+  .rail__signout:hover { color: var(--rail-text-hi); }
+
+  /* ------------------------------------------------------------ 工作区 */
+
+  .stage {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .stage__bar {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-4);
+    padding: var(--space-4) var(--space-6);
+    border-bottom: 1px solid var(--line);
+    background: var(--paper);
+  }
+
+  .stage__title {
+    font-size: 1.5rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+
+  .stage__crumb {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    font-size: 0.75rem;
+    color: var(--muted);
+  }
+
+  .stage__crumb a { text-decoration: none; }
+  .stage__crumb a:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 0.2em; }
+
+  .readouts {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    margin-left: auto;
+    font-size: 0.75rem;
+    color: var(--muted);
+  }
+
+  .readout {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    white-space: nowrap;
+  }
+
+  .readout b {
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+  }
+
+  .stage__body {
+    width: 100%;
+    max-width: var(--stage-width);
+    padding: var(--space-5) var(--space-6) var(--space-7);
+    display: grid;
+    align-content: start;
+  }
+
+  /* --------------------------------------------------------------- 分节 */
+
+  /* 一「道」读数：细线分隔，没有卡片、没有阴影。 */
+  .band {
+    display: grid;
+    gap: var(--space-4);
+    padding: var(--space-5) 0 var(--space-6);
+    border-top: 1px solid var(--line);
+  }
+
+  .band:first-child { border-top: 0; padding-top: var(--space-3); }
+
+  .band__head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--space-3) var(--space-4);
+  }
+
+  .band__label {
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .band__title {
+    font-size: 1rem;
+    font-weight: 600;
+  }
+
+  .band__note {
+    color: var(--muted);
+    font-size: 0.8125rem;
+  }
+
+  .band__head .band__actions { margin-left: auto; }
+
+  .band__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  /* --------------------------------------------------------------- 表格 */
+
+  .table-scroll { overflow-x: auto; }
+
+  .log {
+    width: 100%;
+    border-collapse: collapse;
+    text-align: left;
+  }
+
+  .log caption {
+    caption-side: top;
+    text-align: left;
+    padding-bottom: var(--space-2);
+    color: var(--muted);
+    font-size: 0.8125rem;
+  }
+
+  .log thead th {
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--line-strong);
+    background: #e7ebe8;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 0.65625rem;
+    font-weight: 500;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  .log tbody th,
+  .log tbody td {
+    padding: var(--space-3);
+    border-bottom: 1px solid var(--line);
+    vertical-align: middle;
+  }
+
+  .log tbody tr:last-child > * { border-bottom: 0; }
+  .log tbody tr:hover > * { background: #f7f9f8; }
+
+  .log__host {
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    white-space: nowrap;
+  }
+
+  .log__num {
+    font-family: var(--font-mono);
+    font-size: 0.78125rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+
+  .log__num--right { text-align: right; }
+  .log__actions { text-align: right; white-space: nowrap; }
+
+  /* 脊线：表格左缘 3px，随状态改变颜色。 */
+  .log tbody tr[data-state] > :first-child { box-shadow: inset 3px 0 0 var(--line-strong); }
+  .log tbody tr[data-state="online"] > :first-child { box-shadow: inset 3px 0 0 var(--online); }
+  .log tbody tr[data-state="offline"] > :first-child { box-shadow: inset 3px 0 0 var(--offline); }
+  .log tbody tr[data-state="running"] > :first-child { box-shadow: inset 3px 0 0 var(--online); }
+  .log tbody tr[data-state="stopped"] > :first-child { box-shadow: inset 3px 0 0 var(--line-strong); }
+  .log tbody tr[data-state="failed"] > :first-child { box-shadow: inset 3px 0 0 var(--danger); }
+
+  /* 状态：一个点，一个词，不加底色。 */
+  .state {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: 0.8125rem;
+    white-space: nowrap;
+  }
+
+  .state::before {
+    content: "";
+    width: 0.4375rem;
+    height: 0.4375rem;
+    border-radius: 50%;
+    background: currentcolor;
+  }
+
+  .state--online { color: var(--online); }
+  .state--offline { color: var(--offline); }
+  .state--failed { color: var(--danger); }
+  .state--idle { color: var(--muted); }
+
+  /* --------------------------------------------------------------- 控件 */
+
+  .figure {
+    display: grid;
+    gap: var(--space-3);
+  }
+
+  .figure__controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: var(--space-3);
+  }
+
+  .field { display: grid; gap: var(--space-1); }
+
+  .field__label {
+    font-family: var(--font-mono);
+    font-size: 0.65625rem;
+    font-weight: 500;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .field__input {
+    height: var(--control-height);
+    min-width: 8rem;
+    padding: 0 var(--space-3);
+    border: 1px solid var(--line-strong);
+    border-radius: 2px;
+    background: var(--surface);
+    color: var(--ink);
+    font: 0.8125rem/1 var(--font-sans);
+    transition: border-color 120ms ease, box-shadow 120ms ease;
+  }
+
+  .field__input:hover { border-color: var(--ink-soft); }
+
+  .field__input:focus-visible {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-wash);
+  }
+
+  .segmented {
+    display: inline-flex;
+    border: 1px solid var(--line-strong);
+    border-radius: 2px;
+    background: var(--surface);
+  }
+
+  .segmented button {
+    height: calc(var(--control-height) - 2px);
+    padding: 0 var(--space-3);
+    border: 0;
+    background: none;
+    color: var(--muted);
+    font: 0.8125rem/1 var(--font-sans);
+    cursor: pointer;
+  }
+
+  .segmented button + button { border-left: 1px solid var(--line); }
+
+  .segmented button:hover { color: var(--ink); }
+
+  .segmented button[aria-pressed="true"] {
+    background: var(--ink);
+    color: #fff;
+    font-weight: 500;
+  }
+
+  .button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: var(--control-height);
+    padding: 0 var(--space-3);
+    border: 1px solid transparent;
+    border-radius: 2px;
+    background: none;
+    color: var(--ink);
+    font: 500 0.8125rem/1 var(--font-sans);
+    cursor: pointer;
+    transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+  }
+
+  .button--primary { background: var(--ink); color: #fff; }
+  .button--primary:hover { background: #22302f; }
+  .button--quiet { border-color: var(--line-strong); color: var(--ink-soft); }
+  .button--quiet:hover { border-color: var(--ink-soft); background: var(--surface); }
+  .button--danger { border-color: var(--danger); color: var(--danger); }
+  .button--danger:hover { background: rgb(142 43 43 / 6%); }
+
+  /* 图：坐标轴用等宽小字，线是 1px，面积只做 8% 的衬底。 */
+  .plot {
+    position: relative;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    padding: var(--space-3) var(--space-3) var(--space-2);
+  }
+
+  .plot__readouts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-5);
+    padding: 0 var(--space-1) var(--space-2);
+    border-bottom: 1px solid var(--line);
+    margin-bottom: var(--space-2);
+  }
+
+  .plot__readout {
+    display: grid;
+    gap: 0.125rem;
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .plot__readout b {
+    font-size: 1rem;
+    font-weight: 500;
+    letter-spacing: 0;
+    text-transform: none;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+  }
+
+  .plot svg { display: block; width: 100%; height: auto; }
+
+  .plot__empty {
+    padding: var(--space-6) 0;
+    color: var(--muted);
+    text-align: center;
+    font-size: 0.8125rem;
+  }
+
+  .plot figcaption {
+    padding-top: var(--space-2);
+    color: var(--muted);
+    font-size: 0.75rem;
+  }
+
+  /* --------------------------------------------------------------- 标签页 */
+
+  .tabs {
+    display: flex;
+    gap: var(--space-5);
+    border-bottom: 1px solid var(--line);
+  }
+
+  .tabs button {
+    position: relative;
+    padding: var(--space-2) 0 var(--space-3);
+    border: 0;
+    background: none;
+    color: var(--muted);
+    font: 0.875rem/1.4 var(--font-sans);
+    cursor: pointer;
+  }
+
+  .tabs button::after {
+    content: "";
+    position: absolute;
+    inset: auto 0 -1px;
+    height: 2px;
+    background: transparent;
+  }
+
+  .tabs button:hover { color: var(--ink); }
+
+  .tabs button[aria-selected="true"] {
+    color: var(--ink);
+    font-weight: 500;
+  }
+
+  .tabs button[aria-selected="true"]::after { background: var(--accent); }
+
+  /* --------------------------------------------------------------- 提示 */
+
+  .note {
+    padding: var(--space-3) var(--space-4);
+    border-left: 3px solid var(--line-strong);
+    background: var(--surface);
+    color: var(--muted);
+    font-size: 0.8125rem;
+  }
+
+  .note--warn { border-left-color: var(--offline); background: #fbf6ea; color: #6b4a10; }
+  .note--danger { border-left-color: var(--danger); background: #fbefee; color: #7a2424; }
+
+  .empty {
+    padding: var(--space-6) 0;
+    color: var(--muted);
+    font-size: 0.8125rem;
+  }
+
+  .stack { display: grid; gap: var(--space-4); }
+
+  .inline-form {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: var(--space-3);
+  }
+
+  .inline-form .field__input { min-width: 22rem; }
+
+  .check {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding-bottom: 0.6rem;
+    font-size: 0.8125rem;
+  }
+
+  .code-block {
+    display: block;
+    padding: var(--space-3) var(--space-4);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--line-strong);
+    background: var(--surface);
+    font-size: 0.78125rem;
+    color: var(--ink-soft);
+    overflow-wrap: anywhere;
+  }
+
+  .meta-list {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: var(--space-2) var(--space-5);
+    margin: 0;
+    font-size: 0.8125rem;
+  }
+
+  .meta-list dt {
+    font-family: var(--font-mono);
+    font-size: 0.65625rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    align-self: center;
+  }
+
+  .meta-list dd { margin: 0; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  /* --------------------------------------------------------------- 登录 */
+
+  .gate {
+    display: grid;
+    place-items: center;
+    min-height: 100dvh;
+    padding: var(--space-5);
+  }
+
+  .gate__panel {
+    width: min(100%, 24rem);
+    padding: var(--space-6) var(--space-5) var(--space-5);
+    border: 1px solid var(--line);
+    border-top: 3px solid var(--ink);
+    background: var(--surface);
+    display: grid;
+    gap: var(--space-5);
+  }
+
+  .gate__brand {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+
+  .gate__brand::before { content: ""; width: 3px; height: 1rem; background: var(--accent); }
+
+  .gate__title { font-size: 1.375rem; }
+
+  .gate__field { display: grid; gap: var(--space-2); }
+  .gate__field .field__input { width: 100%; }
+  .gate__hint { color: var(--muted); font-size: 0.75rem; }
+  .gate .button { width: 100%; }
+
+  /* --------------------------------------------------------------- 动效 */
+
+  @keyframes lift {
+    from { opacity: 0; transform: translateY(2px); }
+    to { opacity: 1; transform: none; }
+  }
+
+  .view:not([hidden]) { animation: lift 120ms ease-out; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+
+  /* --------------------------------------------------------------- 窄屏 */
+
+  @media (max-width: 52rem) {
+    .workbench { grid-template-columns: 1fr; }
+
+    .rail {
+      position: static;
+      height: auto;
+      flex-direction: row;
+      align-items: center;
+      gap: var(--space-3);
+      padding: var(--space-2) var(--space-3);
+      overflow-x: auto;
+    }
+
+    .rail__word { font-size: 0.75rem; letter-spacing: 0.1em; }
+
+    .rail__brand { padding: 0; }
+    .rail__product { display: none; }
+    .rail__nav { display: flex; gap: var(--space-1); }
+    .rail__link { min-height: 2.25rem; padding: 0 var(--space-2); border-left: 0; border-bottom: 3px solid transparent; }
+    .rail__link[aria-current="page"] { border-left: 0; border-bottom-color: var(--accent); }
+    .rail__index { display: none; }
+    .rail__nav, .rail__foot, .rail__link { flex: 0 0 auto; }
+    .col-optional { display: none; }
+    .rail__foot { margin: 0 0 0 auto; padding: 0; border: 0; }
+    .rail__node { display: none; }
+
+    .stage__bar { padding: var(--space-3) var(--space-4); }
+    .stage__title { font-size: 1.25rem; }
+    .readouts { width: 100%; margin-left: 0; gap: var(--space-3); }
+    .stage__body { padding: var(--space-4) var(--space-4) var(--space-6); }
+
+    .log thead th, .log tbody th, .log tbody td { padding: var(--space-2); }
+    .inline-form .field__input { min-width: 100%; }
+  }
+</style>
+</head>
+<body>
+
+<div class="workbench" id="console">
+
+  <aside class="rail">
+    <div class="rail__brand">
+      <span class="rail__word">hmoob dock</span>
+      <span class="rail__product">轻量部署平台</span>
+    </div>
+
+    <nav class="rail__nav" aria-label="主导航">
+      <a class="rail__link" href="#overview" data-view="overview" aria-current="page">
+        <span class="rail__index">01</span>概览
+      </a>
+      <a class="rail__link" href="#applications" data-view="applications">
+        <span class="rail__index">02</span>应用
+      </a>
+      <a class="rail__link" href="#alerts" data-view="alerts">
+        <span class="rail__index">03</span>告警
+      </a>
+      <a class="rail__link" href="#settings" data-view="settings">
+        <span class="rail__index">04</span>设置
+      </a>
+    </nav>
+
+    <div class="rail__foot">
+      <span class="rail__node">
+        <strong>docker-desktop 已连接</strong>
+        <span>最近心跳 08:53:38</span>
+      </span>
+      <button class="rail__signout" type="button" data-gate>退出登录</button>
+    </div>
+  </aside>
+
+  <div class="stage">
+
+    <!-- ============================================================ 概览 -->
+    <section class="view" id="view-overview" data-view="overview">
+      <header class="stage__bar">
+        <h1 class="stage__title">概览</h1>
+        <div class="readouts">
+          <span class="readout">节点 <b>1</b></span>
+          <span class="readout">容器 <b>5</b></span>
+          <span class="readout">采样 <b>08:53:38</b></span>
+        </div>
+        <div class="band__actions">
+          <button class="button button--quiet" type="button">刷新</button>
+        </div>
+      </header>
+
+      <div class="stage__body">
+        <section class="band">
+          <div class="band__head">
+            <span class="band__label">01 / 节点</span>
+            <h2 class="band__title">已接入的节点</h2>
+          </div>
+          <div class="table-scroll">
+            <table class="log">
+              <thead>
+                <tr>
+                  <th scope="col">主机名</th>
+                  <th scope="col">状态</th>
+                  <th scope="col" class="log__num--right">容器</th>
+                  <th scope="col" class="col-optional">最近活动</th>
+                  <th scope="col"><span class="visually-hidden">操作</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr data-state="online">
+                  <th scope="row" class="log__host">docker-desktop</th>
+                  <td><span class="state state--online">已连接</span></td>
+                  <td class="log__num log__num--right">5</td>
+                  <td class="log__num col-optional">2026/10/28 08:53:38</td>
+                  <td class="log__actions"><button class="button button--quiet" type="button" data-goto="overview">查看资源曲线</button></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="band">
+          <div class="band__head">
+            <span class="band__label">02 / 资源</span>
+            <h2 class="band__title">资源曲线</h2>
+            <p class="band__note">曲线是容器的，不是整台机器的。</p>
+          </div>
+
+          <figure class="figure">
+            <div class="figure__controls">
+              <label class="field">
+                <span class="field__label">节点</span>
+                <select class="field__input">
+                  <option>docker-desktop</option>
+                </select>
+              </label>
+              <label class="field">
+                <span class="field__label">容器</span>
+                <select class="field__input">
+                  <option>demo-web-1 · running</option>
+                  <option>chat-mysql · exited</option>
+                  <option>chat-redis · exited</option>
+                  <option>hi-assisant-livekit-1 · exited</option>
+                  <option>siyuan · exited</option>
+                </select>
+              </label>
+              <div class="field">
+                <span class="field__label" id="metric-label">指标</span>
+                <div class="segmented" role="group" aria-labelledby="metric-label">
+                  <button type="button" data-metric="cpu" aria-pressed="true">CPU</button>
+                  <button type="button" data-metric="memory" aria-pressed="false">内存</button>
+                  <button type="button" data-metric="network" aria-pressed="false">网络</button>
+                </div>
+              </div>
+              <label class="field">
+                <span class="field__label">时间范围</span>
+                <select class="field__input">
+                  <option>最近 1 小时</option>
+                  <option>最近 6 小时</option>
+                  <option>最近 24 小时</option>
+                </select>
+              </label>
+              <button class="button button--primary" type="button" id="plot-refresh">查看曲线</button>
+            </div>
+
+            <div class="plot">
+              <div class="plot__readouts">
+                <span class="plot__readout">当前<b id="reading-current">12.4%</b></span>
+                <span class="plot__readout">平均<b id="reading-average">13.1%</b></span>
+                <span class="plot__readout">峰值<b id="reading-peak">34.8%</b></span>
+                <span class="plot__readout">采样点<b id="reading-count">24</b></span>
+              </div>
+              <svg id="plot" viewBox="0 0 720 200" role="img" aria-label="demo-web-1 最近一小时的 CPU 使用率曲线"></svg>
+              <figcaption>每 10 秒采样，按分钟聚合；断采的分钟不计入平均。</figcaption>
+            </div>
+          </figure>
+        </section>
+      </div>
+    </section>
+
+    <!-- ============================================================ 应用 -->
+    <section class="view" id="view-applications" data-view="applications" hidden>
+      <header class="stage__bar">
+        <h1 class="stage__title">应用</h1>
+        <div class="readouts">
+          <span class="readout">共 <b>1</b> 个应用</span>
+          <span class="readout">运行中 <b>1</b></span>
+        </div>
+        <div class="band__actions">
+          <button class="button button--primary" type="button">新建应用</button>
+        </div>
+      </header>
+
+      <div class="stage__body">
+        <section class="band">
+          <div class="band__head">
+            <span class="band__label">01 / 清单</span>
+            <h2 class="band__title">全部应用</h2>
+          </div>
+          <table class="log">
+            <thead>
+              <tr>
+                <th scope="col">名称</th>
+                <th scope="col">目标</th>
+                <th scope="col">状态</th>
+                <th scope="col">最近部署</th>
+                <th scope="col" class="col-optional">版本</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr data-state="running">
+                <th scope="row"><a href="#app-detail" data-view="app-detail" style="font-weight:500;text-decoration:none">演示站点</a></th>
+                <td class="log__host">docker-desktop</td>
+                <td><span class="state state--online">运行中</span></td>
+                <td class="log__num">2026/10/27 19:20:06</td>
+                <td class="log__num col-optional">7KQ2dKFJ</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </div>
+    </section>
+
+    <!-- ======================================================== 应用详情 -->
+    <section class="view" id="view-app-detail" data-view="app-detail" hidden>
+      <header class="stage__bar">
+        <div class="stack" style="gap:0.125rem">
+          <span class="stage__crumb"><a href="#applications" data-view="applications">应用</a> / 演示站点</span>
+          <h1 class="stage__title">演示站点</h1>
+        </div>
+        <div class="readouts">
+          <span class="readout">命名空间 <b>demo-web</b></span>
+          <span class="readout">目标 <b>docker-desktop</b></span>
+        </div>
+        <div class="band__actions">
+          <button class="button button--quiet" type="button">重新加载</button>
+          <button class="button button--primary" type="button">部署</button>
+        </div>
+      </header>
+
+      <div class="stage__body">
+        <div class="tabs" role="tablist" aria-label="应用详情">
+          <button role="tab" aria-selected="true" type="button">概览</button>
+          <button role="tab" aria-selected="false" type="button">容器</button>
+          <button role="tab" aria-selected="false" type="button">日志</button>
+          <button role="tab" aria-selected="false" type="button">配置</button>
+          <button role="tab" aria-selected="false" type="button">部署记录</button>
+        </div>
+
+        <section class="band" style="border-top:0">
+          <div class="band__head">
+            <span class="band__label">01 / 概况</span>
+            <h2 class="band__title">当前版本</h2>
+          </div>
+          <dl class="meta-list">
+            <dt>版本</dt><dd>7KQ2dKFJrw71BT8eQ8Pg</dd>
+            <dt>提交</dt><dd>2026/10/27 19:20:06</dd>
+            <dt>结果</dt><dd><span class="state state--online">成功</span></dd>
+            <dt>服务</dt><dd>demo-web</dd>
+          </dl>
+        </section>
+
+        <section class="band">
+          <div class="band__head">
+            <span class="band__label">02 / 容器</span>
+            <h2 class="band__title">demo-web 命名空间</h2>
+          </div>
+          <table class="log">
+            <thead>
+              <tr>
+                <th scope="col">服务</th>
+                <th scope="col">容器</th>
+                <th scope="col">镜像</th>
+                <th scope="col">状态</th>
+                <th scope="col">启动时间</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr data-state="running">
+                <th scope="row" class="log__host">demo-web</th>
+                <td class="log__host">demo-web-1</td>
+                <td class="log__num">nginx:1.27-alpine</td>
+                <td><span class="state state--online">运行中</span></td>
+                <td class="log__num">2026/10/27 19:20:12</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </div>
+    </section>
+
+    <!-- ============================================================ 告警 -->
+    <section class="view" id="view-alerts" data-view="alerts" hidden>
+      <header class="stage__bar">
+        <h1 class="stage__title">告警</h1>
+        <div class="readouts">
+          <span class="readout">未恢复 <b>1</b></span>
+          <span class="readout">规则 <b>2</b></span>
+        </div>
+        <div class="band__actions">
+          <button class="button button--quiet" type="button">刷新</button>
+        </div>
+      </header>
+
+      <div class="stage__body">
+        <section class="band">
+          <div class="band__head">
+            <span class="band__label">01 / 活动</span>
+            <h2 class="band__title">未恢复的告警</h2>
+          </div>
+          <table class="log">
+            <thead>
+              <tr>
+                <th scope="col">规则</th>
+                <th scope="col">对象</th>
+                <th scope="col">触发时间</th>
+                <th scope="col"><span class="visually-hidden">操作</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr data-state="failed">
+                <th scope="row" class="log__host">容器退出</th>
+                <td class="log__host">chat-mysql</td>
+                <td class="log__num">2026/10/28 07:12:41</td>
+                <td class="log__actions"><button class="button button--danger" type="button">确认</button></td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="band">
+          <div class="band__head">
+            <span class="band__label">02 / 规则</span>
+            <h2 class="band__title">告警规则</h2>
+            <div class="band__actions">
+              <button class="button button--quiet" type="button">新建规则</button>
+            </div>
+          </div>
+          <table class="log">
+            <thead>
+              <tr>
+                <th scope="col">规则</th>
+                <th scope="col">条件</th>
+                <th scope="col">范围</th>
+                <th scope="col">状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr data-state="online">
+                <th scope="row" class="log__host">容器退出</th>
+                <td class="log__num">容器状态变为 exited</td>
+                <td class="log__num">全部节点</td>
+                <td><span class="state state--online">启用</span></td>
+              </tr>
+              <tr data-state="online">
+                <th scope="row" class="log__host">CPU 持续偏高</th>
+                <td class="log__num">CPU &gt; 85% 持续 5 分钟</td>
+                <td class="log__num">demo-web-1</td>
+                <td><span class="state state--online">启用</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </div>
+    </section>
+
+    <!-- ============================================================ 设置 -->
+    <section class="view" id="view-settings" data-view="settings" hidden>
+      <header class="stage__bar">
+        <h1 class="stage__title">设置</h1>
+        <div class="readouts">
+          <span class="readout">版本 <b>0.1.0</b></span>
+        </div>
+      </header>
+
+      <div class="stage__body">
+        <section class="band">
+          <div class="band__head">
+            <span class="band__label">01 / 通知</span>
+            <h2 class="band__title">Webhook 地址</h2>
+          </div>
+          <p class="band__note">告警触发和恢复都会推送到这个地址。地址加密保存，页面只显示脱敏后的形式。</p>
+          <div class="inline-form">
+            <label class="field">
+              <span class="field__label">地址</span>
+              <input class="field__input" type="url" value="https://hooks.example.com/services/T00/B00/secret">
+            </label>
+            <label class="field">
+              <span class="field__label">允许的私网网段</span>
+              <input class="field__input" type="text" value="10.0.0.0/8" style="min-width:12rem">
+            </label>
+            <label class="check">
+              <input type="checkbox" checked> 启用推送
+            </label>
+            <button class="button button--primary" type="button">保存</button>
+          </div>
+        </section>
+
+        <section class="band">
+          <div class="band__head">
+            <span class="band__label">02 / 接入</span>
+            <h2 class="band__title">接入新节点</h2>
+          </div>
+          <p class="band__note">令牌只能使用一次，5 分钟内有效。节点上执行下面的命令即可接入。</p>
+          <code class="code-block">/usr/local/bin/hmoob-agent enroll --server https://10.0.0.12:8443 --token 7d2f9c0a4b6e8f13</code>
+          <div class="band__actions">
+            <button class="button button--quiet" type="button">重新生成令牌</button>
+            <button class="button button--quiet" type="button">复制命令</button>
+          </div>
+        </section>
+      </div>
+    </section>
+
+  </div>
+</div>
+
+<!-- ================================================================= 登录 -->
+<div class="gate" id="gate" hidden>
+  <form class="gate__panel" onsubmit="return false">
+    <span class="gate__brand">hmoob dock</span>
+    <div class="stack" style="gap:0.25rem">
+      <h1 class="gate__title">登录</h1>
+      <p class="gate__hint">这个控制台只有一个管理员账户。</p>
+    </div>
+    <label class="gate__field">
+      <span class="field__label">管理员密码</span>
+      <input class="field__input" type="password" autocomplete="current-password">
+    </label>
+    <button class="button button--primary" type="submit" data-ungate>登录</button>
+  </form>
+</div>
+
+<script>
+  // ------------------------------------------------------------ 视图切换
+  const views = new Map(
+    [...document.querySelectorAll('.view')].map((node) => [node.dataset.view, node])
+  )
+
+  function show(name) {
+    if (!views.has(name)) name = 'overview'
+    for (const [key, node] of views) node.hidden = key !== name
+
+    document.querySelectorAll('.rail__link').forEach((link) => {
+      const active = link.dataset.view === name ||
+        (name === 'app-detail' && link.dataset.view === 'applications')
+      if (active) link.setAttribute('aria-current', 'page')
+      else link.removeAttribute('aria-current')
+    })
+
+    document.getElementById('console').hidden = false
+    document.getElementById('gate').hidden = true
+    window.scrollTo(0, 0)
+  }
+
+  document.addEventListener('click', (event) => {
+    const target = event.target.closest('[data-view]')
+    if (!target) return
+    event.preventDefault()
+    show(target.dataset.view)
+    history.replaceState(null, '', '#' + target.dataset.view)
+  })
+
+  // 退出登录与登录只用于看样式，不做真实鉴权。
+  document.querySelector('[data-gate]').addEventListener('click', () => {
+    document.getElementById('console').hidden = true
+    document.getElementById('gate').hidden = false
+  })
+
+  document.querySelector('[data-ungate]').addEventListener('click', () => {
+    show('overview')
+  })
+
+  show(location.hash.slice(1) || 'overview')
+
+  // -------------------------------------------------------------- 曲线
+  const series = {
+    cpu: {
+      unit: '%',
+      max: 100,
+      ticks: [0, 25, 50, 75, 100],
+      label: 'CPU 使用率',
+      data: [12.4, 13.8, 11.2, 10.6, 12.9, 15.4, 18.2, 16.7, 14.1, 13.3, 12.8,
+             15.9, 22.4, 26.1, 21.7, 18.3, 16.4, 15.1, 13.7, 12.2, 11.4, 10.8,
+             11.9, 12.4],
+    },
+    memory: {
+      unit: 'MB',
+      max: 64,
+      ticks: [0, 16, 32, 48, 64],
+      label: '内存占用',
+      data: [28.1, 28.3, 28.2, 28.4, 28.6, 29.2, 31.4, 33.8, 34.2, 33.1, 32.4,
+             32.0, 35.6, 38.9, 36.4, 34.2, 33.0, 32.4, 31.8, 31.2, 30.9, 30.4,
+             29.6, 29.1],
+    },
+    network: {
+      unit: 'kB/s',
+      max: 480,
+      ticks: [0, 120, 240, 360, 480],
+      label: '网络接收',
+      data: [18, 22, 16, 14, 31, 48, 92, 210, 386, 302, 168, 96, 74, 62, 108,
+             154, 121, 88, 64, 52, 47, 39, 28, 22],
+    },
+  }
+
+  const NS = 'http://www.w3.org/2000/svg'
+  const plot = document.getElementById('plot')
+  const padLeft = 46
+  const padRight = 10
+  const padTop = 12
+  const padBottom = 26
+  const width = 720
+  const height = 200
+  let current = 'cpu'
+
+  function svg(tag, attrs) {
+    const node = document.createElementNS(NS, tag)
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value)
+    return node
+  }
+
+  function format(value) {
+    return Number.isInteger(value) ? String(value) : value.toFixed(1)
+  }
+
+  function draw(key) {
+    current = key
+    const spec = series[key]
+    plot.replaceChildren()
+    plot.setAttribute('aria-label', 'demo-web-1 最近一小时的' + spec.label + '曲线')
+
+    const innerW = width - padLeft - padRight
+    const innerH = height - padTop - padBottom
+    const x = (index) => padLeft + (innerW * index) / (spec.data.length - 1)
+    const y = (value) => padTop + innerH - (innerH * value) / spec.max
+
+    for (const tick of spec.ticks) {
+      plot.append(svg('line', {
+        x1: padLeft, y1: y(tick), x2: width - padRight, y2: y(tick),
+        stroke: tick === 0 ? '#d5dbd8' : '#e7ebe8', 'stroke-width': 1,
+      }))
+      const label = svg('text', {
+        x: padLeft - 8, y: y(tick) + 3, 'text-anchor': 'end',
+        fill: '#5f6b66', 'font-size': 10, 'font-family': 'ui-monospace, monospace',
+      })
+      label.textContent = String(tick)
+      plot.append(label)
+    }
+
+    const every = Math.floor((spec.data.length - 1) / 3)
+    for (let index = 0; index < spec.data.length; index += every) {
+      const label = svg('text', {
+        x: x(index), y: height - 8, 'text-anchor': 'middle',
+        fill: '#5f6b66', 'font-size': 10, 'font-family': 'ui-monospace, monospace',
+      })
+      const minutesAgo = 60 - index * (60 / (spec.data.length - 1))
+      const stamp = new Date(Date.UTC(2026, 9, 28, 8, 53) - minutesAgo * 60000)
+      label.textContent = String(stamp.getUTCHours()).padStart(2, '0') + ':' +
+        String(stamp.getUTCMinutes()).padStart(2, '0')
+      plot.append(label)
+    }
+
+    const line = spec.data.map((value, index) => `${index === 0 ? 'M' : 'L'}${x(index).toFixed(1)},${y(value).toFixed(1)}`).join(' ')
+    const area = line + ` L${x(spec.data.length - 1).toFixed(1)},${y(0)} L${padLeft},${y(0)} Z`
+
+    plot.append(svg('path', { d: area, fill: 'rgba(11,107,99,0.08)' }))
+    plot.append(svg('path', { d: line, fill: 'none', stroke: '#0b6b63', 'stroke-width': 1.5, 'stroke-linejoin': 'round' }))
+
+    const last = spec.data[spec.data.length - 1]
+    plot.append(svg('circle', { cx: x(spec.data.length - 1), cy: y(last), r: 2.5, fill: '#0b6b63' }))
+
+    const total = spec.data.reduce((sum, value) => sum + value, 0)
+    document.getElementById('reading-current').textContent = format(last) + spec.unit
+    document.getElementById('reading-average').textContent = format(total / spec.data.length) + spec.unit
+    document.getElementById('reading-peak').textContent = format(Math.max(...spec.data)) + spec.unit
+    document.getElementById('reading-count').textContent = String(spec.data.length)
+  }
+
+  document.querySelectorAll('[data-metric]').forEach((button) => {
+    button.addEventListener('click', () => {
+      document.querySelectorAll('[data-metric]').forEach((other) => {
+        other.setAttribute('aria-pressed', String(other === button))
+      })
+      draw(button.dataset.metric)
+    })
+  })
+
+  document.getElementById('plot-refresh').addEventListener('click', () => draw(current))
+
+  // 标签页原型：只切选中态。
+  document.querySelectorAll('.tabs').forEach((list) => {
+    list.addEventListener('click', (event) => {
+      const tab = event.target.closest('button[role="tab"]')
+      if (!tab) return
+      list.querySelectorAll('button').forEach((other) => {
+        other.setAttribute('aria-selected', String(other === tab))
+      })
+    })
+  })
+
+  draw('cpu')
+</script>
+</body>
+</html>

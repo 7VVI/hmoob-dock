@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { NAlert, NButton } from 'naive-ui'
 import type { AlertRuleInput } from '../api/alerts'
 import type { AlertRule, AlertRuleKind } from '../api/types'
 
@@ -122,100 +123,90 @@ function save(): void {
     enabled: enabled.value,
   })
 }
+
+// The native controls stay native: the tests and the keyboards read their
+// labels. Tailwind gives them the face of the panel.
+const selectClass =
+  'h-[38px] w-full rounded-lg border border-[#d3dcec] bg-white px-3 text-sm outline-none focus:border-[#025ffb]'
+const inputClass =
+  'h-[38px] w-full rounded-lg border border-[#d3dcec] bg-white px-3 text-sm outline-none focus:border-[#025ffb]'
 </script>
 
 <template>
-  <form class="form" novalidate @submit.prevent="save">
-    <div class="field">
-      <label class="field__label" for="rule-kind">类型</label>
-      <select id="rule-kind" v-model="kind" class="field__input" name="kind">
+  <form class="grid max-w-xl gap-4" novalidate @submit.prevent="save">
+    <div class="grid gap-1">
+      <label class="text-xs font-medium text-[#344054]" for="rule-kind">类型</label>
+      <select id="rule-kind" v-model="kind" :class="selectClass" name="kind">
         <option value="">请选择类型</option>
         <option v-for="item in kinds" :key="item.value" :value="item.value">{{ item.label }}</option>
       </select>
-      <p v-if="errors?.kind" class="field__error">{{ errors.kind }}</p>
+      <p v-if="errors?.kind" class="text-xs text-[#e02e2e]">{{ errors.kind }}</p>
     </div>
 
-    <div class="field">
-      <label class="field__label" for="rule-scope">监视对象</label>
+    <div class="grid gap-1">
+      <label class="text-xs font-medium text-[#344054]" for="rule-scope">监视对象</label>
       <input
         id="rule-scope"
         v-model="scope"
-        class="field__input"
+        :class="inputClass"
         type="text"
         name="scope_id"
         autocomplete="off"
       />
-      <p class="field__hint">{{ scopeHint }}</p>
-      <p v-if="errors?.scope_id" class="field__error">{{ errors.scope_id }}</p>
+      <p class="text-xs text-[#667085]">{{ scopeHint }}</p>
+      <p v-if="errors?.scope_id" class="text-xs text-[#e02e2e]">{{ errors.scope_id }}</p>
     </div>
 
     <template v-if="isResource">
-      <div class="field">
-        <label class="field__label" for="rule-metric">指标</label>
-        <select id="rule-metric" v-model="metric" class="field__input" name="metric">
+      <div class="grid gap-1">
+        <label class="text-xs font-medium text-[#344054]" for="rule-metric">指标</label>
+        <select id="rule-metric" v-model="metric" :class="selectClass" name="metric">
           <option v-for="item in metrics" :key="item.value" :value="item.value">{{ item.label }}</option>
         </select>
-        <p v-if="errors?.metric" class="field__error">{{ errors.metric }}</p>
+        <p v-if="errors?.metric" class="text-xs text-[#e02e2e]">{{ errors.metric }}</p>
       </div>
 
-      <div class="field">
-        <label class="field__label" for="rule-threshold">阈值</label>
+      <div class="grid gap-1">
+        <label class="text-xs font-medium text-[#344054]" for="rule-threshold">阈值</label>
         <input
           id="rule-threshold"
           v-model="threshold"
-          class="field__input"
+          :class="inputClass"
           type="number"
           name="threshold"
           min="0"
           step="any"
         />
-        <p class="field__hint">超过这个值并持续到持续时间后开启告警。</p>
-        <p v-if="errors?.threshold" class="field__error">{{ errors.threshold }}</p>
+        <p class="text-xs text-[#667085]">超过这个值并持续到持续时间后开启告警。</p>
+        <p v-if="errors?.threshold" class="text-xs text-[#e02e2e]">{{ errors.threshold }}</p>
       </div>
     </template>
 
-    <div class="field">
-      <label class="field__label" for="rule-duration">持续时间（秒）</label>
+    <div class="grid gap-1">
+      <label class="text-xs font-medium text-[#344054]" for="rule-duration">持续时间（秒）</label>
       <input
         id="rule-duration"
         v-model="duration"
-        class="field__input"
+        :class="inputClass"
         type="number"
         name="for_seconds"
         min="0"
         step="1"
       />
-      <p class="field__hint">条件要保持多久才开启告警，0 表示立即开启。</p>
-      <p v-if="errors?.for_seconds" class="field__error">{{ errors.for_seconds }}</p>
+      <p class="text-xs text-[#667085]">条件要保持多久才开启告警，0 表示立即开启。</p>
+      <p v-if="errors?.for_seconds" class="text-xs text-[#e02e2e]">{{ errors.for_seconds }}</p>
     </div>
 
-    <div class="field">
-      <label class="field__check">
-        <input v-model="enabled" type="checkbox" name="enabled" />
-        <span>启用这条规则</span>
-      </label>
-    </div>
+    <label class="flex items-center gap-2 text-sm">
+      <input v-model="enabled" type="checkbox" name="enabled" class="h-4 w-4 accent-[#025ffb]" />
+      <span>启用这条规则</span>
+    </label>
 
-    <p v-if="localError" class="alert" role="alert">{{ localError }}</p>
+    <NAlert v-if="localError" type="error" :show-icon="false">{{ localError }}</NAlert>
 
-    <div class="rule__actions">
-      <button class="button button--primary" type="submit" :disabled="busy">保存</button>
-      <button class="button button--quiet" type="button" @click="emit('cancel')">取消</button>
+    <div class="flex flex-wrap gap-3">
+      <NButton attr-type="submit" type="primary" :disabled="busy">保存</NButton>
+      <NButton quaternary @click="emit('cancel')">取消</NButton>
     </div>
   </form>
 </template>
-
-<style scoped>
-.rule__actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-3);
-}
-
-.field__check {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: 0.9rem;
-}
-</style>

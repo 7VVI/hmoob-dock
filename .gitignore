@@ -28,3 +28,7 @@
 Thumbs.db
 .idea/
 .vscode/
+
+# Local development workspace (runtime data, screenshots, tool plans)
+/.local/
+/.zcode/

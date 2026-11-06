@@ -1,0 +1,1450 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hmoob dock · 控制台原型</title>
+<style>
+  /* ------------------------------------------------------------------
+   * hmoob dock —— 企业级控制台
+   *
+   * 白纸、细边、克制的靛蓝。信息靠留白分组，而不是靠边框和底色堆叠；
+   * 一屏只有一个主操作。数字用等宽体对齐，其余全部交给系统无衬线，
+   * 保证在离线机器上也能得到同样的版式。
+   * ------------------------------------------------------------------ */
+
+  :root {
+    --bg: #f7f8fa;
+    --surface: #fff;
+    --border: #e9ecf1;
+    --border-strong: #d5dae1;
+    --ink: #101828;
+    --ink-2: #344054;
+    --muted: #667085;
+    --brand: #4f46e5;
+    --brand-hover: #4338ca;
+    --brand-wash: #eef2ff;
+
+    --ok: #067647;
+    --ok-wash: #ecfdf3;
+    --warn: #b54708;
+    --warn-wash: #fffaeb;
+    --bad: #b42318;
+    --bad-wash: #fef3f2;
+
+    --space-1: 0.25rem;
+    --space-2: 0.5rem;
+    --space-3: 0.75rem;
+    --space-4: 1rem;
+    --space-5: 1.5rem;
+    --space-6: 2rem;
+    --space-7: 2.5rem;
+
+    --sidebar: 15.5rem;
+    --page-width: 70rem;
+    --radius: 12px;
+    --radius-sm: 8px;
+    --control: 2.25rem;
+    --shadow: 0 1px 2px rgb(16 24 40 / 4%);
+
+    --font-sans: "Segoe UI", system-ui, -apple-system, "PingFang SC",
+      "Microsoft YaHei", "Noto Sans SC", sans-serif;
+    --font-mono: ui-monospace, "SFMono-Regular", Menlo, Consolas,
+      "Liberation Mono", monospace;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+
+  html { -webkit-text-size-adjust: 100%; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 400 0.875rem/1.55 var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1, h2, h3 { margin: 0; font-weight: 600; line-height: 1.3; letter-spacing: -0.01em; }
+  p, ul, ol, dl, dd { margin: 0; }
+  ul, ol { padding-left: 1.25rem; }
+  a { color: inherit; }
+  code, kbd, pre { font-family: var(--font-mono); }
+
+  :focus-visible {
+    outline: 2px solid var(--brand);
+    outline-offset: 2px;
+  }
+
+  .icon {
+    width: 1rem;
+    height: 1rem;
+    flex: none;
+    fill: none;
+    stroke: currentcolor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  /* ------------------------------------------------------------- 骨架 */
+
+  .app {
+    display: grid;
+    grid-template-columns: var(--sidebar) minmax(0, 1fr);
+    min-height: 100dvh;
+  }
+
+  .app[hidden], .gate[hidden] { display: none; }
+
+  .sidebar {
+    position: sticky;
+    top: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    height: 100dvh;
+    padding: var(--space-4) var(--space-3);
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-1) var(--space-2) var(--space-4);
+  }
+
+  .brand__mark {
+    display: grid;
+    place-items: center;
+    width: 2rem;
+    height: 2rem;
+    border-radius: 9px;
+    background: linear-gradient(135deg, #6366f1, #4338ca);
+    color: #fff;
+    box-shadow: 0 1px 2px rgb(67 56 202 / 30%);
+  }
+
+  .brand__mark svg { width: 1rem; height: 1rem; stroke-width: 2; }
+
+  .brand__text { display: grid; gap: 0.0625rem; }
+
+  .brand__name {
+    font-size: 0.9375rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  .brand__meta {
+    font-size: 0.6875rem;
+    color: var(--muted);
+  }
+
+  .nav { display: grid; gap: var(--space-1); }
+
+  .nav__group {
+    padding: var(--space-3) var(--space-2) var(--space-1);
+    font-size: 0.6875rem;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    color: #98a2b3;
+  }
+
+  .nav__link {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    height: 2.25rem;
+    padding: 0 var(--space-2);
+    border-radius: var(--radius-sm);
+    color: var(--ink-2);
+    font-size: 0.875rem;
+    text-decoration: none;
+    white-space: nowrap;
+    transition: background-color 130ms ease, color 130ms ease;
+  }
+
+  .nav__link:hover { background: #f9fafb; color: var(--ink); }
+
+  .nav__link[aria-current="page"] {
+    background: var(--brand-wash);
+    color: var(--brand);
+    font-weight: 500;
+  }
+
+  .nav__count {
+    margin-left: auto;
+    min-width: 1.375rem;
+    padding: 0 0.375rem;
+    border-radius: 999px;
+    background: var(--bad-wash);
+    color: var(--bad);
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    line-height: 1.25rem;
+    text-align: center;
+  }
+
+  .nav__link[aria-current="page"] .nav__count { background: #fff; }
+
+  .account {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin-top: auto;
+    padding: var(--space-3) var(--space-2) var(--space-1);
+    border-top: 1px solid var(--border);
+  }
+
+  .account__avatar {
+    display: grid;
+    place-items: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: 50%;
+    background: #f2f4f7;
+    color: var(--ink-2);
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+
+  .account__text { display: grid; gap: 0.125rem; min-width: 0; }
+  .account__name { font-size: 0.8125rem; font-weight: 500; }
+
+  .account__state {
+    display: flex;
+    align-items: center;
+    gap: 0.3125rem;
+    color: var(--muted);
+    font-size: 0.6875rem;
+    white-space: nowrap;
+  }
+
+  .account__state::before {
+    content: "";
+    width: 0.375rem;
+    height: 0.375rem;
+    border-radius: 50%;
+    background: #12b76a;
+  }
+
+  .account__signout {
+    display: grid;
+    place-items: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    margin-left: auto;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--muted);
+    cursor: pointer;
+  }
+
+  .account__signout:hover { background: #f2f4f7; color: var(--ink); }
+
+  /* ------------------------------------------------------------- 页面 */
+
+  .main { min-width: 0; }
+
+  .page {
+    width: 100%;
+    max-width: var(--page-width);
+    margin: 0 auto;
+    padding: var(--space-6) var(--space-6) var(--space-7);
+  }
+
+  .page__head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: var(--space-3) var(--space-4);
+    margin-bottom: var(--space-5);
+  }
+
+  .page__heading { display: grid; gap: 0.25rem; }
+
+  .page__title {
+    font-size: 1.5rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+
+  .page__sub { color: var(--muted); font-size: 0.8125rem; }
+
+  .page__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    margin-left: auto;
+    padding-top: 0.125rem;
+  }
+
+  .crumb {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-bottom: 0.125rem;
+    color: var(--muted);
+    font-size: 0.75rem;
+  }
+
+  .crumb a { text-decoration: none; }
+  .crumb a:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 0.2em; }
+
+  /* ------------------------------------------------------------- 指标 */
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--space-4);
+    margin-bottom: var(--space-4);
+  }
+
+  .stat {
+    display: grid;
+    gap: 0.25rem;
+    padding: var(--space-4) var(--space-5);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    box-shadow: var(--shadow);
+  }
+
+  .stat__label {
+    color: var(--muted);
+    font-size: 0.75rem;
+    font-weight: 500;
+  }
+
+  .stat__value {
+    font-size: 1.75rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+  }
+
+  .stat__meta {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    color: var(--muted);
+    font-size: 0.75rem;
+  }
+
+  .dot {
+    width: 0.375rem;
+    height: 0.375rem;
+    border-radius: 50%;
+    background: currentcolor;
+    flex: none;
+  }
+
+  .dot--ok { color: #12b76a; }
+  .dot--warn { color: #f79009; }
+  .dot--bad { color: #f04438; }
+
+  /* ------------------------------------------------------------- 卡片 */
+
+  .card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+
+  .card + .card { margin-top: var(--space-4); }
+
+  .card__head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-4);
+    padding: var(--space-4) var(--space-5);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .card__title { font-size: 0.9375rem; font-weight: 600; }
+
+  .card__hint { color: var(--muted); font-size: 0.75rem; }
+  .card__actions { display: flex; gap: var(--space-2); margin-left: auto; }
+
+  .card__body { padding: var(--space-5); }
+  .card__body--flush { padding: var(--space-2) 0 0; }
+
+  /* ------------------------------------------------------------- 表格 */
+
+  .table-scroll { overflow-x: auto; }
+
+  .table {
+    width: 100%;
+    border-collapse: collapse;
+    text-align: left;
+  }
+
+  .table th {
+    padding: var(--space-2) var(--space-5);
+    color: var(--muted);
+    font-size: 0.75rem;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  .table td,
+  .table tbody th {
+    padding: var(--space-3) var(--space-5);
+    border-top: 1px solid var(--border);
+    font-weight: 400;
+    vertical-align: middle;
+  }
+
+  .table tbody tr { transition: background-color 120ms ease; }
+  .table tbody tr:hover { background: #fcfcfd; }
+
+  .table__name {
+    font-size: 0.8125rem;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  .table__sub {
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .table__num {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink-2);
+    white-space: nowrap;
+  }
+
+  .table__actions { text-align: right; white-space: nowrap; }
+
+  /* ------------------------------------------------------------- 标签 */
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    height: 1.375rem;
+    padding: 0 var(--space-2);
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  .pill::before {
+    content: "";
+    width: 0.375rem;
+    height: 0.375rem;
+    border-radius: 50%;
+    background: currentcolor;
+  }
+
+  .pill--ok { color: var(--ok); background: var(--ok-wash); }
+  .pill--warn { color: var(--warn); background: var(--warn-wash); }
+  .pill--bad { color: var(--bad); background: var(--bad-wash); }
+  .pill--idle { color: var(--muted); background: #f2f4f7; }
+
+  /* ------------------------------------------------------------- 控件 */
+
+  .field { display: grid; gap: 0.375rem; }
+
+  .field__label {
+    color: var(--ink-2);
+    font-size: 0.75rem;
+    font-weight: 500;
+  }
+
+  .field__input {
+    height: var(--control);
+    padding: 0 var(--space-3);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    color: var(--ink);
+    font: 0.8125rem/1 var(--font-sans);
+    transition: border-color 130ms ease, box-shadow 130ms ease;
+  }
+
+  .field__input:hover { border-color: #98a2b3; }
+
+  .field__input:focus-visible {
+    outline: none;
+    border-color: var(--brand);
+    box-shadow: 0 0 0 4px rgb(79 70 229 / 12%);
+  }
+
+  .field__hint { color: var(--muted); font-size: 0.75rem; }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.375rem;
+    height: var(--control);
+    padding: 0 var(--space-3);
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--ink-2);
+    font: 500 0.8125rem/1 var(--font-sans);
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background-color 130ms ease, border-color 130ms ease, color 130ms ease;
+  }
+
+  .btn--primary {
+    background: var(--brand);
+    color: #fff;
+    box-shadow: 0 1px 2px rgb(79 70 229 / 24%);
+  }
+
+  .btn--primary:hover { background: var(--brand-hover); }
+
+  .btn--ghost {
+    border-color: var(--border-strong);
+    background: var(--surface);
+  }
+
+  .btn--ghost:hover { background: #f9fafb; border-color: #98a2b3; }
+
+  .btn--quiet { color: var(--brand); }
+  .btn--quiet:hover { background: var(--brand-wash); }
+
+  .btn--danger { color: var(--bad); border-color: #fda29b; background: var(--surface); }
+  .btn--danger:hover { background: var(--bad-wash); }
+
+  .segmented {
+    display: inline-flex;
+    padding: 0.1875rem;
+    gap: 0.125rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: #f2f4f7;
+  }
+
+  .segmented button {
+    height: 1.75rem;
+    padding: 0 var(--space-3);
+    border: 0;
+    border-radius: 6px;
+    background: none;
+    color: var(--muted);
+    font: 500 0.75rem/1 var(--font-sans);
+    cursor: pointer;
+  }
+
+  .segmented button:hover { color: var(--ink); }
+
+  .segmented button[aria-pressed="true"] {
+    background: var(--surface);
+    color: var(--ink);
+    box-shadow: 0 1px 2px rgb(16 24 40 / 8%);
+  }
+
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
+  }
+
+  /* ------------------------------------------------------------- 曲线 */
+
+  .chart {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    padding: var(--space-3) var(--space-3) var(--space-2);
+  }
+
+  .chart svg { display: block; width: 100%; height: auto; }
+
+  .chart__readouts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-5);
+    padding: 0 var(--space-2) var(--space-3);
+  }
+
+  .chart__readout {
+    display: grid;
+    gap: 0.0625rem;
+    color: var(--muted);
+    font-size: 0.6875rem;
+  }
+
+  .chart__readout b {
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 0.9375rem;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .chart__readout--live b { color: var(--brand); }
+
+  .chart__note {
+    padding: var(--space-2) var(--space-2) 0;
+    color: var(--muted);
+    font-size: 0.75rem;
+  }
+
+  /* ------------------------------------------------------------- 标签页 */
+
+  .tabs {
+    display: flex;
+    gap: var(--space-5);
+    margin: var(--space-5) 0 var(--space-4);
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+  }
+
+  .tabs button {
+    position: relative;
+    padding: 0 0 var(--space-3);
+    border: 0;
+    background: none;
+    color: var(--muted);
+    font: 0.875rem/1.4 var(--font-sans);
+    white-space: nowrap;
+    cursor: pointer;
+  }
+
+  .tabs button::after {
+    content: "";
+    position: absolute;
+    inset: auto 0 -1px;
+    height: 2px;
+    background: transparent;
+  }
+
+  .tabs button:hover { color: var(--ink); }
+
+  .tabs button[aria-selected="true"] { color: var(--brand); font-weight: 500; }
+  .tabs button[aria-selected="true"]::after { background: var(--brand); }
+
+  /* ------------------------------------------------------------- 细节 */
+
+  .specs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-4) var(--space-6);
+    margin: 0;
+  }
+
+  .specs div { display: grid; gap: 0.125rem; }
+
+  .specs dt { color: var(--muted); font-size: 0.75rem; }
+
+  .specs dd {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .formrow {
+    display: grid;
+    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+    gap: var(--space-4);
+    align-items: end;
+  }
+
+  .check {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: 0.8125rem;
+    color: var(--ink-2);
+  }
+
+  .code {
+    display: block;
+    padding: var(--space-3) var(--space-4);
+    border: 1px solid #eaecf0;
+    border-radius: var(--radius-sm);
+    background: #f9fafb;
+    color: var(--ink-2);
+    font-size: 0.75rem;
+    overflow-wrap: anywhere;
+  }
+
+  .empty {
+    padding: var(--space-6) 0;
+    color: var(--muted);
+    font-size: 0.8125rem;
+    text-align: center;
+  }
+
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  /* ------------------------------------------------------------- 登录 */
+
+  .gate {
+    display: grid;
+    place-items: center;
+    min-height: 100dvh;
+    padding: var(--space-5);
+    background:
+      radial-gradient(60rem 30rem at 50% -10%, #eef2ff 0%, transparent 60%),
+      var(--bg);
+  }
+
+  .gate__panel {
+    width: min(100%, 24rem);
+    padding: var(--space-6);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    box-shadow: 0 1px 2px rgb(16 24 40 / 4%), 0 12px 24px -12px rgb(16 24 40 / 8%);
+    display: grid;
+    gap: var(--space-5);
+  }
+
+  .gate__brand { display: flex; align-items: center; gap: var(--space-3); }
+  .gate__title { font-size: 1.25rem; }
+  .gate__sub { color: var(--muted); font-size: 0.8125rem; }
+  .gate__field { display: grid; gap: 0.375rem; }
+  .gate__field .field__input { width: 100%; }
+  .gate .btn { width: 100%; }
+  .gate__foot { color: var(--muted); font-size: 0.75rem; text-align: center; }
+
+  /* ------------------------------------------------------------- 动效 */
+
+  @keyframes enter {
+    from { opacity: 0; transform: translateY(3px); }
+    to { opacity: 1; transform: none; }
+  }
+
+  .view:not([hidden]) { animation: enter 160ms ease-out; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+
+  /* ------------------------------------------------------------- 窄屏 */
+
+  @media (max-width: 64rem) {
+    .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+
+  @media (max-width: 52rem) {
+    .app { grid-template-columns: 1fr; }
+
+    .sidebar {
+      position: static;
+      height: auto;
+      flex-direction: row;
+      align-items: center;
+      gap: var(--space-2);
+      padding: var(--space-2) var(--space-3);
+      border-right: 0;
+      border-bottom: 1px solid var(--border);
+      overflow-x: auto;
+    }
+
+    .brand { flex: 0 0 auto; padding: 0; }
+    .brand__text { display: none; }
+
+    .nav { display: flex; flex: 0 0 auto; gap: 2px; }
+    .nav__group { display: none; }
+    .nav__link { flex: 0 0 auto; padding: 0 6px; }
+    .nav__count { display: none; }
+
+    .account { flex: 0 0 auto; margin: 0 0 0 auto; padding: 0; border: 0; }
+    .account__text, .account__avatar { display: none; }
+
+    .page { padding: var(--space-5) var(--space-4) var(--space-7); }
+    .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); }
+    .stat { padding: var(--space-3); gap: 0.125rem; }
+    .stat__label { font-size: 0.6875rem; }
+    .stat__value { font-size: 1.375rem; }
+    .stat__meta { font-size: 0.6875rem; }
+
+    .formrow { grid-template-columns: 1fr; }
+    .specs { grid-template-columns: 1fr; }
+    .col-optional { display: none; }
+    .table th, .table td, .table tbody th { padding: var(--space-3) var(--space-4); }
+    .card__body { padding: var(--space-4); }
+    .card__head { padding: var(--space-4); }
+  }
+
+
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-grid" viewBox="0 0 24 24">
+    <rect x="3.5" y="3.5" width="6.5" height="6.5" rx="1.5"/>
+    <rect x="14" y="3.5" width="6.5" height="6.5" rx="1.5"/>
+    <rect x="3.5" y="14" width="6.5" height="6.5" rx="1.5"/>
+    <rect x="14" y="14" width="6.5" height="6.5" rx="1.5"/>
+  </symbol>
+  <symbol id="i-box" viewBox="0 0 24 24">
+    <path d="M21 8 12 3 3 8v8l9 5 9-5V8Z"/>
+    <path d="m3 8 9 5 9-5"/>
+    <path d="M12 13v8"/>
+  </symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24">
+    <path d="M18 8a6 6 0 1 0-12 0c0 7-3 8-3 8h18s-3-1-3-8"/>
+    <path d="M13.7 21a2 2 0 0 1-3.4 0"/>
+  </symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24">
+    <path d="M4 6h5M15 6h5M4 12h9M19 12h1M4 18h3M13 18h7"/>
+    <circle cx="12" cy="6" r="2"/>
+    <circle cx="16" cy="12" r="2"/>
+    <circle cx="10" cy="18" r="2"/>
+  </symbol>
+  <symbol id="i-logout" viewBox="0 0 24 24">
+    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+    <path d="m16 17 5-5-5-5"/>
+    <path d="M21 12H9"/>
+  </symbol>
+  <symbol id="i-cube" viewBox="0 0 24 24">
+    <path d="M21 16V8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/>
+    <path d="m3.3 7 8.7 5 8.7-5"/>
+    <path d="M12 22V12"/>
+  </symbol>
+</svg>
+
+<div class="app" id="app">
+
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand__mark" aria-hidden="true">
+        <svg class="icon" viewBox="0 0 24 24"><use href="#i-cube"/></svg>
+      </span>
+      <span class="brand__text">
+        <span class="brand__name">hmoob dock</span>
+        <span class="brand__meta">轻量部署平台</span>
+      </span>
+    </div>
+
+    <nav class="nav" aria-label="主导航">
+      <span class="nav__group">监控</span>
+      <a class="nav__link" href="#overview" data-view="overview" aria-current="page">
+        <svg class="icon" aria-hidden="true"><use href="#i-grid"/></svg>概览
+      </a>
+      <a class="nav__link" href="#applications" data-view="applications">
+        <svg class="icon" aria-hidden="true"><use href="#i-box"/></svg>应用
+      </a>
+      <a class="nav__link" href="#alerts" data-view="alerts">
+        <svg class="icon" aria-hidden="true"><use href="#i-bell"/></svg>告警
+        <span class="nav__count" aria-label="1 条未恢复">1</span>
+      </a>
+      <span class="nav__group">管理</span>
+      <a class="nav__link" href="#settings" data-view="settings">
+        <svg class="icon" aria-hidden="true"><use href="#i-sliders"/></svg>设置
+      </a>
+    </nav>
+
+    <div class="account">
+      <span class="account__avatar" aria-hidden="true">管</span>
+      <span class="account__text">
+        <span class="account__name">管理员</span>
+        <span class="account__state">已连接</span>
+      </span>
+      <button class="account__signout" type="button" data-gate aria-label="退出登录" title="退出登录">
+        <svg class="icon" aria-hidden="true"><use href="#i-logout"/></svg>
+      </button>
+    </div>
+  </aside>
+
+  <main class="main">
+
+    <!-- ============================================================ 概览 -->
+    <section class="view" id="view-overview" data-view="overview">
+      <div class="page">
+        <header class="page__head">
+          <div class="page__heading">
+            <h1 class="page__title">概览</h1>
+            <p class="page__sub">所有节点与容器的实时状态。</p>
+          </div>
+          <div class="page__actions">
+            <button class="btn btn--ghost" type="button">刷新</button>
+          </div>
+        </header>
+
+        <div class="stats">
+          <div class="stat">
+            <span class="stat__label">节点</span>
+            <span class="stat__value">1</span>
+            <span class="stat__meta"><i class="dot dot--ok"></i>全部在线</span>
+          </div>
+          <div class="stat">
+            <span class="stat__label">容器</span>
+            <span class="stat__value">5</span>
+            <span class="stat__meta">1 个运行中</span>
+          </div>
+          <div class="stat">
+            <span class="stat__label">未恢复告警</span>
+            <span class="stat__value">1</span>
+            <span class="stat__meta"><i class="dot dot--warn"></i>需要确认</span>
+          </div>
+        </div>
+
+        <section class="card">
+          <header class="card__head">
+            <h2 class="card__title">节点</h2>
+            <span class="card__hint">最近采样 08:53:38</span>
+          </header>
+          <div class="card__body card__body--flush">
+            <div class="table-scroll">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th scope="col">主机名</th>
+                    <th scope="col">状态</th>
+                    <th scope="col">容器</th>
+                    <th scope="col" class="col-optional">最近活动</th>
+                    <th scope="col" class="col-optional"><span class="visually-hidden">操作</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td class="table__name">docker-desktop</td>
+                    <td><span class="pill pill--ok">已连接</span></td>
+                    <td class="table__num">5</td>
+                    <td class="table__num col-optional">2026/10/28 08:53:38</td>
+                    <td class="table__actions col-optional"><button class="btn btn--quiet" type="button">查看资源曲线</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <header class="card__head">
+            <h2 class="card__title">资源曲线</h2>
+            <span class="card__hint">按容器采样，不是整台机器。</span>
+          </header>
+          <div class="card__body">
+            <div class="toolbar">
+              <label class="field">
+                <span class="field__label">节点</span>
+                <select class="field__input">
+                  <option>docker-desktop</option>
+                </select>
+              </label>
+              <label class="field">
+                <span class="field__label">容器</span>
+                <select class="field__input">
+                  <option>demo-web-1 · running</option>
+                  <option>chat-mysql · exited</option>
+                  <option>chat-redis · exited</option>
+                  <option>hi-assisant-livekit-1 · exited</option>
+                  <option>siyuan · exited</option>
+                </select>
+              </label>
+              <div class="field">
+                <span class="field__label" id="metric-label">指标</span>
+                <div class="segmented" role="group" aria-labelledby="metric-label">
+                  <button type="button" data-metric="cpu" aria-pressed="true">CPU</button>
+                  <button type="button" data-metric="memory" aria-pressed="false">内存</button>
+                  <button type="button" data-metric="network" aria-pressed="false">网络</button>
+                </div>
+              </div>
+              <label class="field">
+                <span class="field__label">时间范围</span>
+                <select class="field__input">
+                  <option>最近 1 小时</option>
+                  <option>最近 6 小时</option>
+                  <option>最近 24 小时</option>
+                </select>
+              </label>
+              <button class="btn btn--primary" type="button" id="plot-refresh">查看曲线</button>
+            </div>
+
+            <figure class="chart" style="margin:0">
+              <div class="chart__readouts">
+                <span class="chart__readout chart__readout--live">当前<b id="reading-current">12.4%</b></span>
+                <span class="chart__readout">平均<b id="reading-average">15.0%</b></span>
+                <span class="chart__readout">峰值<b id="reading-peak">26.1%</b></span>
+                <span class="chart__readout">采样点<b id="reading-count">24</b></span>
+              </div>
+              <svg id="plot" viewBox="0 0 720 200" role="img" aria-label="demo-web-1 最近一小时的 CPU 使用率曲线"></svg>
+              <figcaption class="chart__note">每 10 秒采样，按分钟聚合；断采的分钟不计入平均。</figcaption>
+            </figure>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <!-- ============================================================ 应用 -->
+    <section class="view" id="view-applications" data-view="applications" hidden>
+      <div class="page">
+        <header class="page__head">
+          <div class="page__heading">
+            <h1 class="page__title">应用</h1>
+            <p class="page__sub">保存 Compose 配置即部署，回滚到任意一版。</p>
+          </div>
+          <div class="page__actions">
+            <button class="btn btn--primary" type="button">新建应用</button>
+          </div>
+        </header>
+
+        <section class="card">
+          <header class="card__head">
+            <h2 class="card__title">全部应用</h2>
+            <span class="card__hint">1 个应用</span>
+          </header>
+          <div class="card__body card__body--flush">
+            <div class="table-scroll">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th scope="col">名称</th>
+                    <th scope="col">目标</th>
+                    <th scope="col">状态</th>
+                    <th scope="col">最近部署</th>
+                    <th scope="col" class="col-optional">版本</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><a href="#app-detail" data-view="app-detail" class="table__name" style="text-decoration:none">演示站点</a></td>
+                    <td class="table__num">docker-desktop</td>
+                    <td><span class="pill pill--ok">运行中</span></td>
+                    <td class="table__num">2026/10/27 19:20:06</td>
+                    <td class="table__num col-optional">7KQ2dKFJ</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <!-- ======================================================== 应用详情 -->
+    <section class="view" id="view-app-detail" data-view="app-detail" hidden>
+      <div class="page">
+        <header class="page__head">
+          <div class="page__heading">
+            <span class="crumb"><a href="#applications" data-view="applications">应用</a> / 演示站点</span>
+            <h1 class="page__title">演示站点</h1>
+            <p class="page__sub">Compose 应用 · 目标 docker-desktop · 命名空间 demo-web</p>
+          </div>
+          <div class="page__actions">
+            <button class="btn btn--ghost" type="button">重新加载</button>
+            <button class="btn btn--primary" type="button">部署</button>
+          </div>
+        </header>
+
+        <div class="tabs" role="tablist" aria-label="应用详情">
+          <button role="tab" aria-selected="true" type="button">概览</button>
+          <button role="tab" aria-selected="false" type="button">容器</button>
+          <button role="tab" aria-selected="false" type="button">日志</button>
+          <button role="tab" aria-selected="false" type="button">配置</button>
+          <button role="tab" aria-selected="false" type="button">部署记录</button>
+        </div>
+
+        <section class="card">
+          <header class="card__head">
+            <h2 class="card__title">当前版本</h2>
+            <span class="pill pill--ok" style="margin-left:auto">部署成功</span>
+          </header>
+          <div class="card__body">
+            <dl class="specs">
+              <div><dt>版本</dt><dd>7KQ2dKFJrw71BT8eQ8Pg</dd></div>
+              <div><dt>提交时间</dt><dd>2026/10/27 19:20:06</dd></div>
+              <div><dt>服务</dt><dd>demo-web</dd></div>
+              <div><dt>镜像</dt><dd>nginx:1.27-alpine</dd></div>
+            </dl>
+          </div>
+        </section>
+
+        <section class="card">
+          <header class="card__head">
+            <h2 class="card__title">容器</h2>
+            <span class="card__hint">demo-web 命名空间</span>
+          </header>
+          <div class="card__body card__body--flush">
+            <div class="table-scroll">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th scope="col">服务</th>
+                    <th scope="col">容器</th>
+                    <th scope="col">镜像</th>
+                    <th scope="col">状态</th>
+                    <th scope="col">启动时间</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td class="table__name">demo-web</td>
+                    <td class="table__num">demo-web-1</td>
+                    <td class="table__num">nginx:1.27-alpine</td>
+                    <td><span class="pill pill--ok">运行中</span></td>
+                    <td class="table__num">2026/10/27 19:20:12</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <!-- ============================================================ 告警 -->
+    <section class="view" id="view-alerts" data-view="alerts" hidden>
+      <div class="page">
+        <header class="page__head">
+          <div class="page__heading">
+            <h1 class="page__title">告警</h1>
+            <p class="page__sub">容器退出、资源阈值和节点失联都会在这里出现。</p>
+          </div>
+          <div class="page__actions">
+            <button class="btn btn--ghost" type="button">刷新</button>
+          </div>
+        </header>
+
+        <section class="card">
+          <header class="card__head">
+            <h2 class="card__title">未恢复</h2>
+            <span class="card__hint">1 条</span>
+          </header>
+          <div class="card__body card__body--flush">
+            <div class="table-scroll">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th scope="col">规则</th>
+                    <th scope="col">对象</th>
+                    <th scope="col">触发时间</th>
+                    <th scope="col"><span class="visually-hidden">操作</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td class="table__name">容器退出</td>
+                    <td class="table__num">chat-mysql</td>
+                    <td class="table__num">2026/10/28 07:12:41</td>
+                    <td class="table__actions"><button class="btn btn--danger" type="button">确认</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <header class="card__head">
+            <h2 class="card__title">规则</h2>
+            <div class="card__actions">
+              <button class="btn btn--ghost" type="button">新建规则</button>
+            </div>
+          </header>
+          <div class="card__body card__body--flush">
+            <div class="table-scroll">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th scope="col">规则</th>
+                    <th scope="col">条件</th>
+                    <th scope="col">范围</th>
+                    <th scope="col">状态</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td class="table__name">容器退出</td>
+                    <td class="table__num">容器状态变为 exited</td>
+                    <td class="table__num">全部节点</td>
+                    <td><span class="pill pill--ok">启用</span></td>
+                  </tr>
+                  <tr>
+                    <td class="table__name">CPU 持续偏高</td>
+                    <td class="table__num">CPU &gt; 85% 持续 5 分钟</td>
+                    <td class="table__num">demo-web-1</td>
+                    <td><span class="pill pill--ok">启用</span></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <!-- ============================================================ 设置 -->
+    <section class="view" id="view-settings" data-view="settings" hidden>
+      <div class="page">
+        <header class="page__head">
+          <div class="page__heading">
+            <h1 class="page__title">设置</h1>
+            <p class="page__sub">通知地址与节点接入。当前版本 0.1.0。</p>
+          </div>
+        </header>
+
+        <section class="card">
+          <header class="card__head">
+            <h2 class="card__title">Webhook 地址</h2>
+            <span class="card__hint">地址加密保存，页面只显示脱敏后的形式。</span>
+          </header>
+          <div class="card__body">
+            <div class="formrow">
+              <label class="field">
+                <span class="field__label">地址</span>
+                <input class="field__input" type="url" value="https://hooks.example.com/services/T00/B00/secret">
+              </label>
+              <label class="field">
+                <span class="field__label">允许的私网网段</span>
+                <input class="field__input" type="text" value="10.0.0.0/8">
+              </label>
+            </div>
+            <div style="display:flex;align-items:center;gap:1rem;margin-top:1rem">
+              <label class="check"><input type="checkbox" checked> 启用推送</label>
+              <button class="btn btn--primary" type="button" style="margin-left:auto">保存</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <header class="card__head">
+            <h2 class="card__title">接入新节点</h2>
+            <span class="card__hint">令牌只能使用一次，5 分钟内有效。</span>
+          </header>
+          <div class="card__body">
+            <code class="code">/usr/local/bin/hmoob-agent enroll --server https://10.0.0.12:8443 --token 7d2f9c0a4b6e8f13</code>
+            <div style="display:flex;gap:0.5rem;margin-top:1rem">
+              <button class="btn btn--ghost" type="button">重新生成令牌</button>
+              <button class="btn btn--ghost" type="button">复制命令</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- ================================================================= 登录 -->
+<div class="gate" id="gate" hidden>
+  <form class="gate__panel" onsubmit="return false">
+    <span class="gate__brand">
+      <span class="brand__mark" aria-hidden="true">
+        <svg class="icon" viewBox="0 0 24 24"><use href="#i-cube"/></svg>
+      </span>
+      <span class="brand__text">
+        <span class="brand__name">hmoob dock</span>
+        <span class="brand__meta">轻量部署平台</span>
+      </span>
+    </span>
+    <div style="display:grid;gap:0.25rem">
+      <h1 class="gate__title">登录控制台</h1>
+      <p class="gate__sub">这个控制台只有一个管理员账户。</p>
+    </div>
+    <label class="gate__field">
+      <span class="field__label">管理员密码</span>
+      <input class="field__input" type="password" autocomplete="current-password">
+    </label>
+    <button class="btn btn--primary" type="submit" data-ungate>登录</button>
+    <p class="gate__foot">hmoob dock · v0.1.0</p>
+  </form>
+</div>
+
+<script>
+  const views = new Map(
+    [...document.querySelectorAll('.view')].map((node) => [node.dataset.view, node])
+  )
+
+  function show(name) {
+    if (!views.has(name)) name = 'overview'
+    for (const [key, node] of views) node.hidden = key !== name
+
+    document.querySelectorAll('.nav__link').forEach((link) => {
+      const active = link.dataset.view === name ||
+        (name === 'app-detail' && link.dataset.view === 'applications')
+      if (active) link.setAttribute('aria-current', 'page')
+      else link.removeAttribute('aria-current')
+    })
+
+    document.getElementById('app').hidden = false
+    document.getElementById('gate').hidden = true
+    window.scrollTo(0, 0)
+  }
+
+  document.addEventListener('click', (event) => {
+    const target = event.target.closest('[data-view]')
+    if (!target) return
+    event.preventDefault()
+    show(target.dataset.view)
+  })
+
+  document.querySelector('[data-gate]').addEventListener('click', () => {
+    document.getElementById('app').hidden = true
+    document.getElementById('gate').hidden = false
+  })
+
+  document.querySelector('[data-ungate]').addEventListener('click', () => show('overview'))
+
+  show(location.hash.slice(1) || 'overview')
+
+  // -------------------------------------------------------------- 曲线
+  const series = {
+    cpu: {
+      unit: '%', max: 100, ticks: [0, 25, 50, 75, 100], label: 'CPU 使用率',
+      data: [12.4, 13.8, 11.2, 10.6, 12.9, 15.4, 18.2, 16.7, 14.1, 13.3, 12.8,
+             15.9, 22.4, 26.1, 21.7, 18.3, 16.4, 15.1, 13.7, 12.2, 11.4, 10.8,
+             11.9, 12.4],
+    },
+    memory: {
+      unit: 'MB', max: 64, ticks: [0, 16, 32, 48, 64], label: '内存占用',
+      data: [28.1, 28.3, 28.2, 28.4, 28.6, 29.2, 31.4, 33.8, 34.2, 33.1, 32.4,
+             32.0, 35.6, 38.9, 36.4, 34.2, 33.0, 32.4, 31.8, 31.2, 30.9, 30.4,
+             29.6, 29.1],
+    },
+    network: {
+      unit: 'kB/s', max: 480, ticks: [0, 120, 240, 360, 480], label: '网络接收',
+      data: [18, 22, 16, 14, 31, 48, 92, 210, 386, 302, 168, 96, 74, 62, 108,
+             154, 121, 88, 64, 52, 47, 39, 28, 22],
+    },
+  }
+
+  const NS = 'http://www.w3.org/2000/svg'
+  const plot = document.getElementById('plot')
+  const padLeft = 44
+  const padRight = 8
+  const padTop = 12
+  const padBottom = 26
+  const height = 200
+  let width = 720
+  let current = 'cpu'
+
+  function svg(tag, attrs) {
+    const node = document.createElementNS(NS, tag)
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value)
+    return node
+  }
+
+  function format(value) {
+    return Number.isInteger(value) ? String(value) : value.toFixed(1)
+  }
+
+  function draw(key) {
+    current = key
+    const spec = series[key]
+    width = Math.max(320, Math.round(plot.parentElement.clientWidth - 26))
+    plot.setAttribute('viewBox', '0 0 ' + width + ' ' + height)
+    plot.replaceChildren()
+    plot.setAttribute('aria-label', 'demo-web-1 最近一小时的' + spec.label + '曲线')
+
+    const innerW = width - padLeft - padRight
+    const innerH = height - padTop - padBottom
+    const x = (index) => padLeft + (innerW * index) / (spec.data.length - 1)
+    const y = (value) => padTop + innerH - (innerH * value) / spec.max
+
+    for (const tick of spec.ticks) {
+      plot.append(svg('line', {
+        x1: padLeft, y1: y(tick), x2: width - padRight, y2: y(tick),
+        stroke: tick === 0 ? '#d5dae1' : '#eef0f4', 'stroke-width': 1,
+      }))
+      const label = svg('text', {
+        x: padLeft - 8, y: y(tick) + 3, 'text-anchor': 'end',
+        fill: '#98a2b3', 'font-size': 10.5, 'font-family': 'ui-monospace, monospace',
+      })
+      label.textContent = String(tick)
+      plot.append(label)
+    }
+
+    const line = spec.data.map((value, index) => `${index === 0 ? 'M' : 'L'}${x(index).toFixed(1)},${y(value).toFixed(1)}`).join(' ')
+    const area = line + ` L${x(spec.data.length - 1).toFixed(1)},${y(0)} L${padLeft},${y(0)} Z`
+
+    const gradient = svg('linearGradient', { id: 'chart-fill', x1: 0, y1: 0, x2: 0, y2: 1 })
+    gradient.append(svg('stop', { offset: '0%', 'stop-color': '#4f46e5', 'stop-opacity': 0.18 }))
+    gradient.append(svg('stop', { offset: '100%', 'stop-color': '#4f46e5', 'stop-opacity': 0.01 }))
+    const defs = svg('defs', {})
+    defs.append(gradient)
+    plot.append(defs)
+
+    plot.append(svg('path', { d: area, fill: 'url(#chart-fill)' }))
+    plot.append(svg('path', { d: line, fill: 'none', stroke: '#4f46e5', 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }))
+
+    const last = spec.data[spec.data.length - 1]
+    plot.append(svg('circle', {
+      cx: x(spec.data.length - 1), cy: y(last), r: 3.5,
+      fill: '#fff', stroke: '#4f46e5', 'stroke-width': 2,
+    }))
+
+    for (let index = 0; index < spec.data.length; index += 8) {
+      const label = svg('text', {
+        x: x(index), y: height - 8, 'text-anchor': 'middle',
+        fill: '#98a2b3', 'font-size': 10.5, 'font-family': 'ui-monospace, monospace',
+      })
+      const minutesAgo = 60 - index * (60 / (spec.data.length - 1))
+      const stamp = new Date(Date.UTC(2026, 9, 28, 8, 53) - minutesAgo * 60000)
+      label.textContent = String(stamp.getUTCHours()).padStart(2, '0') + ':' +
+        String(stamp.getUTCMinutes()).padStart(2, '0')
+      plot.append(label)
+    }
+
+    const total = spec.data.reduce((sum, value) => sum + value, 0)
+    document.getElementById('reading-current').textContent = format(last) + spec.unit
+    document.getElementById('reading-average').textContent = format(total / spec.data.length) + spec.unit
+    document.getElementById('reading-peak').textContent = format(Math.max(...spec.data)) + spec.unit
+    document.getElementById('reading-count').textContent = String(spec.data.length)
+  }
+
+  document.querySelectorAll('[data-metric]').forEach((button) => {
+    button.addEventListener('click', () => {
+      document.querySelectorAll('[data-metric]').forEach((other) => {
+        other.setAttribute('aria-pressed', String(other === button))
+      })
+      draw(button.dataset.metric)
+    })
+  })
+
+  document.getElementById('plot-refresh').addEventListener('click', () => draw(current))
+
+  document.querySelectorAll('.tabs').forEach((list) => {
+    list.addEventListener('click', (event) => {
+      const tab = event.target.closest('button[role="tab"]')
+      if (!tab) return
+      list.querySelectorAll('button').forEach((other) => {
+        other.setAttribute('aria-selected', String(other === tab))
+      })
+    })
+  })
+
+  draw('cpu')
+
+  let resizeTimer = 0
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer)
+    resizeTimer = setTimeout(() => draw(current), 120)
+  })
+
+  document.querySelectorAll('[data-view="overview"]').forEach((node) => {
+    node.addEventListener('click', () => requestAnimationFrame(() => draw(current)))
+  })
+</script>
+</body>
+</html>

@@ -50,17 +50,57 @@ export interface NodeSummary {
   id: string
   // The name of the host of the node.
   hostname: string
+  // The role of the node inside its Swarm cluster, standalone when it
+  // belongs to no cluster.
+  role: string
   // Whether the agent of the node is connected.
   connected: boolean
+  // Whether the credential of the node was withdrawn.
+  revoked: boolean
+  // The version of the Docker engine of the last inventory.
+  docker_version: string
+  // The type of the operating system of the engine.
+  os_type: string
+  // The architecture of the engine host.
+  os_arch: string
+  // The version of the agent of the last connection.
+  agent_version: string
   // The number of containers of the last complete inventory.
   container_count: number
   // The time of the last heartbeat, or null while the node never sent one.
   last_seen: string | null
+  // The time the node was enrolled.
+  created_at: string
 }
 
 // NodeListPayload is the answer of the node list.
 export interface NodeListPayload {
   nodes: NodeSummary[]
+}
+
+// NodeDetailPayload is the answer of the detail of a node.
+export interface NodeDetailPayload {
+  node: NodeSummary
+}
+
+// The operations the platform performs on one container of a node.
+export type ContainerAction = 'start' | 'stop' | 'restart' | 'remove'
+
+// ContainerOpResult is the answer of a container operation. The container
+// is the state the node read after the operation; it is absent for a
+// removal.
+export interface ContainerOpResult {
+  request_id: string
+  ok: boolean
+  error_code?: string
+  message?: string
+  container?: {
+    id: string
+    name: string
+    image: string
+    state: string
+    health: string
+  } | null
 }
 
 // AgentTokenPayload is the answer of the enrollment token endpoint.

@@ -9,6 +9,7 @@
 // the session of the administrator travels in the cookie of the browser and
 // no token ever appears in the address of a request.
 import { api } from './client'
+import type { EventSubscription } from './deployments'
 import type { MetricBucket, MetricPoint, MetricsPayload } from './types'
 
 // MetricName is the name of a value of a sample of a container.
@@ -207,6 +208,10 @@ export interface ContainerSummary {
   state: string
   health: string
   service: string
+  // namespace is the Compose project or the Swarm stack the container
+  // belongs to. It is empty for a container that no application of the
+  // platform manages.
+  namespace: string
 }
 
 // listContainers reads the containers of a node.
@@ -218,8 +223,39 @@ export async function listContainers(
   namespace = '',
 ): Promise<ContainerSummary[]> {
   const query = namespace === '' ? '' : `?namespace=${encodeURIComponent(namespace)}`
-  const payload = await api<{ containers: ContainerSummary[] }>(
+  const payload = await api<{ containers: ContainerSummary[]; collected_at?: string }>(
     `/api/v1/nodes/${encodeURIComponent(nodeID)}/containers${query}`,
   )
   return payload.containers ?? []
+}
+
+// subscribeContainerEvents listens to the changes of the containers of the
+// nodes.
+//
+// The event carries no state: the page reads its list again when one
+// arrives. The browser reconnects the stream on its own, and the page
+// reads the list again when the stream opens, so a reconnection never
+// leaves the page with an old list.
+export function subscribeContainerEvents(handlers: {
+  onEvent?: (nodeID: string) => void
+  onOpen?: () => void
+}): EventSubscription {
+  const source = new EventSource('/api/v1/events', { withCredentials: true })
+
+  source.addEventListener('container', (event: MessageEvent) => {
+    let payload: { object_id?: string }
+    try {
+      payload = JSON.parse(event.data) as { object_id?: string }
+    } catch {
+      return
+    }
+    if (payload.object_id) {
+      handlers.onEvent?.(payload.object_id)
+    }
+  })
+  source.addEventListener('open', () => handlers.onOpen?.())
+
+  return {
+    close: () => source.close(),
+  }
 }

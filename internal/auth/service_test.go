@@ -140,7 +140,7 @@ func TestInitializeKeepsTheBootstrapTokenWhenThePasswordIsRejected(t *testing.T)
 	if err := service.SeedBootstrap(ctx, "deployment-secret", tick.Now().Add(15*time.Minute)); err != nil {
 		t.Fatalf("SeedBootstrap: %v", err)
 	}
-	if err := service.Initialize(ctx, "deployment-secret", "too-short"); !errors.Is(err, auth.ErrPasswordPolicy) {
+	if err := service.Initialize(ctx, "deployment-secret", "short"); !errors.Is(err, auth.ErrPasswordPolicy) {
 		t.Fatalf("Initialize error = %v, want %v", err, auth.ErrPasswordPolicy)
 	}
 	if err := service.Initialize(ctx, "deployment-secret", "a-strong-test-password"); err != nil {
@@ -220,7 +220,7 @@ func TestInitializeChecksThePasswordLength(t *testing.T) {
 	if err := service.SeedBootstrap(ctx, "deployment-secret", tick.Now().Add(15*time.Minute)); err != nil {
 		t.Fatalf("SeedBootstrap: %v", err)
 	}
-	if err := service.Initialize(ctx, "deployment-secret", "short-passw"); !errors.Is(err, auth.ErrPasswordPolicy) {
+	if err := service.Initialize(ctx, "deployment-secret", "short"); !errors.Is(err, auth.ErrPasswordPolicy) {
 		t.Fatalf("Initialize error = %v, want %v", err, auth.ErrPasswordPolicy)
 	}
 	if err := service.Initialize(ctx, "deployment-secret", strings.Repeat("a", 129)); !errors.Is(err, auth.ErrPasswordPolicy) {
@@ -369,7 +369,7 @@ func TestChangePasswordRejectsAWeakNewPassword(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	if err := service.ChangePassword(context.Background(), session.Token, "a-strong-test-password", "short-passw"); !errors.Is(err, auth.ErrPasswordPolicy) {
+	if err := service.ChangePassword(context.Background(), session.Token, "a-strong-test-password", "short"); !errors.Is(err, auth.ErrPasswordPolicy) {
 		t.Fatalf("ChangePassword error = %v, want %v", err, auth.ErrPasswordPolicy)
 	}
 }

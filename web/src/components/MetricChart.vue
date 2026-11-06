@@ -77,11 +77,13 @@ function tooltip(params: unknown): string {
 function option() {
   // The curve is drawn on a canvas, so the colours are the literal values of
   // the palette: a canvas does not resolve a custom property.
-  const ink = '#0f1416'
-  const muted = '#66706c'
-  const line = '#d7dcd9'
-  const grid = '#e9edeb'
-  const mono = '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
+  const accent = '#0255f0'
+  const ink = '#101828'
+  const muted = '#667085'
+  const line = '#e6ecf7'
+  const grid = '#edf2fb'
+  const peak = '#8fa6cf'
+  const mono = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
   return {
     animation: false,
     grid: { left: 56, right: 20, top: 16, bottom: 40 },
@@ -125,10 +127,11 @@ function option() {
       showSymbol: false,
       smooth: false,
       lineStyle: {
-        width: index === 0 ? 1.5 : 1,
+        width: index === 0 ? 2 : 1.5,
         type: index === 0 ? 'solid' : 'dashed',
+        color: index === 0 ? accent : peak,
       },
-      itemStyle: { color: index === 0 ? ink : muted },
+      itemStyle: { color: index === 0 ? accent : peak },
     })),
   }
 }

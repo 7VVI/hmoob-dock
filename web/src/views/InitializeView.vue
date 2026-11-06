@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { NButton, NInput } from 'naive-ui'
+import AuthLayout from '../components/AuthLayout.vue'
 import { api } from '../api/client'
 import { ApiError, describeError, type InitializePayload } from '../api/types'
 import { clearSession } from '../auth/session'
@@ -8,8 +10,8 @@ import { clearSession } from '../auth/session'
 const router = useRouter()
 
 const bootstrapToken = ref('')
-const password = ref('')
-const confirmation = ref('')
+const password = ref('123456')
+const confirmation = ref('123456')
 const error = ref('')
 const fieldErrors = ref<Record<string, string>>({})
 const busy = ref(false)
@@ -52,57 +54,77 @@ async function submit() {
 </script>
 
 <template>
-  <main class="page page--narrow">
-    <p class="shell__brand">轻量部署平台</p>
-    <h1 class="page__title">初始化</h1>
-    <p class="page__lead">用部署时生成的凭据创建管理员账号。</p>
-    <form class="form" novalidate @submit.prevent="submit">
-      <div class="field">
-        <label class="field__label" for="bootstrap-token">初始化凭据</label>
-        <input
-          id="bootstrap-token"
-          v-model="bootstrapToken"
-          class="field__input"
+  <AuthLayout>
+    <header class="gate-head">
+      <p class="gate-eyebrow">FIRST RUN</p>
+      <h1>初始化</h1>
+      <p>用部署时生成的凭据创建管理员账号。</p>
+    </header>
+
+    <form class="gate-form" novalidate @submit.prevent="submit">
+      <div class="gate-field">
+        <label for="bootstrap-token">初始化凭据</label>
+        <NInput
+          v-model:value="bootstrapToken"
           type="password"
-          name="bootstrap-token"
+          size="large"
+          show-password-on="click"
+          placeholder="请输入部署时生成的凭据"
           autocomplete="off"
-          required
+          :input-props="{ id: 'bootstrap-token', name: 'bootstrap-token' }"
         />
-        <p class="field__hint">凭据由部署过程生成，只在第一次初始化时有效。</p>
-        <p v-if="fieldErrors.bootstrap_token" class="field__error">
-          {{ fieldErrors.bootstrap_token }}
-        </p>
+        <p class="gate-field-hint">凭据由部署过程生成，只在第一次初始化时有效。</p>
+        <p v-if="fieldErrors.bootstrap_token" class="gate-field-error">{{ fieldErrors.bootstrap_token }}</p>
       </div>
-      <div class="field">
-        <label class="field__label" for="password">管理员密码</label>
-        <input
-          id="password"
-          v-model="password"
-          class="field__input"
+
+      <div class="gate-field">
+        <label for="initialize-password">管理员密码</label>
+        <NInput
+          v-model:value="password"
           type="password"
-          name="password"
+          size="large"
+          show-password-on="click"
+          placeholder="请输入管理员密码"
           autocomplete="new-password"
-          required
+          :input-props="{ id: 'initialize-password', name: 'password' }"
         />
-        <p class="field__hint">密码长度为 12 到 128 个字符。</p>
-        <p v-if="fieldErrors.password" class="field__error">{{ fieldErrors.password }}</p>
+        <p class="gate-field-hint">密码长度为 6 到 128 个字符，默认密码为 123456。</p>
+        <p v-if="fieldErrors.password" class="gate-field-error">{{ fieldErrors.password }}</p>
       </div>
-      <div class="field">
-        <label class="field__label" for="confirmation">确认密码</label>
-        <input
-          id="confirmation"
-          v-model="confirmation"
-          class="field__input"
+
+      <div class="gate-field">
+        <label for="initialize-confirmation">确认密码</label>
+        <NInput
+          v-model:value="confirmation"
           type="password"
-          name="confirmation"
+          size="large"
+          placeholder="请再次输入管理员密码"
           autocomplete="new-password"
-          required
+          :input-props="{ id: 'initialize-confirmation', name: 'confirmation' }"
         />
       </div>
-      <p v-if="error" class="alert" role="alert">{{ error }}</p>
-      <button class="button button--primary" type="submit" :disabled="busy">
+
+      <p v-if="error" role="alert" class="gate-error">{{ error }}</p>
+
+      <NButton
+        class="gate-submit"
+        type="primary"
+        size="large"
+        attr-type="submit"
+        :disabled="busy"
+        :loading="busy"
+        @click="submit"
+      >
         {{ busy ? '初始化中…' : '创建管理员' }}
-      </button>
+      </NButton>
     </form>
-  </main>
+
+    <p class="gate-hint">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 3 5 5.8v5.4c0 4.2 2.9 7.6 7 9.8 4.1-2.2 7-5.6 7-9.8V5.8L12 3Z" />
+        <path d="m8.8 11.6 2.2 2.2 4.2-4.4" />
+      </svg>
+      管理员只能创建一次，请妥善保存密码
+    </p>
+  </AuthLayout>
 </template>

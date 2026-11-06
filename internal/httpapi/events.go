@@ -32,6 +32,10 @@ const (
 	EventOutput = "output"
 	// EventLog reports a piece of the logs of a container.
 	EventLog = "log"
+	// EventContainer reports a change of the containers of a node. The
+	// object of the event is the node, so a page of a node reloads its
+	// list of the containers.
+	EventContainer = "container"
 )
 
 // Event is a change of the control端 that the browser learns about.

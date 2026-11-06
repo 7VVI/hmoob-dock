@@ -107,6 +107,8 @@ var registeredTypes = map[string]bool{
 	TypeDeployQuery:       true,
 	TypeDeployQueryResult: true,
 	TypeDeployResolve:     true,
+	TypeContainerCommand:  true,
+	TypeContainerResult:   true,
 	TypeMetricsSample:     true,
 	TypeContainerEvent:    true,
 	TypeLogsSubscribe:     true,
@@ -132,6 +134,8 @@ func RegisteredTypes() []string {
 		TypeDeployQuery,
 		TypeDeployQueryResult,
 		TypeDeployResolve,
+		TypeContainerCommand,
+		TypeContainerResult,
 		TypeMetricsSample,
 		TypeContainerEvent,
 		TypeLogsSubscribe,
@@ -152,6 +156,7 @@ func PayloadLimit(messageType string) int {
 	case TypeInventory:
 		return MaxInventoryPayloadSize
 	case TypeDeployReceipt, TypeDeployQuery, TypeDeployQueryResult, TypeDeployResolve,
+		TypeContainerCommand, TypeContainerResult,
 		TypeContainerEvent, TypeLogsSubscribe, TypeLogsUnsubscribe:
 		return MaxControlPayloadSize
 	case TypeDeployOutput:

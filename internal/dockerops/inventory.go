@@ -337,10 +337,13 @@ func (l *Local) ProjectContainers(ctx context.Context, namespace string) ([]prot
 // identityOf turns the info of the engine into the identity of a node.
 func identityOf(info system.Info) protocol.NodeIdentity {
 	identity := protocol.NodeIdentity{
-		EngineID:    info.ID,
-		SwarmNodeID: info.Swarm.NodeID,
-		Role:        roleOf(info),
-		Hostname:    info.Name,
+		EngineID:      info.ID,
+		SwarmNodeID:   info.Swarm.NodeID,
+		Role:          roleOf(info),
+		Hostname:      info.Name,
+		ServerVersion: info.ServerVersion,
+		OSType:        info.OSType,
+		Architecture:  info.Architecture,
 	}
 	if info.Swarm.Cluster != nil {
 		identity.SwarmID = info.Swarm.Cluster.ID

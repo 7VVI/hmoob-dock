@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { NTag } from 'naive-ui'
 import type { TaskState } from '../api/types'
 
 const props = defineProps<{
@@ -38,16 +39,16 @@ function labelOf(state: TaskState): string {
 //
 // The phase whose outcome is unknown has a tone of its own, so the page
 // never paints it like a failure.
-function toneOf(state: TaskState): string {
+function toneOf(state: TaskState): 'success' | 'error' | 'warning' | 'info' {
   switch (state) {
     case 'succeeded':
-      return 'state--online'
+      return 'success'
     case 'failed':
-      return 'state--danger'
+      return 'error'
     case 'uncertain':
-      return 'state--unknown'
+      return 'warning'
     default:
-      return 'state--pending'
+      return 'info'
   }
 }
 
@@ -56,33 +57,12 @@ const tone = computed(() => toneOf(props.state))
 </script>
 
 <template>
-  <p class="deployment-state">
-    <span class="state" :class="tone">{{ label }}</span>
-    <span v-if="state === 'uncertain'" class="muted">
+  <p class="flex flex-wrap items-baseline gap-x-6 gap-y-2">
+    <NTag size="small" round :bordered="false" :type="tone">{{ label }}</NTag>
+    <span v-if="state === 'uncertain'" class="text-[#667085]">
       结果未知，需要人工核对后才能继续。
     </span>
-    <span v-if="partialUpdate" class="muted">部分更新：只有一部分服务到达了目标状态。</span>
-    <span v-if="rolledBack" class="muted">目标已回滚到本次部署之前的状态。</span>
+    <span v-if="partialUpdate" class="text-[#667085]">部分更新：只有一部分服务到达了目标状态。</span>
+    <span v-if="rolledBack" class="text-[#667085]">目标已回滚到本次部署之前的状态。</span>
   </p>
 </template>
-
-<style scoped>
-.deployment-state {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: var(--space-2) var(--space-4);
-}
-
-.state--pending {
-  color: var(--color-accent);
-}
-
-.state--danger {
-  color: var(--color-danger);
-}
-
-.state--unknown {
-  color: var(--color-offline);
-}
-</style>

@@ -203,12 +203,14 @@ test('logs the administrator in and shows the nodes of the deployment', async ({
   await installApi(page, runningDeployment())
 
   await logIn(page)
+  await page.getByRole('link', { name: '节点管理' }).click()
+  await expect(page).toHaveURL(/\/nodes$/)
 
-  await expect(page.getByRole('rowheader', { name: 'worker-1' })).toBeVisible()
+  await expect(page.getByRole('link', { name: /worker-1/ })).toBeVisible()
   await expect(page.getByText('已连接', { exact: true })).toBeVisible()
   await expect(page.getByText('连接中断', { exact: true })).toBeVisible()
   await expect(page.getByText('服务器宕机')).toHaveCount(0)
-  await expect(page.getByText('共 2 个节点，', { exact: false })).toBeVisible()
+  await expect(page.getByText('2 个节点', { exact: false })).toBeVisible()
 })
 
 test('refuses a wrong password and keeps the input', async ({ page }) => {
@@ -228,6 +230,8 @@ test('sends the administrator back to the login when the session ends', async ({
   await installApi(page, state)
   await logIn(page)
 
+  await page.getByRole('link', { name: '节点管理' }).click()
+
   // The session of the administrator expires while the page is open.
   state.authenticated = false
   await page.getByRole('button', { name: '刷新' }).click()
@@ -238,14 +242,16 @@ test('sends the administrator back to the login when the session ends', async ({
 test('shows the enrollment token once and keeps it out of the storage', async ({ page }) => {
   await installApi(page, runningDeployment())
   await logIn(page)
-  await page.goto('/settings')
+  await page.goto('/nodes')
 
+  await page.getByRole('button', { name: '接入节点' }).click()
   await page.getByRole('button', { name: '生成接入令牌' }).click()
   await expect(page.getByText('enrollment-token')).toBeVisible()
   expect(await page.evaluate(() => localStorage.length)).toBe(0)
   expect(await page.evaluate(() => sessionStorage.length)).toBe(0)
 
   await page.reload()
+  await page.getByRole('button', { name: '接入节点' }).click()
   await expect(page.getByRole('button', { name: '生成接入令牌' })).toBeVisible()
   await expect(page.getByText('enrollment-token')).toHaveCount(0)
 })
@@ -254,21 +260,21 @@ test('revokes a node only after a confirmation', async ({ page }) => {
   const state = runningDeployment()
   await installApi(page, state)
   await logIn(page)
-  await page.goto('/settings')
+  await page.goto('/nodes')
 
-  await page.getByRole('button', { name: '撤销' }).first().click()
-  await expect(page.getByText('确认撤销？')).toBeVisible()
+  await page.getByRole('button', { name: '撤销接入' }).first().click()
+  await expect(page.getByText('确认撤销接入？')).toBeVisible()
   await page.getByRole('button', { name: '取消' }).click()
-  await expect(page.getByRole('rowheader', { name: 'worker-1' })).toBeVisible()
+  await expect(page.getByRole('link', { name: /worker-1/ })).toBeVisible()
   expect(state.revoked).toHaveLength(0)
 
-  await page.getByRole('button', { name: '撤销' }).first().click()
+  await page.getByRole('button', { name: '撤销接入' }).first().click()
   await page.getByRole('button', { name: '确认' }).click()
 
   // The control端 keeps a revoked node in its list, so the node stays in the
   // list of the page and shows a broken connection.
-  await expect(page.getByRole('rowheader', { name: 'worker-1' })).toBeVisible()
-  await expect(page.getByRole('row', { name: /worker-1/ })).toContainText('连接中断')
+  await expect(page.getByRole('link', { name: /worker-1/ })).toBeVisible()
+  await expect(page.getByRole('link', { name: /worker-1/ })).toContainText('连接中断')
   await expect(page.getByText('已撤销该节点的接入凭据，它不会再连接。')).toBeVisible()
   expect(state.revoked).toEqual(['node-1'])
 })
@@ -278,17 +284,17 @@ test('reports a failed revocation and lets the administrator try again', async (
   state.revokeFails = true
   await installApi(page, state)
   await logIn(page)
-  await page.goto('/settings')
+  await page.goto('/nodes')
 
-  await page.getByRole('button', { name: '撤销' }).first().click()
+  await page.getByRole('button', { name: '撤销接入' }).first().click()
   await page.getByRole('button', { name: '确认' }).click()
 
   await expect(page.getByRole('alert')).toContainText('撤销节点失败')
-  await expect(page.getByRole('rowheader', { name: 'worker-1' })).toBeVisible()
+  await expect(page.getByRole('link', { name: /worker-1/ })).toBeVisible()
 
   await page.getByRole('button', { name: '确认' }).click()
   await expect(page.getByText('已撤销该节点的接入凭据，它不会再连接。')).toBeVisible()
-  await expect(page.getByRole('rowheader', { name: 'worker-1' })).toBeVisible()
+  await expect(page.getByRole('link', { name: /worker-1/ })).toBeVisible()
 })
 
 test('returns to the login after a password change', async ({ page }) => {
@@ -323,9 +329,8 @@ test('keeps the session and the input when the current password is wrong', async
   await expect(page.getByLabel('新密码', { exact: true })).toHaveValue('another-long-admin-password')
   await expect(page.getByLabel('确认新密码', { exact: true })).toHaveValue('another-long-admin-password')
 
-  // The session still works, so the page can still read the nodes.
-  await page.getByRole('button', { name: '刷新' }).click()
-  await expect(page.getByRole('rowheader', { name: 'worker-1' })).toBeVisible()
+  // The session still works, so the page stays where it is.
+  await expect(page.getByRole('heading', { name: '系统设置' })).toBeVisible()
 })
 
 test('signs the administrator out', async ({ page }) => {
@@ -348,5 +353,5 @@ test('logs the administrator in with the keyboard alone', async ({ page }) => {
   await page.keyboard.press('Enter')
 
   await expect(page).toHaveURL(/\/$/)
-  await expect(page.getByRole('rowheader', { name: 'worker-1' })).toBeVisible()
+  await expect(page.getByRole('link', { name: '节点管理' })).toBeVisible()
 })

@@ -589,7 +589,7 @@ func TestThePasswordPolicyIsReported(t *testing.T) {
 
 	response := server.post("/api/v1/auth/initialize", map[string]string{
 		"bootstrap_token": bootstrapCredential,
-		"password":        "short-passw",
+		"password":        "short",
 	})
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusBadRequest {
@@ -786,7 +786,7 @@ func TestThePasswordChangeReportsTheFieldOfTheNewPassword(t *testing.T) {
 
 	response := server.post("/api/v1/auth/password", map[string]string{
 		"current_password": adminPassword,
-		"new_password":     "short-passw",
+		"new_password":     "short",
 	}, withHeader("X-CSRF-Token", csrf))
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusBadRequest {

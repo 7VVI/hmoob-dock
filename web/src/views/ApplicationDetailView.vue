@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { NButton } from 'naive-ui'
 import { useRoute, useRouter } from 'vue-router'
 import AppShell from '../components/AppShell.vue'
 import DeploymentHistory from '../components/DeploymentHistory.vue'
@@ -80,8 +81,8 @@ type Tab = 'overview' | 'containers' | 'logs' | 'config' | 'history'
 const tabs: { key: Tab; label: string }[] = [
   { key: 'overview', label: '概况' },
   { key: 'containers', label: '容器' },
-  { key: 'logs', label: '日志' },
-  { key: 'config', label: '配置' },
+  { key: 'logs', label: '部署输出' },
+  { key: 'config', label: '站点配置' },
   { key: 'history', label: '部署记录' },
 ]
 
@@ -149,6 +150,29 @@ const containerID = ref('')
 // service, so the administrator picks one instead of typing an identifier.
 const appContainers = ref<ContainerSummary[]>([])
 const appContainersError = ref('')
+
+// theLogContainerName names the container the logs belong to, so the page
+// never shows a stream of output without saying whose it is.
+const theLogContainerName = computed(
+  () => appContainers.value.find((item) => item.id === containerID.value)?.name ?? '',
+)
+
+// healthLabel names the state of the health check of a container.
+function healthLabel(item: ContainerSummary): string {
+  if (item.state !== 'running') {
+    return '未运行'
+  }
+  switch (item.health) {
+    case 'healthy':
+      return '健康'
+    case 'unhealthy':
+      return '不健康'
+    case 'starting':
+      return '检查中'
+    default:
+      return '未配置'
+  }
+}
 const metric = ref<MetricName>('cpu_percent')
 const range = ref(curveRanges[0].minutes)
 const points = ref<MetricPoint[]>([])
@@ -815,6 +839,21 @@ async function closeLogs(): Promise<void> {
   }
 }
 
+// A change of the container moves the logs to the container the page now
+// names. A subscription that is open follows at once, so the output never
+// mixes the pieces of two containers.
+watch(containerID, async (current, previous) => {
+  if (previous === undefined || current === previous) {
+    return
+  }
+  if (logOpen.value || logBusy.value) {
+    closeLogs()
+    if (current !== '') {
+      await openLogs()
+    }
+  }
+})
+
 // handleLogEvent puts a piece of the log into the buffer.
 //
 // A piece that reports an error ends the stream of the logs and names the
@@ -900,13 +939,13 @@ onBeforeUnmount(() => {
 
     <div v-else-if="error && !app" class="alert" role="alert">
       <p>{{ error }}</p>
-      <button type="button" class="button button--quiet" @click="load">重试</button>
+      <NButton   quaternary type="primary" @click="load">重试</NButton>
     </div>
 
     <template v-else-if="app">
       <div class="detail__head">
-        <h1 class="page__title">{{ app.name }}</h1>
-        <button type="button" class="button button--quiet" @click="reload">重新加载</button>
+        <h1 class="page-title">{{ app.name }}</h1>
+        <NButton   quaternary type="primary" @click="reload">重新加载</NButton>
       </div>
 
       <p v-if="error" class="alert" role="alert">{{ error }}</p>
@@ -926,7 +965,7 @@ onBeforeUnmount(() => {
         </button>
       </nav>
 
-      <section v-if="tab === 'overview'" class="panel">
+      <section v-if="tab === 'overview'" class="rounded-xl border border-[#e6ecf7] bg-white p-6 shadow-sm">
         <h2 class="panel__title">概况</h2>
 
         <dl class="facts">
@@ -992,12 +1031,12 @@ onBeforeUnmount(() => {
             平台无法证明执行端已停止。只有在确认执行端不再继续操作之后，才能释放这个部署。
           </p>
           <div class="resolve__actions">
-            <button type="button" class="button button--quiet" :disabled="reconciling" @click="reconcile">
+            <NButton   quaternary type="primary" :disabled="reconciling" @click="reconcile">
               {{ reconciling ? '核对中…' : '重新核对' }}
-            </button>
-            <button type="button" class="button button--quiet" @click="resolveForm = true">
+            </NButton>
+            <NButton   quaternary type="primary" @click="resolveForm = true">
               人工核对并释放
-            </button>
+            </NButton>
           </div>
           <p v-if="reconcileError" class="alert" role="alert">{{ reconcileError }}</p>
 
@@ -1021,14 +1060,14 @@ onBeforeUnmount(() => {
             </div>
             <p v-if="resolveError" class="alert" role="alert">{{ resolveError }}</p>
             <div class="resolve__actions">
-              <button class="button button--primary" type="submit" :disabled="resolving">释放</button>
-              <button type="button" class="button button--quiet" @click="resolveForm = false">取消</button>
+              <NButton  attr-type="submit" type="primary" :disabled="resolving">释放</NButton>
+              <NButton   quaternary type="primary" @click="resolveForm = false">取消</NButton>
             </div>
           </form>
         </div>
       </section>
 
-      <section v-else-if="tab === 'containers'" class="panel">
+      <section v-else-if="tab === 'containers'" class="rounded-xl border border-[#e6ecf7] bg-white p-6 shadow-sm">
         <h2 class="panel__title">
           {{ app.mode === 'swarm' ? '服务、副本与任务' : '容器' }}
         </h2>
@@ -1108,14 +1147,14 @@ onBeforeUnmount(() => {
             </select>
           </div>
 
-          <button class="button button--primary" type="submit" :disabled="curveLoading">
+          <NButton  attr-type="submit" type="primary" :disabled="curveLoading">
             {{ curveLoading ? '读取中…' : '查看曲线' }}
-          </button>
+          </NButton>
         </form>
 
         <p v-if="curveError" class="alert" role="alert">
           <span>{{ curveError }}</span>
-          <button type="button" class="button button--quiet" @click="loadCurve">重试</button>
+          <NButton   quaternary type="primary" @click="loadCurve">重试</NButton>
         </p>
 
         <p v-else-if="!theTargetIsConnected" class="notice">
@@ -1139,32 +1178,59 @@ onBeforeUnmount(() => {
           :format="theScale"
         />
 
-        <h3 class="panel__title">日志</h3>
-        <p class="muted">日志按需打开，离开这个页签就会关闭。</p>
+        <h3 class="panel__title">容器日志</h3>
+        <p class="muted">日志是容器的：选择一个容器，按需打开它的输出。离开这个页签订阅就会关闭。</p>
 
-        <div class="actions">
-          <button
-            v-if="!logOpen"
-            type="button"
-            class="button button--quiet"
-            :disabled="logBusy"
-            @click="openLogs"
-          >
-            {{ logBusy ? '打开中…' : '打开日志' }}
-          </button>
-          <button v-else type="button" class="button button--quiet" @click="closeLogs">
-            关闭日志
-          </button>
+        <div v-if="appContainers.length === 0" class="empty">
+          这个应用在目标节点上还没有容器。部署之后，这里可以按容器查看日志。
         </div>
 
-        <p v-if="logError" class="alert" role="alert">{{ logError }}</p>
-        <p v-if="logNotice" class="notice">{{ logNotice }}</p>
+        <template v-else>
+          <div class="log-picker">
+            <div class="field">
+              <label class="field__label" for="log-container">查看哪个容器</label>
+              <select
+                id="log-container"
+                v-model="containerID"
+                class="field__input"
+                name="log-container"
+              >
+                <option v-for="item in appContainers" :key="item.id" :value="item.id">
+                  {{ item.name }} · {{ item.state === 'running' ? '运行中' : '已停止' }}{{ item.health ? ' · ' + healthLabel(item) : '' }}
+                </option>
+              </select>
+            </div>
+            <span class="muted log-picker__id">
+              容器 ID <code>{{ containerID || '—' }}</code>
+            </span>
+          </div>
 
-        <LogViewer :lines="shownLogLines" :truncated="logTruncated" />
+          <div class="actions">
+            <NButton
+              v-if="!logOpen"
+              
+               quaternary type="primary"
+              :disabled="logBusy || containerID === ''"
+              @click="openLogs"
+            >
+              {{ logBusy ? '打开中…' : '打开日志' }}
+            </NButton>
+            <NButton v-else   quaternary type="primary" @click="closeLogs">
+              关闭日志
+            </NButton>
+            <span v-if="logOpen" class="state state--online">正在跟随 {{ theLogContainerName }}</span>
+          </div>
+
+          <p v-if="logError" class="alert" role="alert">{{ logError }}</p>
+          <p v-if="logNotice" class="notice">{{ logNotice }}</p>
+
+          <LogViewer :lines="shownLogLines" :truncated="logTruncated" />
+        </template>
       </section>
 
-      <section v-else-if="tab === 'logs'" class="panel">
-        <h2 class="panel__title">日志</h2>
+      <section v-else-if="tab === 'logs'" class="rounded-xl border border-[#e6ecf7] bg-white p-6 shadow-sm">
+        <h2 class="panel__title">部署输出</h2>
+        <p class="muted">这是部署任务的执行输出（整站），不是某个容器的运行日志。容器日志在「概况」页签按容器查看。</p>
 
         <p v-if="!deployment" class="empty">
           在部署记录里选择一次部署，查看它的执行输出。
@@ -1178,18 +1244,21 @@ onBeforeUnmount(() => {
         </template>
       </section>
 
-      <section v-else-if="tab === 'config'" class="panel">
-        <h2 class="panel__title">配置</h2>
+      <section v-else-if="tab === 'config'" class="rounded-xl border border-[#e6ecf7] bg-white p-6 shadow-sm">
+        <h2 class="panel__title">站点配置</h2>
+        <p class="muted">
+          配置是站点级的：这一份 YAML 声明站点的全部服务，每个服务部署为多少个容器由它决定。单个容器的启停等运维操作在「容器」页签，不改这份配置。
+        </p>
 
         <div v-if="serverChanged" class="notice">
           <p>服务端的配置与本页面的编辑不同。本页面的编辑一直保留着。</p>
           <div class="resolve__actions">
-            <button type="button" class="button button--quiet" @click="useServerConfig">
+            <NButton   quaternary type="primary" @click="useServerConfig">
               使用服务端的配置
-            </button>
-            <button type="button" class="button button--quiet" @click="serverChanged = false">
+            </NButton>
+            <NButton   quaternary type="primary" @click="serverChanged = false">
               保留我的编辑
-            </button>
+            </NButton>
           </div>
         </div>
 
@@ -1212,7 +1281,7 @@ onBeforeUnmount(() => {
               @input="updateDraft(name, ($event.target as HTMLInputElement).value)"
               @change="applyVariable(name)"
             />
-            <button type="button" class="button button--quiet" @click="removeVariable(name)">删除</button>
+            <NButton   quaternary type="primary" @click="removeVariable(name)">删除</NButton>
           </li>
         </ul>
 
@@ -1238,16 +1307,16 @@ onBeforeUnmount(() => {
               name="variable-value"
             />
           </div>
-          <button class="button button--quiet" type="submit">添加变量</button>
+          <NButton quaternary type="primary" attr-type="submit">添加变量</NButton>
         </form>
 
         <h3 class="panel__title">影响预览</h3>
         <p class="muted">部署之前先看这次改动会带来什么。</p>
 
         <div class="actions">
-          <button type="button" class="button button--quiet" :disabled="previewing" @click="runPreview">
+          <NButton   quaternary type="primary" :disabled="previewing" @click="runPreview">
             {{ previewing ? '预览中…' : '预览影响' }}
-          </button>
+          </NButton>
         </div>
 
         <p v-if="previewError" class="alert" role="alert">
@@ -1299,18 +1368,18 @@ onBeforeUnmount(() => {
         </p>
 
         <div class="actions">
-          <button
-            type="button"
-            class="button button--primary"
+          <NButton
+            
+             type="primary"
             :disabled="!canSubmit"
             @click="submit"
           >
             {{ submitting ? '提交中…' : '保存并部署' }}
-          </button>
+          </NButton>
         </div>
       </section>
 
-      <section v-else class="panel">
+      <section v-else class="rounded-xl border border-[#e6ecf7] bg-white p-6 shadow-sm">
         <h2 class="panel__title">部署记录</h2>
         <DeploymentHistory
           :versions="versions"
@@ -1333,15 +1402,143 @@ onBeforeUnmount(() => {
   gap: var(--space-3);
 }
 
-.detail__head .page__title {
-  margin-bottom: var(--space-5);
+/* The picker of the container whose logs the page shows. The identifier
+ * travels beside it, so a copy for an API call is at hand. */
+.log-picker {
+  display: flex;
+  gap: var(--space-4);
+  align-items: end;
+  flex-wrap: wrap;
+}
+
+.log-picker .field {
+  min-width: 18rem;
+}
+
+.log-picker__id {
+  font-size: 0.71875rem;
+  padding-bottom: var(--space-2);
+}
+
+.log-picker__id code {
+  color: var(--color-ink-soft);
+}
+
+/* The classes the template shares with the rest of the platform. They live
+ * here because the global sheet moved to Tailwind and the library. */
+.muted {
+  color: #667085;
+}
+
+.empty {
+  padding: 1.5rem 0;
+  color: #667085;
+}
+
+.panel__title {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+}
+
+.panel__title + .muted,
+.panel__title ~ p.muted {
+  margin-bottom: 0.75rem;
+}
+
+.alert {
+  display: grid;
+  gap: 0.5rem;
+  padding: 13px 16px;
+  border-radius: 8px;
+  background: #fdeaea;
+  color: #e02e2e;
+  font-size: 0.75rem;
+  line-height: 1.7;
+}
+
+.alert__list {
+  padding-left: 1rem;
+}
+
+.notice {
+  padding: 13px 16px;
+  border-radius: 8px;
+  background: #fffaeb;
+  color: #84510a;
+  font-size: 0.75rem;
+  line-height: 1.7;
+}
+
+.form {
+  display: grid;
+  gap: 1rem;
+}
+
+.field {
+  display: grid;
+  gap: 0.25rem;
+  align-content: start;
+}
+
+.field__label {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: #344054;
+}
+
+.field__input {
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid #d3dcec;
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--color-ink);
+  font: inherit;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+textarea.field__input,
+select.field__input {
+  height: auto;
+  min-height: 38px;
+  padding: 8px 12px;
+}
+
+.field__input:focus-visible {
+  outline: none;
+  border-color: #025ffb;
+  box-shadow: 0 0 0 3px rgb(2 95 251 / 10%);
+}
+
+.field__input:disabled {
+  background: #f2f6fe;
+  color: #667085;
+}
+
+.field__hint {
+  color: #667085;
+  font-size: 0.6875rem;
+}
+
+.field__error {
+  color: #e02e2e;
+  font-size: 0.6875rem;
+}
+
+.field__check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.875rem;
 }
 
 .tabs {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-4);
-  border-bottom: 1px solid var(--color-border);
+  gap: 1.5rem;
+  border-bottom: 1px solid #e6ecf7;
+  overflow-x: auto;
 }
 
 .tabs__tab {
@@ -1349,41 +1546,40 @@ onBeforeUnmount(() => {
   background: transparent;
   border: none;
   border-bottom: 2px solid transparent;
-  padding: var(--space-2) 0;
-  color: var(--color-text-muted);
+  padding: 0 1px 13px;
+  color: #667085;
+  font-size: 0.8125rem;
+  white-space: nowrap;
   cursor: pointer;
-}
-
-.tabs__tab {
   transition: color 120ms ease;
 }
 
 .tabs__tab:hover {
-  color: var(--color-text);
+  color: #101828;
 }
 
 .tabs__tab--active {
-  color: var(--color-text);
-  border-bottom-color: var(--color-accent);
-  font-weight: 500;
+  color: #025ffb;
+  border-bottom-color: #025ffb;
+  font-weight: 600;
 }
 
 .facts {
   display: grid;
-  gap: var(--space-3);
+  gap: 0.75rem;
   margin: 0;
 }
 
 .facts__row {
   display: grid;
   grid-template-columns: 8rem 1fr;
-  gap: var(--space-3);
+  gap: 0.75rem;
   align-items: baseline;
 }
 
 .facts__row dt {
-  color: var(--color-text-muted);
-  font-size: 0.9rem;
+  color: #667085;
+  font-size: 0.875rem;
 }
 
 .facts__row dd {
@@ -1394,24 +1590,24 @@ onBeforeUnmount(() => {
 .observations,
 .variables {
   display: grid;
-  gap: var(--space-2);
+  gap: 0.5rem;
   padding: 0;
-  margin: var(--space-3) 0 0;
+  margin: 0.75rem 0 0;
   list-style: none;
 }
 
 .observations li {
-  padding: var(--space-2) 0;
-  border-bottom: 1px solid var(--color-border);
+  padding: 0.5rem 0;
+  border-bottom: 1px solid #e6ecf7;
 }
 
 .variables__row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-2) 0;
-  border-bottom: 1px solid var(--color-border);
+  gap: 0.75rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid #e6ecf7;
 }
 
 .variables__name {
@@ -1423,75 +1619,104 @@ onBeforeUnmount(() => {
   max-width: 20rem;
 }
 
-.form--inline {
-  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
-  align-items: end;
-  max-width: none;
+.logs {
+  margin: 0.75rem 0;
+  padding: 1rem;
+  border: 1px solid #e6ecf7;
+  border-radius: 8px;
+  background: #f2f6fe;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.8px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 26rem;
+  overflow: auto;
 }
 
-.form--inline .button {
-  margin-bottom: var(--space-1);
+.state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: #f2f4f7;
+  color: #667085;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.state::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentcolor;
+  flex: none;
+}
+
+.state--online {
+  background: #e8f1fe;
+  color: #025ffb;
+}
+
+.state--offline {
+  background: #fffaeb;
+  color: #b54708;
 }
 
 .actions {
   display: flex;
-  gap: var(--space-3);
-  margin-top: var(--space-4);
+  gap: 0.75rem;
+  margin-top: 1rem;
 }
 
 .preview {
-  margin-top: var(--space-4);
-  padding: var(--space-4);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  background: var(--color-page);
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid #e6ecf7;
+  border-radius: 8px;
+  background: #f2f6fe;
 }
 
 .preview__list {
-  display: grid;
-  gap: var(--space-1);
-  padding-left: var(--space-5);
-  font-size: 0.9rem;
+  margin: 0.25rem 0;
+  padding-left: 1.25rem;
 }
 
-.preview__block {
-  margin-top: var(--space-3);
+.preview__block p {
+  font-weight: 600;
 }
 
 .resolve {
-  margin-top: var(--space-5);
-  padding-top: var(--space-4);
-  border-top: 1px solid var(--color-border);
+  margin-top: 1.5rem;
+  padding: 1rem;
+  border: 1px dashed #d3dcec;
+  border-radius: 8px;
+  background: #f2f6fe;
 }
 
 .resolve__actions {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-3);
-  margin-top: var(--space-3);
+  gap: 0.75rem;
+  margin-top: 0.75rem;
 }
 
-.logs {
-  max-height: 30rem;
-  overflow: auto;
-  padding: var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  background: var(--color-page);
-  font-family: var(--font-mono);
-  font-size: 0.8rem;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.alert__list {
-  padding-left: var(--space-5);
-}
-
-.field__check {
+.form--inline {
   display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: 0.9rem;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.75rem;
+  max-width: none;
+}
+
+.form--inline > NButton {
+  margin-bottom: 0.25rem;
+}
+
+.detail__head .text-xl {
+  margin-bottom: 0;
 }
 </style>

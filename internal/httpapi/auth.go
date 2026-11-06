@@ -491,13 +491,13 @@ func formatTimestamp(t time.Time) string {
 // passwordFields is the message of the password field when the password does
 // not meet the policy.
 func passwordFields() map[string]string {
-	return map[string]string{"password": "密码长度需为 12 到 128 个字符"}
+	return map[string]string{"password": "密码长度需为 6 到 128 个字符"}
 }
 
 // newPasswordFields is the message of the new password field when the new
 // password does not meet the policy.
 func newPasswordFields() map[string]string {
-	return map[string]string{"new_password": "密码长度需为 12 到 128 个字符"}
+	return map[string]string{"new_password": "密码长度需为 6 到 128 个字符"}
 }
 
 // noStore marks the answer of an authentication endpoint as one that no

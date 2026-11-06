@@ -19,7 +19,7 @@ func TestTheInventoryOfANodeGrowsOld(t *testing.T) {
 	hub := NewHub(nil)
 	node := newConnection(hub, "node-1", nil,
 		protocol.NodeIdentity{EngineID: "engine-a"},
-		Node{ID: "node-1", EngineID: "engine-a"})
+		Node{ID: "node-1", EngineID: "engine-a"}, "")
 
 	now := time.Now()
 	node.inventory = &protocol.Inventory{
@@ -46,7 +46,7 @@ func TestANodeWithoutAnInventoryHasNone(t *testing.T) {
 	hub := NewHub(nil)
 	node := newConnection(hub, "node-1", nil,
 		protocol.NodeIdentity{EngineID: "engine-a"},
-		Node{ID: "node-1", EngineID: "engine-a"})
+		Node{ID: "node-1", EngineID: "engine-a"}, "")
 
 	if _, err := node.currentInventory(time.Now()); !errors.Is(err, ErrNoInventory) {
 		t.Fatalf("read the inventory: %v, want %v", err, ErrNoInventory)
@@ -60,7 +60,7 @@ func TestTheHeartbeatWindowDecidesAboutALostNode(t *testing.T) {
 	hub := NewHub(nil)
 	node := newConnection(hub, "node-1", nil,
 		protocol.NodeIdentity{EngineID: "engine-a"},
-		Node{ID: "node-1", EngineID: "engine-a"})
+		Node{ID: "node-1", EngineID: "engine-a"}, "")
 
 	now := time.Now()
 	node.lastSeen = now.Add(-2 * HeartbeatTimeout)
@@ -96,7 +96,8 @@ func TestTheManagerOfAClusterIsDecidedByTheEnrolledRecord(t *testing.T) {
 			EngineID: "engine-a",
 			SwarmID:  "cluster-1",
 			Role:     protocol.RoleWorker,
-		})
+		},
+		"")
 	node.lastSeen = time.Now()
 	hub.connections["node-1"] = node
 

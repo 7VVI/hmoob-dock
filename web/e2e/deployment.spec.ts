@@ -543,7 +543,7 @@ test('lists the applications of the deployment', async ({ page }) => {
   await installApi(page, runningState())
   await logIn(page)
 
-  await page.getByRole('link', { name: '应用', exact: true }).click()
+  await page.getByRole('link', { name: '站点管理' }).click()
   await expect(page).toHaveURL(/\/applications$/)
   await expect(page.getByRole('rowheader', { name: '网站' })).toBeVisible()
   await expect(page.getByRole('cell', { name: 'Compose' })).toBeVisible()

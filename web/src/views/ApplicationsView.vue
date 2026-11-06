@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { NAlert, NButton, NCard, NCheckbox } from 'naive-ui'
 import AppShell from '../components/AppShell.vue'
 import { api } from '../api/client'
 import { createApplication, listApplications } from '../api/deployments'
@@ -99,184 +100,170 @@ async function create() {
 }
 
 onMounted(load)
+
+// The shared face of the native selects of the form. The selects stay
+// native: the name of an option is what the tests and the keyboard read.
+const selectClass =
+  'h-[38px] w-full rounded-lg border border-[#d3dcec] bg-white px-3 text-sm outline-none focus:border-[#025ffb]'
+const inputClass =
+  'h-[38px] w-full rounded-lg border border-[#d3dcec] bg-white px-3 text-sm outline-none focus:border-[#025ffb]'
 </script>
 
 <template>
   <AppShell>
-    <h1 class="page__title">应用</h1>
-
-    <section class="panel">
-      <div class="panel__head">
-        <h2 class="panel__title">应用列表</h2>
-        <div class="panel__actions">
-          <button type="button" class="button button--quiet" :disabled="loading" @click="load">
-            刷新
-          </button>
-          <button type="button" class="button button--primary" @click="openForm">新建应用</button>
-        </div>
+    <div class="mb-1 flex items-center justify-between gap-4">
+      <h1 class="page-title">站点管理</h1>
+      <div class="flex gap-2">
+        <NButton quaternary type="primary" :loading="loading" @click="load">刷新</NButton>
+        <NButton type="primary" @click="openForm">新建应用</NButton>
       </div>
+    </div>
+    <p class="page-subtitle">一个站点以应用的形式管理：一份 Compose / Stack 配置，部署为节点上的一组服务与容器。</p>
 
-      <p v-if="loading" class="muted">正在读取应用…</p>
+    <section class="mb-6">
+      <NCard title="应用列表">
+        <p v-if="loading" class="py-6 text-[#667085]">正在读取应用…</p>
 
-      <div v-else-if="error" class="alert" role="alert">
-        <p>{{ error }}</p>
-        <button type="button" class="button button--quiet" @click="load">重试</button>
-      </div>
-
-      <template v-else>
-        <p v-if="applications.length === 0" class="empty">
-          还没有应用。新建一个应用，把 Compose 文件或 Swarm Stack 部署到节点上。
-        </p>
-
-        <div v-else class="table-scroll">
-          <table class="nodes">
-            <caption class="visually-hidden">应用列表</caption>
-            <thead>
-              <tr>
-                <th scope="col">名称</th>
-                <th scope="col">模式</th>
-                <th scope="col">命名空间</th>
-                <th scope="col">目标</th>
-                <th scope="col">
-                  <span class="visually-hidden">操作</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="app in applications" :key="app.id">
-                <th scope="row" class="nodes__host">
-                  <RouterLink class="history__link" :to="`/applications/${encodeURIComponent(app.id)}`">
-                    {{ app.name }}
-                  </RouterLink>
-                </th>
-                <td>{{ app.mode === 'swarm' ? 'Swarm' : 'Compose' }}</td>
-                <td class="nodes__host">{{ app.namespace }}</td>
-                <td :title="app.target_id">{{ hostnameOf(app.target_id) }}</td>
-                <td class="nodes__actions">
-                  <RouterLink
-                    class="button button--quiet"
-                    :to="`/applications/${encodeURIComponent(app.id)}`"
-                  >
-                    打开
-                  </RouterLink>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+        <div v-else-if="error" class="rounded-lg bg-[#fdeaea] px-4 py-3 text-xs text-[#e02e2e]">
+          <p>{{ error }}</p>
+          <NButton quaternary type="primary" class="mt-2" @click="load">重试</NButton>
         </div>
-      </template>
+
+        <template v-else>
+          <p v-if="applications.length === 0" class="py-6 text-center text-[#667085]">
+            还没有应用。新建一个应用，把 Compose 文件或 Swarm Stack 部署到节点上。
+          </p>
+
+          <div v-else class="overflow-x-auto">
+            <table class="w-full border-collapse text-left text-[13px]">
+              <caption class="sr-only">应用列表</caption>
+              <thead>
+                <tr>
+                  <th scope="col" class="whitespace-nowrap px-5 py-3 text-xs font-medium text-[#667085]">名称</th>
+                  <th scope="col" class="whitespace-nowrap px-5 py-3 text-xs font-medium text-[#667085]">模式</th>
+                  <th scope="col" class="whitespace-nowrap px-5 py-3 text-xs font-medium text-[#667085]">命名空间</th>
+                  <th scope="col" class="whitespace-nowrap px-5 py-3 text-xs font-medium text-[#667085]">目标</th>
+                  <th scope="col" class="px-5 py-3"><span class="sr-only">操作</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="app in applications"
+                  :key="app.id"
+                  class="border-b border-[#e6ecf7] last:border-b-0 hover:bg-[#f7faff]"
+                >
+                  <th scope="row" class="whitespace-nowrap px-5 py-4 text-[13px] font-medium">
+                    <RouterLink :to="`/applications/${encodeURIComponent(app.id)}`" class="hover:text-[#025ffb]">
+                      {{ app.name }}
+                    </RouterLink>
+                  </th>
+                  <td class="whitespace-nowrap px-5 py-4">{{ app.mode === 'swarm' ? 'Swarm' : 'Compose' }}</td>
+                  <td class="whitespace-nowrap px-5 py-4 font-mono text-xs">{{ app.namespace }}</td>
+                  <td class="whitespace-nowrap px-5 py-4" :title="app.target_id">
+                    {{ hostnameOf(app.target_id) }}
+                  </td>
+                  <td class="whitespace-nowrap px-5 py-4 text-right">
+                    <NButton quaternary type="primary" size="small" :to="`/applications/${encodeURIComponent(app.id)}`">
+                      打开
+                    </NButton>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
+      </NCard>
     </section>
 
-    <section v-if="creating" class="panel">
-      <div class="panel__head">
-        <h2 class="panel__title">新建应用</h2>
-        <button type="button" class="button button--quiet" @click="closeForm">关闭</button>
-      </div>
+    <section v-if="creating">
+      <NCard title="新建应用">
+        <template #header-extra>
+          <NButton quaternary @click="closeForm">关闭</NButton>
+        </template>
 
-      <form class="form" novalidate @submit.prevent="create">
-        <div class="field">
-          <label class="field__label" for="application-name">名称</label>
-          <input
-            id="application-name"
-            v-model="name"
-            class="field__input"
-            type="text"
-            name="application-name"
-            required
-            @blur="namespace = namespace || namespaceOf(name)"
-          />
-        </div>
+        <form class="grid max-w-2xl gap-4" novalidate @submit.prevent="create">
+          <div class="grid gap-1">
+            <label class="text-xs font-medium text-[#344054]" for="application-name">名称</label>
+            <input
+              id="application-name"
+              v-model="name"
+              :class="inputClass"
+              type="text"
+              name="application-name"
+              required
+              @blur="namespace = namespace || namespaceOf(name)"
+            />
+          </div>
 
-        <div class="field">
-          <label class="field__label" for="application-mode">模式</label>
-          <select
-            id="application-mode"
-            v-model="mode"
-            class="field__input"
-            name="application-mode"
-          >
-            <option value="compose">Compose</option>
-            <option value="swarm">Swarm</option>
-          </select>
-          <p class="field__hint">模式在创建之后不能更改。</p>
-        </div>
+          <div class="grid gap-1">
+            <label class="text-xs font-medium text-[#344054]" for="application-mode">模式</label>
+            <select id="application-mode" v-model="mode" :class="selectClass" name="application-mode">
+              <option value="compose">Compose</option>
+              <option value="swarm">Swarm</option>
+            </select>
+            <p class="text-xs text-[#667085]">模式在创建之后不能更改。</p>
+          </div>
 
-        <div class="field">
-          <label class="field__label" for="application-target">目标</label>
-          <select
-            v-if="mode === 'compose'"
-            id="application-target"
-            v-model="targetID"
-            class="field__input"
-            name="application-target"
-          >
-            <option value="">请选择节点</option>
-            <option v-for="node in nodes" :key="node.id" :value="node.id">
-              {{ node.hostname }}（{{ node.id }}）
-            </option>
-          </select>
-          <input
-            v-else
-            id="application-target"
-            v-model="targetID"
-            class="field__input"
-            type="text"
-            name="application-target"
-          />
-          <p class="field__hint">
-            {{
-              mode === 'compose'
-                ? 'Compose 应用运行在一个节点上。'
-                : 'Swarm 应用运行在一个集群上，请填写集群的标识。'
-            }}
-          </p>
-        </div>
+          <div class="grid gap-1">
+            <label class="text-xs font-medium text-[#344054]" for="application-target">目标</label>
+            <select
+              v-if="mode === 'compose'"
+              id="application-target"
+              v-model="targetID"
+              :class="selectClass"
+              name="application-target"
+            >
+              <option value="">请选择节点</option>
+              <option v-for="node in nodes" :key="node.id" :value="node.id">
+                {{ node.hostname }}（{{ node.id }}）
+              </option>
+            </select>
+            <input
+              v-else
+              id="application-target"
+              v-model="targetID"
+              :class="inputClass"
+              type="text"
+              name="application-target"
+            />
+            <p class="text-xs text-[#667085]">
+              {{
+                mode === 'compose'
+                  ? 'Compose 应用运行在一个节点上。'
+                  : 'Swarm 应用运行在一个集群上，请填写集群的标识。'
+              }}
+            </p>
+          </div>
 
-        <div class="field">
-          <label class="field__label" for="application-namespace">命名空间</label>
-          <input
-            id="application-namespace"
-            v-model="namespace"
-            class="field__input"
-            type="text"
-            name="application-namespace"
-            required
-          />
-          <p class="field__hint">
-            命名空间是 Compose 项目和 Swarm Stack 的名字，只能包含小写字母、数字、- 和 _。
-          </p>
-        </div>
+          <div class="grid gap-1">
+            <label class="text-xs font-medium text-[#344054]" for="application-namespace">命名空间</label>
+            <input
+              id="application-namespace"
+              v-model="namespace"
+              :class="inputClass"
+              type="text"
+              name="application-namespace"
+              required
+            />
+            <p class="text-xs text-[#667085]">
+              命名空间是 Compose 项目和 Swarm Stack 的名字，只能包含小写字母、数字、- 和 _。
+            </p>
+          </div>
 
-        <div class="field">
-          <label class="field__check">
-            <input v-model="adopt" type="checkbox" name="application-adopt" />
-            <span>我确认接管该命名空间下已有的资源</span>
-          </label>
-          <p class="field__hint">
-            只有在该命名空间里已有平台不管理的资源时，才需要勾选这一项。
-          </p>
-        </div>
+          <div class="grid gap-1">
+            <NCheckbox v-model:checked="adopt">我确认接管该命名空间下已有的资源</NCheckbox>
+            <p class="text-xs text-[#667085]">
+              只有在该命名空间里已有平台不管理的资源时，才需要勾选这一项。
+            </p>
+          </div>
 
-        <p v-if="formError" class="alert" role="alert">{{ formError }}</p>
+          <NAlert v-if="formError" type="error" :show-icon="false">{{ formError }}</NAlert>
 
-        <button class="button button--primary" type="submit" :disabled="busy">
-          {{ busy ? '创建中…' : '创建应用' }}
-        </button>
-      </form>
+          <NButton class="self-start" type="primary" attr-type="submit" :loading="busy">
+            创建应用
+          </NButton>
+        </form>
+      </NCard>
     </section>
   </AppShell>
 </template>
-
-<style scoped>
-.panel__actions {
-  display: flex;
-  gap: var(--space-2);
-}
-
-.field__check {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: 0.9rem;
-}
-</style>
