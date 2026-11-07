@@ -22,6 +22,11 @@ export const router = createRouter({
     { path: '/settings', name: 'settings', component: SettingsView },
     { path: '/applications', name: 'applications', component: ApplicationsView },
     { path: '/applications/:id', name: 'application', component: ApplicationDetailView },
+    {
+      path: '/applications/:appId/containers/:cid',
+      name: 'application-container',
+      component: ContainerDetailView,
+    },
     // The services of a node live on the page of the node, so an old
     // address of the services page lands where the containers are.
     { path: '/services', redirect: '/nodes' },

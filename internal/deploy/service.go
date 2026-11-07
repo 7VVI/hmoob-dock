@@ -165,6 +165,7 @@ func platformImageSet(images []string) map[string]bool {
 // manage itself; it never skips the inventory of the target.
 func (s *Service) CreateApp(ctx context.Context, app model.App, adopt bool) (model.App, error) {
 	app.Name = strings.TrimSpace(app.Name)
+	app.Description = strings.TrimSpace(app.Description)
 	app.Mode = strings.ToLower(strings.TrimSpace(app.Mode))
 	app.TargetID = strings.TrimSpace(app.TargetID)
 	app.Namespace = strings.TrimSpace(app.Namespace)
@@ -213,11 +214,13 @@ func (s *Service) CreateApp(ctx context.Context, app model.App, adopt bool) (mod
 	app.ID = identifier
 	app.LatestVersionID = ""
 	app.SuccessfulVersionID = ""
+	app.CreatedAt = s.now().UTC()
 
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO apps (id, name, mode, target_id, namespace, latest_version_id, successful_version_id, created_at)
-		 VALUES (?, ?, ?, ?, ?, '', '', ?)`,
-		app.ID, app.Name, app.Mode, app.TargetID, app.Namespace, store.TimeToMillis(s.now())); err != nil {
+		`INSERT INTO apps (id, name, description, mode, target_id, namespace, latest_version_id, successful_version_id, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, '', '', ?)`,
+		app.ID, app.Name, app.Description, app.Mode, app.TargetID, app.Namespace,
+		store.TimeToMillis(app.CreatedAt)); err != nil {
 		if uniqueViolation(err) {
 			return model.App{}, fmt.Errorf("%w: the namespace %q", ErrNamespaceConflict, app.Namespace)
 		}
@@ -229,7 +232,7 @@ func (s *Service) CreateApp(ctx context.Context, app model.App, adopt bool) (mod
 // ListApps returns the applications of the control端.
 func (s *Service) ListApps(ctx context.Context) ([]model.App, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, mode, target_id, namespace, latest_version_id, successful_version_id
+		`SELECT id, name, description, mode, target_id, namespace, latest_version_id, successful_version_id, created_at
 		 FROM apps ORDER BY created_at, id`)
 	if err != nil {
 		return nil, fmt.Errorf("deploy: read the applications: %w", err)
@@ -239,10 +242,12 @@ func (s *Service) ListApps(ctx context.Context) ([]model.App, error) {
 	apps := []model.App{}
 	for rows.Next() {
 		var app model.App
-		if err := rows.Scan(&app.ID, &app.Name, &app.Mode, &app.TargetID, &app.Namespace,
-			&app.LatestVersionID, &app.SuccessfulVersionID); err != nil {
+		var createdAt int64
+		if err := rows.Scan(&app.ID, &app.Name, &app.Description, &app.Mode, &app.TargetID,
+			&app.Namespace, &app.LatestVersionID, &app.SuccessfulVersionID, &createdAt); err != nil {
 			return nil, fmt.Errorf("deploy: scan the application: %w", err)
 		}
+		app.CreatedAt = store.TimeFromMillis(createdAt)
 		apps = append(apps, app)
 	}
 	if err := rows.Err(); err != nil {
@@ -297,11 +302,13 @@ func (s *Service) GetApp(ctx context.Context, appID string) (model.App, error) {
 // app reads the application of the given identifier.
 func (s *Service) app(ctx context.Context, appID string) (model.App, error) {
 	var app model.App
+	var createdAt int64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, name, mode, target_id, namespace, latest_version_id, successful_version_id
+		`SELECT id, name, description, mode, target_id, namespace, latest_version_id, successful_version_id, created_at
 		 FROM apps WHERE id = ?`, appID).
-		Scan(&app.ID, &app.Name, &app.Mode, &app.TargetID, &app.Namespace,
-			&app.LatestVersionID, &app.SuccessfulVersionID)
+		Scan(&app.ID, &app.Name, &app.Description, &app.Mode, &app.TargetID, &app.Namespace,
+			&app.LatestVersionID, &app.SuccessfulVersionID, &createdAt)
+	app.CreatedAt = store.TimeFromMillis(createdAt)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return model.App{}, fmt.Errorf("%w: %s", ErrUnknownApp, appID)

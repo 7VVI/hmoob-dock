@@ -63,6 +63,13 @@ func (s *Server) publishContainerEvent(_ context.Context, nodeID string, envelop
 	if err := json.Unmarshal(envelope.Payload, &event); err != nil {
 		return nil
 	}
+	s.containerEvents.append(nodeID, containerEventRecord{
+		ContainerID: event.ContainerID,
+		Service:     event.ServiceID,
+		Action:      event.Action,
+		ExitCode:    event.ExitCode,
+		OccurredAt:  event.OccurredAt,
+	})
 	s.events.publish(Event{Type: EventContainer, ObjectID: nodeID})
 	return nil
 }

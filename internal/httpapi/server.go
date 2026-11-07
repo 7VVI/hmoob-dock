@@ -75,6 +75,9 @@ type Server struct {
 	dispatcher *deploy.Dispatcher
 	// events hands the changes of the deployments to the browser.
 	events *eventBroker
+	// containerEvents keeps the recent container events of every node in
+	// the memory of the control端, for the event log of the console.
+	containerEvents *eventLog
 	// logs owns the subscriptions of the logs of the containers.
 	logs *logSubscriptions
 	// metricsIngest turns the samples of the agents into live points and
@@ -176,7 +179,8 @@ func NewServer(db *sql.DB, box *secret.Box, cfg config.Control) (http.Handler, e
 		// The hub only reads the records of the nodes, so it uses the read
 		// pool: a slow read never holds back a write.
 		hub:    agentlink.NewHub(reads),
-		events: newEventBroker(),
+		events:          newEventBroker(),
+		containerEvents: newEventLog(eventLogCapacity),
 	}
 	server.ctx, server.cancel = context.WithCancel(context.Background())
 	// The ingestion writes the completed minutes through the write pool and

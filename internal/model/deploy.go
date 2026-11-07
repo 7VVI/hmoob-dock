@@ -15,6 +15,8 @@ type App struct {
 	ID string `json:"id"`
 	// Name is the name the administrator gave to the application.
 	Name string `json:"name"`
+	// Description is the sentence the administrator wrote for the site.
+	Description string `json:"description"`
 	// Mode selects the runtime of the application: "compose" or "swarm".
 	Mode string `json:"mode"`
 	// TargetID is the node or the cluster the application runs on.
@@ -27,6 +29,8 @@ type App struct {
 	// SuccessfulVersionID is the version that was deployed successfully
 	// last.
 	SuccessfulVersionID string `json:"successful_version_id"`
+	// CreatedAt is the time the application was created.
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Config is the configuration of an application.

@@ -2,13 +2,14 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { NButton } from 'naive-ui'
 import { useRoute, useRouter } from 'vue-router'
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import AppShell from '../components/AppShell.vue'
 import DeploymentHistory from '../components/DeploymentHistory.vue'
 import DeploymentStatus from '../components/DeploymentStatus.vue'
-import LogViewer from '../components/LogViewer.vue'
-import MetricChart from '../components/MetricChart.vue'
 import YamlEditor from '../components/YamlEditor.vue'
+
 import { api } from '../api/client'
+import { containerOp, listNodeEvents } from '../api/nodes'
 import {
   getApplication,
   getDeployment,
@@ -25,26 +26,7 @@ import {
   type ControlEvent,
   type EventSubscription,
 } from '../api/deployments'
-import {
-  createLogSubscription,
-  deleteLogSubscription,
-  describeLogError,
-  logErrorMessage,
-  openLogStream,
-  type LogStream,
-} from '../api/logs'
-import {
-  getMetrics,
-  isStale,
-  metricNames,
-  metricPoints,
-  metricScale,
-  metricUnit,
-  newestPoint,
-  listContainers,
-  type ContainerSummary,
-  type MetricName,
-} from '../api/metrics'
+import { listContainers, type ContainerSummary } from '../api/metrics'
 import {
   ApiError,
   configFailures,
@@ -52,9 +34,8 @@ import {
   formatTimestamp,
   type AppConfig,
   type Deployment,
-  type LogEvent,
-  type MetricPoint,
   type NodeListPayload,
+  type NodeEvent,
   type NodeSummary,
   type PreviewResult,
   type TaskState,
@@ -76,17 +57,73 @@ const blockedStates = new Set<TaskState>(['queued', 'preflight', 'running', 'ver
 // not finished.
 const isDeployBlocked = (state: TaskState | null) => state !== null && blockedStates.has(state)
 
-type Tab = 'overview' | 'containers' | 'logs' | 'config' | 'history'
+type Tab = 'overview' | 'containers' | 'services' | 'logs' | 'config' | 'history' | 'events'
 
-const tabs: { key: Tab; label: string }[] = [
-  { key: 'overview', label: '概况' },
-  { key: 'containers', label: '容器' },
-  { key: 'logs', label: '部署输出' },
-  { key: 'config', label: '站点配置' },
-  { key: 'history', label: '部署记录' },
+const tabs: { key: Tab; label: string; icon: string }[] = [
+  {
+    key: 'overview',
+    label: '概览',
+    icon: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM12 8v.01M12 11v5',
+  },
+  {
+    key: 'containers',
+    label: '容器',
+    icon: 'M12 3 3 8v8l9 5 9-5V8L12 3ZM3 8l9 5 9-5M12 13v8',
+  },
+  {
+    key: 'services',
+    label: '服务',
+    icon: 'M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01',
+  },
+  {
+    key: 'logs',
+    label: '部署输出',
+    icon: 'm5 7 5 5-5 5M12 17h7',
+  },
+  {
+    key: 'config',
+    label: 'YAML 配置',
+    icon: 'M7 4h7l4 4v12H7V4ZM14 4v4h4M10 12h5M10 16h5',
+  },
+  {
+    key: 'history',
+    label: '部署记录',
+    icon: 'M4 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7Z',
+  },
+  {
+    key: 'events',
+    label: '事件日志',
+    icon: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM12 7v5l3 2',
+  },
 ]
 
 const tab = ref<Tab>('overview')
+
+// theTabs are the tabs of the bar. The output of a deployment has a tab of
+// its own only while the page tracks a deployment, so the bar keeps the
+// five standing tabs of the prototype.
+const theTabs = computed(() =>
+  tabs.filter((item) => item.key !== 'logs' || deployment.value !== null),
+)
+
+// The editor of the YAML tab starts read-only: a click on 编辑配置 turns
+// it into an editor, so a visitor cannot change the configuration by
+// accident.
+const configEditing = ref(false)
+// configNotice carries the word of the copy and of the format of the
+// editor.
+const configNotice = ref('')
+// The restart of a site restarts every container of it, after the
+// administrator confirmed.
+const confirmingRestart = ref(false)
+const restarting = ref(false)
+const restartError = ref('')
+
+// The events of the containers of the site: the log of what happened to
+// them, newest first.
+const events = ref<NodeEvent[]>([])
+const eventsError = ref('')
+let eventsTimer: ReturnType<typeof setInterval> | undefined
 
 const app = ref<Awaited<ReturnType<typeof getApplication>> | null>(null)
 const versions = ref<VersionSummary[]>([])
@@ -134,53 +171,18 @@ const resolveError = ref('')
 
 let subscription: EventSubscription | null = null
 
-// The limits of the curve of the container.
-const curveRanges = [
-  { minutes: 60, label: '最近 1 小时' },
-  { minutes: 360, label: '最近 6 小时' },
-  { minutes: 1440, label: '最近 24 小时' },
-]
-
-// The container whose curve and logs the page shows.
-//
-// The control端 names a container by its identifier, so the administrator
-// writes it down.
-const containerID = ref('')
-// The containers of the application. The page names them by their Compose
+// The page names them by their Compose
 // service, so the administrator picks one instead of typing an identifier.
 const appContainers = ref<ContainerSummary[]>([])
 const appContainersError = ref('')
 
-// theLogContainerName names the container the logs belong to, so the page
-// never shows a stream of output without saying whose it is.
-const theLogContainerName = computed(
-  () => appContainers.value.find((item) => item.id === containerID.value)?.name ?? '',
-)
+// The search and the filters of the container list.
+const containerSearch = ref('')
+const containerStateFilter = ref<'all' | 'running' | 'stopped' | 'abnormal'>('all')
+const containerImageFilter = ref<'all' | string>('all')
+const containerPage = ref(1)
+const containerPageSize = ref(10)
 
-// healthLabel names the state of the health check of a container.
-function healthLabel(item: ContainerSummary): string {
-  if (item.state !== 'running') {
-    return '未运行'
-  }
-  switch (item.health) {
-    case 'healthy':
-      return '健康'
-    case 'unhealthy':
-      return '不健康'
-    case 'starting':
-      return '检查中'
-    default:
-      return '未配置'
-  }
-}
-const metric = ref<MetricName>('cpu_percent')
-const range = ref(curveRanges[0].minutes)
-const points = ref<MetricPoint[]>([])
-const curveLoading = ref(false)
-const curveError = ref('')
-const curveLoaded = ref(false)
-
-// The nodes of the deployment.
 //
 // The page only needs to know whether the node of the target is connected,
 // so a failure to read the list never hides the application itself.
@@ -193,72 +195,6 @@ const nodes = ref<NodeSummary[]>([])
 const now = ref(Date.now())
 let ticker: ReturnType<typeof setInterval> | null = null
 
-// The logs of the container.
-//
-// The subscription is opened on demand and closed again when the page
-// leaves the tab, so no read of the logs stays open behind the back of
-// the administrator.
-const logBusy = ref(false)
-const logOpen = ref(false)
-const logLines = ref<string[]>([])
-const logTruncated = ref(false)
-const logError = ref('')
-const logNotice = ref('')
-let logStream: LogStream | null = null
-let logSubscriptionID = ''
-// logPending is the text of the log that does not end with a line break
-// yet, so a piece that ends in the middle of a line does not lose it.
-let logPending = ''
-
-// maxLogLines is the number of the lines the page keeps.
-//
-// A container that writes a lot does not fill the memory of the browser:
-// the oldest lines leave the buffer and the page says so.
-const maxLogLines = 5000
-
-// theMetricName names the metric of the curve.
-const theMetricName = computed(
-  () => metricNames.find((item) => item.name === metric.value)?.label ?? metric.value,
-)
-
-// theUnit is the unit of the curve.
-const theUnit = computed(() => metricUnit(metric.value))
-
-// theScale writes a value of the curve in its unit.
-const theScale = computed(() => metricScale(metric.value))
-
-// theDataIsStale reports whether the newest observation is too old.
-const theDataIsStale = computed(() => curveLoaded.value && isStale(points.value, now.value))
-
-// theNewestAt is the moment of the newest observation of the curve.
-const theNewestAt = computed(() => newestPoint(points.value)?.at ?? '')
-
-// theTargetIsConnected reports whether the agent of the node of the target
-// is connected.
-//
-// A node that is not connected is not a machine that is broken: the page
-// says that the connection is interrupted and never that the server is down.
-const theTargetIsConnected = computed(() => {
-  const target = app.value?.target_id ?? ''
-  if (target === '') {
-    return true
-  }
-  const node = nodes.value.find((item) => item.id === target)
-  if (!node) {
-    return true
-  }
-  return node.connected
-})
-
-// shownLogLines are the lines of the log as the viewer shows them.
-//
-// The last line of the log may still grow, so it is shown with the lines
-// that are complete.
-const shownLogLines = computed(() =>
-  logPending === '' ? logLines.value : [...logLines.value, logPending],
-)
-
-// currentConfig is the configuration the editor holds.
 function currentConfig(): AppConfig {
   return { yaml: yaml.value, variables: { ...variables.value } }
 }
@@ -279,8 +215,15 @@ async function loadApplication(): Promise<void> {
   const loaded = await getApplication(appID)
   app.value = loaded
   // The editor starts with the configuration of the server. A local change
-  // is never lost by a reload of the page.
-  yaml.value = loaded.config.yaml
+  // is never lost by a reload of the page. The wizard of a new site carries
+  // the configuration of its third step along, so the editor of a site
+  // without a version starts filled with what the administrator wrote.
+  const carried = (history.state as { initialYaml?: string } | null)?.initialYaml
+  if (carried && loaded.latest_version_id === '') {
+    yaml.value = carried
+  } else {
+    yaml.value = loaded.config.yaml
+  }
   variables.value = { ...loaded.config.variables }
   drafts.value = {}
   preview.value = null
@@ -340,13 +283,153 @@ async function loadAppContainers(): Promise<void> {
   try {
     const list = await listContainers(current.target_id, current.namespace)
     appContainers.value = list
-    if (!list.some((item) => item.id === containerID.value)) {
-      containerID.value = list.find((item) => item.state === 'running')?.id ?? list[0]?.id ?? ''
-    }
   } catch (failure) {
     appContainers.value = []
     appContainersError.value = describeError(failure)
   }
+}
+
+// theContainerStats counts the containers by the state they are in.
+const theContainerStats = computed(() => {
+  let running = 0
+  let stopped = 0
+  let abnormal = 0
+  for (const item of appContainers.value) {
+    if (item.state === 'running') {
+      if (item.health === 'unhealthy') {
+        abnormal += 1
+      } else {
+        running += 1
+      }
+    } else if (item.state === 'restarting' || item.state === 'paused') {
+      abnormal += 1
+    } else {
+      stopped += 1
+    }
+  }
+  return { running, stopped, abnormal }
+})
+
+// containerImages are the distinct images the containers of the site run.
+const containerImages = computed(() => [
+  ...new Set(appContainers.value.map((item) => item.image)),
+])
+
+// containerStateOf buckets a container for the filters and the stats.
+function containerStateOf(item: ContainerSummary): 'running' | 'stopped' | 'abnormal' {
+  if (item.state === 'running') {
+    return item.health === 'unhealthy' ? 'abnormal' : 'running'
+  }
+  if (item.state === 'restarting' || item.state === 'paused') {
+    return 'abnormal'
+  }
+  return 'stopped'
+}
+
+// theFilteredContainers applies the search and the two filters.
+const theFilteredContainers = computed(() =>
+  appContainers.value.filter((item) => {
+    const needle = containerSearch.value.trim().toLowerCase()
+    if (
+      needle !== '' &&
+      !`${item.name} ${item.image} ${item.service}`.toLowerCase().includes(needle)
+    ) {
+      return false
+    }
+    if (
+      containerStateFilter.value !== 'all' &&
+      containerStateOf(item) !== containerStateFilter.value
+    ) {
+      return false
+    }
+    if (containerImageFilter.value !== 'all' && item.image !== containerImageFilter.value) {
+      return false
+    }
+    return true
+  }),
+)
+
+// thePageContainers are the containers of the page the administrator reads.
+const thePageContainers = computed(() => {
+  const start = (containerPage.value - 1) * containerPageSize.value
+  return theFilteredContainers.value.slice(start, start + containerPageSize.value)
+})
+
+const containerPageCount = computed(() =>
+  Math.max(1, Math.ceil(theFilteredContainers.value.length / containerPageSize.value)),
+)
+
+// pageOf writes the page numbers of a pager.
+function pageOf(current: number, count: number): number[] {
+  if (count <= 7) {
+    return Array.from({ length: count }, (_, index) => index + 1)
+  }
+  const start = Math.max(1, Math.min(current - 2, count - 4))
+  return Array.from({ length: 5 }, (_, index) => start + index)
+}
+
+// A filter that changes resets the page.
+watch([containerSearch, containerStateFilter, containerImageFilter, containerPageSize], () => {
+  containerPage.value = 1
+})
+
+// uptimeOf writes the time a container has been up, the way a list reads
+// it: days and hours, or minutes when it is young.
+function uptimeOf(item: ContainerSummary): string {
+  const started = item.started_at || item.created
+  if (!started) {
+    return '—'
+  }
+  const at = new Date(started).getTime()
+  if (Number.isNaN(at)) {
+    return '—'
+  }
+  const seconds = Math.max(0, Math.floor((now.value - at) / 1000))
+  const days = Math.floor(seconds / 86400)
+  const hours = Math.floor((seconds % 86400) / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  if (days > 0) {
+    return `${days}天 ${hours}小时`
+  }
+  if (hours > 0) {
+    return `${hours}小时 ${minutes}分钟`
+  }
+  return `${minutes}分钟`
+}
+
+// statePillLabel and statePillTone name the state of a container the way
+// the pill of the list reads it.
+function statePillLabel(state: string, health: string): string {
+  if (health === 'unhealthy') {
+    return '异常'
+  }
+  switch (state) {
+    case 'running':
+      return '运行中'
+    case 'exited':
+      return '已停止'
+    case 'created':
+      return '已创建'
+    case 'paused':
+      return '已暂停'
+    case 'restarting':
+      return '重启中'
+    default:
+      return state
+  }
+}
+
+function statePillTone(state: string, health: string): 'ok' | 'bad' | 'warn' | 'off' {
+  if (health === 'unhealthy') {
+    return 'bad'
+  }
+  if (state === 'running') {
+    return 'ok'
+  }
+  if (state === 'exited' || state === 'dead') {
+    return 'off'
+  }
+  return 'warn'
 }
 
 // load reads everything the page shows.
@@ -419,6 +502,236 @@ function conflictMessage(failure: unknown, phase: 'preview' | 'submit'): string 
     return '应用已经有了更新的版本，本页面的编辑已保留。请重新加载最新配置后比较。'
   }
   return '部署请求与应用的当前状态不一致：应用可能已经被其他页面更新，或目标在预览之后发生了变化。本页面的编辑已保留，请重新预览并比较差异。'
+}
+
+// theNode names the node the application runs on.
+const theNode = computed(() => nodes.value.find((node) => node.id === app.value?.target_id) ?? null)
+
+// theServices groups the containers of the application by the service they
+// belong to, the way the list of a node reads them.
+const theServices = computed(() => {
+  const groups = new Map<string, ContainerSummary[]>()
+  for (const item of appContainers.value) {
+    const key = item.service || item.name
+    const group = groups.get(key) ?? []
+    group.push(item)
+    groups.set(key, group)
+  }
+  return [...groups.entries()].map(([service, items]) => ({
+    service,
+    containers: items.length,
+    running: items.filter((item) => item.state === 'running').length,
+    image: items[0]?.image ?? '',
+    ports: items[0]?.ports ?? [],
+    state:
+      items.every((item) => item.state === 'running')
+        ? 'running'
+        : items.some((item) => item.state === 'running')
+          ? 'partial'
+          : 'stopped',
+  }))
+})
+
+// yamlFacts counts what the configuration declares: the services and the
+// networks of the document in the editor.
+const yamlFacts = computed(() => {
+  try {
+    const document = parseYaml(yaml.value) as Record<string, Record<string, unknown>> | null
+    if (!document || typeof document !== 'object') {
+      return { services: 0, networks: 0, valid: true }
+    }
+    const services = document.services && typeof document.services === 'object' ? Object.keys(document.services).length : 0
+    const networks = document.networks && typeof document.networks === 'object' ? Object.keys(document.networks).length : 0
+    return { services, networks, valid: true }
+  } catch {
+    return { services: 0, networks: 0, valid: false }
+  }
+})
+
+// configReadOnly is the face of the editor on the YAML tab: the document
+// only edits when the administrator asked for the editor.
+const configReadOnly = computed(() => !configEditing.value)
+
+// startConfigEditing turns the editor of the YAML tab editable.
+function startConfigEditing(): void {
+  configEditing.value = true
+}
+
+// copyConfig writes the configuration to the clipboard.
+async function copyConfig(): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(yaml.value)
+    configNotice.value = '配置已经复制。'
+    setTimeout(() => {
+      configNotice.value = ''
+    }, 1800)
+  } catch {
+    configNotice.value = '浏览器未允许复制，请手动选择文本。'
+  }
+}
+
+// formatConfig re-indents the document of the editor. A document that does
+// not parse stays as it is and the reason shows beside the editor.
+function formatConfig(): void {
+  try {
+    const document = parseYaml(yaml.value)
+    yaml.value = stringifyYaml(document)
+    configNotice.value = ''
+  } catch (failure) {
+    configNotice.value = `格式化失败：${failure instanceof Error ? failure.message : 'YAML 无法解析'}`
+  }
+}
+
+// loadEvents reads the recent container events of the target, filtered by
+// the namespace of the application.
+async function loadEvents(): Promise<void> {
+  const target = app.value?.target_id ?? ''
+  if (target === '') {
+    return
+  }
+  eventsError.value = ''
+  try {
+    events.value = await listNodeEvents(target, app.value?.namespace ?? '')
+  } catch (failure) {
+    eventsError.value = describeError(failure)
+  }
+}
+
+// eventTone colors an action of a container: an end is red, a start is
+// green, the rest is grey.
+function eventTone(action: string): 'ok' | 'bad' | 'off' {
+  if (action === 'start') return 'ok'
+  if (action === 'die' || action === 'kill' || action === 'stop') return 'bad'
+  return 'off'
+}
+
+// formatDate writes a time the way the header reads it.
+function formatDate(value: string): string {
+  const at = new Date(value)
+  if (Number.isNaN(at.getTime())) {
+    return '—'
+  }
+  return at.toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+}
+
+// The events follow the page: they load when the tab opens and refresh
+// every fifteen seconds while it stays open.
+watch(tab, (value) => {
+  if (value === 'events') {
+    void loadEvents()
+    if (eventsTimer === undefined) {
+      eventsTimer = setInterval(() => {
+        void loadEvents()
+      }, 15 * 1000)
+    }
+  } else if (eventsTimer !== undefined) {
+    clearInterval(eventsTimer)
+    eventsTimer = undefined
+  }
+})
+onBeforeUnmount(() => {
+  if (eventsTimer !== undefined) {
+    clearInterval(eventsTimer)
+  }
+})
+
+// theSitePill names the state of the site, the way the header reads it.
+const theSitePill = computed<{ label: string; tone: string }>(() => {
+  let running = 0
+  let abnormal = 0
+  for (const item of appContainers.value) {
+    const state = containerStateOf(item)
+    if (state === 'running') {
+      running += 1
+    } else if (state === 'abnormal') {
+      abnormal += 1
+    }
+  }
+  if (abnormal > 0) {
+    return { label: '部分异常', tone: 'warn' }
+  }
+  if (running > 0 && running === appContainers.value.length) {
+    return { label: '运行中', tone: 'ok' }
+  }
+  return { label: '已停止', tone: 'off' }
+})
+
+// The menu of the further actions of the head of the page.
+const openHeadMenu = ref(false)
+
+// toggleHeadMenu opens or closes the menu of the head of the page.
+function toggleHeadMenu(): void {
+  openHeadMenu.value = !openHeadMenu.value
+}
+
+// The menu of the further operations of one container, the operation
+// that runs and the reason one was refused.
+const openOpsMenu = ref('')
+const containerOpBusy = ref('')
+const containerOpError = ref('')
+
+// toggleOpsMenu opens or closes the menu of one container.
+function toggleOpsMenu(id: string): void {
+  openOpsMenu.value = openOpsMenu.value === id ? '' : id
+}
+
+// operateContainer runs one operation on one container of the site.
+async function operateContainer(
+  item: ContainerSummary,
+  action: 'start' | 'stop' | 'restart',
+): Promise<void> {
+  const target = app.value?.target_id ?? ''
+  if (containerOpBusy.value !== '' || target === '') {
+    return
+  }
+  containerOpBusy.value = item.id
+  containerOpError.value = ''
+  openOpsMenu.value = ''
+  try {
+    await containerOp(target, item.id, action)
+    const label = action === 'start' ? '启动' : action === 'stop' ? '停止' : '重启'
+    notice.value = `${item.name} 的${label}已经完成。`
+    await loadAppContainers()
+  } catch (failure) {
+    containerOpError.value = `${item.name}: ${describeError(failure)}`
+  } finally {
+    containerOpBusy.value = ''
+  }
+}
+
+// restartAll restarts every container of the application, one container
+// at a time. A container that refuses keeps going: the page reports the
+// site as a whole.
+async function restartAll(): Promise<void> {
+  const target = app.value?.target_id ?? ''
+  if (restarting.value || target === '' || appContainers.value.length === 0) {
+    return
+  }
+  restarting.value = true
+  restartError.value = ''
+  const failures: string[] = []
+  for (const item of appContainers.value) {
+    try {
+      await containerOp(target, item.id, 'restart')
+    } catch (failure) {
+      failures.push(`${item.name}: ${describeError(failure)}`)
+    }
+  }
+  restarting.value = false
+  confirmingRestart.value = false
+  if (failures.length > 0) {
+    restartError.value = failures.join('；')
+  } else {
+    notice.value = '重启已经完成。'
+  }
+  await load()
 }
 
 // runPreview asks for the impact of the configuration of the editor.
@@ -663,17 +976,6 @@ const variableNames = computed(() => Object.keys(variables.value).sort())
 //
 // The control端 reports the state of every service in the message of the
 // outcome of the deployment, so the page shows them one by one.
-const observations = computed(() => {
-  const message = deployment.value?.result_message ?? ''
-  if (message === '') {
-    return []
-  }
-  return message
-    .split(';')
-    .map((part) => part.trim())
-    .filter((part) => part !== '')
-})
-
 // versionTime is the time of a version of the history.
 function versionTime(versionID: string): string {
   const found = versions.value.find((version) => version.id === versionID)
@@ -729,184 +1031,6 @@ async function resolve(): Promise<void> {
   }
 }
 
-// loadCurve reads the history of the container of the application.
-//
-// The curve belongs to the container, not to the machine of the node.
-async function loadCurve(): Promise<void> {
-  const target = app.value?.target_id ?? ''
-  if (target === '' || containerID.value.trim() === '') {
-    points.value = []
-    curveLoaded.value = false
-    curveError.value = ''
-    return
-  }
-  curveLoading.value = true
-  curveError.value = ''
-  try {
-    const to = new Date()
-    const from = new Date(to.getTime() - range.value * 60 * 1000)
-    const payload = await getMetrics({
-      node_id: target,
-      container_id: containerID.value.trim(),
-      from: from.toISOString(),
-      to: to.toISOString(),
-    })
-    points.value = metricPoints(payload.buckets, metric.value, payload.from, payload.to)
-    curveLoaded.value = true
-  } catch (failure) {
-    points.value = []
-    curveLoaded.value = false
-    curveError.value = describeError(failure)
-  } finally {
-    curveLoading.value = false
-  }
-}
-
-// openLogs opens the subscription of the logs of the container.
-//
-// The pieces of the logs travel in the stream of the events, so the page
-// opens the stream first and asks for the subscription afterwards. A
-// control端 that refuses the subscription gets a clear reason, never a
-// silent page.
-async function openLogs(): Promise<void> {
-  const target = app.value?.target_id ?? ''
-  if (logBusy.value) {
-    return
-  }
-  if (target === '' || containerID.value.trim() === '') {
-    logError.value = '请先填写容器的 ID。'
-    return
-  }
-  logBusy.value = true
-  logError.value = ''
-  logNotice.value = ''
-  logTruncated.value = false
-  logLines.value = []
-  logPending = ''
-  try {
-    logStream = openLogStream({
-      onLog: (event) => {
-        handleLogEvent(event)
-      },
-    })
-    const opened = await Promise.race([
-      logStream.ready.then(() => true),
-      new Promise<boolean>((resolve) => {
-        setTimeout(() => resolve(false), 5000)
-      }),
-    ])
-    if (!opened) {
-      logError.value = '实时连接没有建立，请稍后重试。'
-      logStream.close()
-      logStream = null
-      return
-    }
-    const subscription = await createLogSubscription({
-      node_id: target,
-      container_id: containerID.value.trim(),
-    })
-    logSubscriptionID = subscription.id
-    logOpen.value = true
-  } catch (failure) {
-    logOpen.value = false
-    logError.value = describeLogError(failure)
-    logStream?.close()
-    logStream = null
-  } finally {
-    logBusy.value = false
-  }
-}
-
-// closeLogs ends the subscription of the logs.
-//
-// The subscription belongs to the session of the administrator, so the page
-// ends it when it leaves the tab. The read of the logs of the container
-// ends with it.
-async function closeLogs(): Promise<void> {
-  const subscriptionID = logSubscriptionID
-  logSubscriptionID = ''
-  logOpen.value = false
-  logStream?.close()
-  logStream = null
-  if (subscriptionID === '') {
-    return
-  }
-  try {
-    await deleteLogSubscription(subscriptionID)
-  } catch {
-    // The session ends the subscription on its own when the last stream
-    // closes, so a failed request does not leave the page stuck.
-  }
-}
-
-// A change of the container moves the logs to the container the page now
-// names. A subscription that is open follows at once, so the output never
-// mixes the pieces of two containers.
-watch(containerID, async (current, previous) => {
-  if (previous === undefined || current === previous) {
-    return
-  }
-  if (logOpen.value || logBusy.value) {
-    closeLogs()
-    if (current !== '') {
-      await openLogs()
-    }
-  }
-})
-
-// handleLogEvent puts a piece of the log into the buffer.
-//
-// A piece that reports an error ends the stream of the logs and names the
-// reason for the administrator. A piece that reports a gap tells the
-// reader that the text before it is missing, without calling it a failure.
-function handleLogEvent(event: LogEvent): void {
-  if (event.object_id !== logSubscriptionID) {
-    return
-  }
-  if (event.error_code) {
-    logOpen.value = false
-    logError.value = logErrorMessage(event.error_code)
-    return
-  }
-  if (event.truncated) {
-    logTruncated.value = true
-    if (!event.text) {
-      // The control端 rebuilt the tail of the log. The text before it is
-      // gone, but nothing failed.
-      logNotice.value = '日志已经重新接上，前面的内容缺失。'
-      return
-    }
-  }
-  appendText(event.text ?? '')
-}
-
-// appendText puts the text of a piece of the log into the buffer.
-function appendText(text: string): void {
-  if (text === '') {
-    return
-  }
-  logPending += text
-  const parts = logPending.split('\n')
-  logPending = parts.pop() ?? ''
-  if (parts.length === 0) {
-    return
-  }
-  const all = [...logLines.value, ...parts]
-  if (all.length > maxLogLines) {
-    logTruncated.value = true
-    logLines.value = all.slice(all.length - maxLogLines)
-    return
-  }
-  logLines.value = all
-}
-
-// The page leaves the tab, so the read of the logs ends with it.
-watch(tab, (current) => {
-  if (current !== 'containers') {
-    void closeLogs()
-  }
-})
-
 onMounted(async () => {
   await load()
   ticker = setInterval(() => {
@@ -929,7 +1053,6 @@ onBeforeUnmount(() => {
   }
   subscription?.close()
   subscription = null
-  void closeLogs()
 })
 </script>
 
@@ -944,8 +1067,64 @@ onBeforeUnmount(() => {
 
     <template v-else-if="app">
       <div class="detail__head">
-        <h1 class="page-title">{{ app.name }}</h1>
-        <NButton   quaternary type="primary" @click="reload">重新加载</NButton>
+        <div class="head-copy">
+          <div class="title-line">
+            <h1 class="page-title">{{ app.name }}</h1>
+            <span class="pill" :class="theSitePill.tone">
+              <i aria-hidden="true"></i>{{ theSitePill.label }}
+            </span>
+          </div>
+          <p class="head-meta">
+            {{ app.mode === 'swarm' ? 'Swarm 项目' : 'Compose 项目' }} · 运行在
+            {{ theNode?.hostname ?? app.target_id }} · 创建于 {{ formatDate(app.created_at) }}
+          </p>
+        </div>
+        <div class="head-actions">
+          <template v-if="confirmingRestart">
+            <span class="confirm-inline">重启该站点的全部容器？</span>
+            <button type="button" class="ghost-button" :disabled="restarting" @click="restartAll">
+              {{ restarting ? '重启中…' : '确认重启' }}
+            </button>
+            <button type="button" class="ghost-button" @click="confirmingRestart = false">取消</button>
+          </template>
+          <template v-else>
+            <button type="button" class="ghost-button" @click="confirmingRestart = true">重启</button>
+            <button
+              type="button"
+              class="ghost-button"
+              @click="
+                tab = 'config';
+                configEditing = true
+              "
+            >
+              更新配置
+            </button>
+            <div class="ops-menu">
+              <button
+                type="button"
+                class="ghost-button ops-head-toggle"
+                :aria-expanded="openHeadMenu"
+                @click="toggleHeadMenu"
+              >
+                更多
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="m6 9 6 6 6-6" />
+                </svg>
+              </button>
+              <div v-if="openHeadMenu" class="ops-list">
+                <button
+                  type="button"
+                  @click="
+                    openHeadMenu = false;
+                    reload()
+                  "
+                >
+                  重新加载
+                </button>
+              </div>
+            </div>
+          </template>
+        </div>
       </div>
 
       <p v-if="error" class="alert" role="alert">{{ error }}</p>
@@ -953,7 +1132,7 @@ onBeforeUnmount(() => {
 
       <nav class="tabs" aria-label="应用详情">
         <button
-          v-for="item in tabs"
+          v-for="item in theTabs"
           :key="item.key"
           type="button"
           class="tabs__tab"
@@ -961,6 +1140,9 @@ onBeforeUnmount(() => {
           :aria-current="tab === item.key ? 'page' : undefined"
           @click="tab = item.key"
         >
+          <svg class="tabs__icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path :d="item.icon" />
+          </svg>
           {{ item.label }}
         </button>
       </nav>
@@ -978,8 +1160,15 @@ onBeforeUnmount(() => {
             <dd>{{ app.namespace }}</dd>
           </div>
           <div class="facts__row">
-            <dt>目标</dt>
-            <dd>{{ app.target_id }}</dd>
+            <dt>所属节点</dt>
+            <dd>
+              {{ theNode?.hostname ?? app.target_id }}
+              <span v-if="theNode" class="muted">· {{ theNode.id }}</span>
+            </dd>
+          </div>
+          <div class="facts__row">
+            <dt>描述</dt>
+            <dd>{{ app.description || '—' }}</dd>
           </div>
           <div class="facts__row">
             <dt>服务端配置</dt>
@@ -1020,7 +1209,7 @@ onBeforeUnmount(() => {
                 :partial-update="deployment.partial_update"
                 :rolled-back="deployment.rolled_back"
               />
-              <span v-else class="muted">还没有部署过这个应用。</span>
+              <span v-else>{{ theSitePill.label }} · {{ appContainers.length }} 个容器</span>
             </dd>
           </div>
         </dl>
@@ -1068,164 +1257,259 @@ onBeforeUnmount(() => {
       </section>
 
       <section v-else-if="tab === 'containers'" class="rounded-xl border border-[#e6ecf7] bg-white p-6 shadow-sm">
-        <h2 class="panel__title">
-          {{ app.mode === 'swarm' ? '服务、副本与任务' : '容器' }}
-        </h2>
-        <p class="muted">运行状态来自节点的最近一次清单。</p>
-
-        <p v-if="appContainersError" class="alert" role="alert">{{ appContainersError }}</p>
-        <p v-else-if="appContainers.length === 0" class="empty">这个应用在目标节点上还没有容器。</p>
-        <table v-else class="nodes">
-          <thead>
-            <tr>
-              <th scope="col">服务</th>
-              <th scope="col">容器</th>
-              <th scope="col">镜像</th>
-              <th scope="col">状态</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="item in appContainers"
-              :key="item.id"
-              :data-state="item.state === 'running' ? 'running' : 'stopped'"
-            >
-              <th scope="row" class="nodes__host">{{ item.service === '' ? '—' : item.service }}</th>
-              <td class="nodes__host">{{ item.name }}</td>
-              <td class="nodes__seen">{{ item.image }}</td>
-              <td>
-                <span
-                  class="state"
-                  :class="item.state === 'running' ? 'state--online' : 'state--offline'"
-                >
-                  {{ item.state }}{{ item.health === '' ? '' : ' · ' + item.health }}
-                </span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-
-        <ul v-if="observations.length > 0" class="observations">
-          <li v-for="observation in observations" :key="observation">{{ observation }}</li>
-        </ul>
-
-        <h3 class="panel__title">资源曲线</h3>
-        <p class="muted">曲线是容器的，不是整台机器的。</p>
-
-        <form class="form form--inline" novalidate @submit.prevent="loadCurve">
-          <div class="field">
-            <label class="field__label" for="detail-container">容器</label>
-            <select
-              id="detail-container"
-              v-model="containerID"
-              class="field__input"
-              name="detail-container"
-              :disabled="appContainers.length === 0"
-            >
-              <option v-if="appContainers.length === 0" value="">这个应用还没有容器</option>
-              <option v-for="item in appContainers" :key="item.id" :value="item.id">
-                {{ item.name }} · {{ item.state }}{{ item.health === '' ? '' : ' · ' + item.health }}
-              </option>
-            </select>
+        <div class="stat-grid">
+          <div class="stat-card">
+            <span class="stat-icon total">
+              <svg viewBox="0 0 24 24">
+                <path d="M12 3 3 8v8l9 5 9-5V8L12 3ZM3 8l9 5 9-5M12 13v8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
+              </svg>
+            </span>
+            <span class="stat-copy"><strong>{{ appContainers.length }}</strong><small>容器总数</small></span>
           </div>
-
-          <div class="field">
-            <label class="field__label" for="detail-metric">指标</label>
-            <select id="detail-metric" v-model="metric" class="field__input" name="detail-metric">
-              <option v-for="item in metricNames" :key="item.name" :value="item.name">
-                {{ item.label }}
-              </option>
-            </select>
+          <div class="stat-card">
+            <span class="stat-icon run">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="currentColor" /><path d="m10 8.5 6 3.5-6 3.5V8.5Z" fill="#fff" stroke="none" /></svg>
+            </span>
+            <span class="stat-copy"><strong>{{ theContainerStats.running }}</strong><small>运行中</small></span>
           </div>
-
-          <div class="field">
-            <label class="field__label" for="detail-range">时间范围</label>
-            <select id="detail-range" v-model.number="range" class="field__input" name="detail-range">
-              <option v-for="item in curveRanges" :key="item.minutes" :value="item.minutes">
-                {{ item.label }}
-              </option>
-            </select>
+          <div class="stat-card">
+            <span class="stat-icon stop">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="currentColor" /><path d="M9.5 8.5v7M14.5 8.5v7" stroke="#fff" stroke-width="2" stroke-linecap="round" /></svg>
+            </span>
+            <span class="stat-copy"><strong>{{ theContainerStats.stopped }}</strong><small>已停止</small></span>
           </div>
-
-          <NButton  attr-type="submit" type="primary" :disabled="curveLoading">
-            {{ curveLoading ? '读取中…' : '查看曲线' }}
-          </NButton>
-        </form>
-
-        <p v-if="curveError" class="alert" role="alert">
-          <span>{{ curveError }}</span>
-          <NButton   quaternary type="primary" @click="loadCurve">重试</NButton>
-        </p>
-
-        <p v-else-if="!theTargetIsConnected" class="notice">
-          连接中断。曲线停在最后一次收到数据的时候。
-        </p>
-
-        <p v-else-if="theDataIsStale" class="notice">
-          数据已过期。最后一次数据来自
-          {{ theNewestAt === '' ? '更早' : formatTimestamp(theNewestAt) }}。
-        </p>
-
-        <p v-if="!curveLoaded && !curveLoading && curveError === ''" class="empty">
-          选好容器和指标后点「查看曲线」。
-        </p>
-
-        <MetricChart
-          v-if="curveLoaded"
-          :points="points"
-          :unit="theUnit"
-          :title="theMetricName"
-          :format="theScale"
-        />
-
-        <h3 class="panel__title">容器日志</h3>
-        <p class="muted">日志是容器的：选择一个容器，按需打开它的输出。离开这个页签订阅就会关闭。</p>
-
-        <div v-if="appContainers.length === 0" class="empty">
-          这个应用在目标节点上还没有容器。部署之后，这里可以按容器查看日志。
+          <div class="stat-card">
+            <span class="stat-icon bad">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="currentColor" /><path d="M12 7.4v5.4" stroke="#fff" stroke-width="2" stroke-linecap="round" /><circle cx="12" cy="16.4" r="1.1" fill="#fff" /></svg>
+            </span>
+            <span class="stat-copy"><strong>{{ theContainerStats.abnormal }}</strong><small>异常</small></span>
+          </div>
         </div>
 
-        <template v-else>
-          <div class="log-picker">
-            <div class="field">
-              <label class="field__label" for="log-container">查看哪个容器</label>
-              <select
-                id="log-container"
-                v-model="containerID"
-                class="field__input"
-                name="log-container"
-              >
-                <option v-for="item in appContainers" :key="item.id" :value="item.id">
-                  {{ item.name }} · {{ item.state === 'running' ? '运行中' : '已停止' }}{{ item.health ? ' · ' + healthLabel(item) : '' }}
-                </option>
+        <p v-if="appContainersError" class="alert" role="alert">{{ appContainersError }}</p>
+        <p v-if="containerOpError" class="alert" role="alert">{{ containerOpError }}</p>
+
+        <div class="list-toolbar">
+          <div class="toolbar-fields">
+            <label class="search">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5" /><path d="m20 20-3.8-3.8" /></svg>
+              <input v-model="containerSearch" type="search" placeholder="搜索容器名称、镜像…" />
+            </label>
+            <label class="filter">
+              <span>状态：</span>
+              <select v-model="containerStateFilter" class="select" name="container-state">
+                <option value="all">全部</option>
+                <option value="running">运行中</option>
+                <option value="stopped">已停止</option>
+                <option value="abnormal">异常</option>
               </select>
-            </div>
-            <span class="muted log-picker__id">
-              容器 ID <code>{{ containerID || '—' }}</code>
-            </span>
+            </label>
+            <label class="filter">
+              <span>镜像：</span>
+              <select v-model="containerImageFilter" class="select" name="container-image">
+                <option value="all">全部</option>
+                <option v-for="image in containerImages" :key="image" :value="image">{{ image }}</option>
+              </select>
+            </label>
           </div>
+          <span class="toolbar-note">{{ theFilteredContainers.length }} / {{ appContainers.length }} 个容器</span>
+        </div>
 
-          <div class="actions">
-            <NButton
-              v-if="!logOpen"
-              
-               quaternary type="primary"
-              :disabled="logBusy || containerID === ''"
-              @click="openLogs"
+        <div v-if="theFilteredContainers.length === 0" class="empty">
+          <p v-if="appContainers.length > 0">没有符合筛选条件的容器。</p>
+          <p v-else>这个应用在目标节点上还没有容器。部署之后容器会出现在这里。</p>
+        </div>
+
+        <div v-else class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">容器名称</th>
+                <th scope="col">状态</th>
+                <th scope="col">镜像</th>
+                <th scope="col">所属服务</th>
+                <th scope="col">创建时间</th>
+                <th scope="col">运行时长</th>
+                <th scope="col" class="actions-col">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in thePageContainers" :key="item.id">
+                <td class="name-cell">
+                  <RouterLink
+                    class="container-link"
+                    :to="`/applications/${encodeURIComponent(app.id)}/containers/${encodeURIComponent(item.id)}`"
+                  >
+                    {{ item.name }}
+                  </RouterLink>
+                </td>
+                <td>
+                  <span class="pill" :class="statePillTone(item.state, item.health)">
+                    <i aria-hidden="true"></i>{{ statePillLabel(item.state, item.health) }}
+                  </span>
+                </td>
+                <td class="image-cell" :title="item.image">{{ item.image }}</td>
+                <td>
+                  <span class="service-link">{{ item.service || '—' }}</span>
+                </td>
+                <td class="mono">{{ formatDate(item.created ?? '') }}</td>
+                <td class="mono">{{ uptimeOf(item) }}</td>
+                <td class="actions-col">
+                  <div class="ops-menu">
+                      <button
+                        type="button"
+                        class="text-button ops-toggle"
+                        :aria-expanded="openOpsMenu === item.id"
+                        @click="toggleOpsMenu(item.id)"
+                      >
+                        更多
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                          <path d="m6 9 6 6 6-6" />
+                        </svg>
+                      </button>
+                      <div v-if="openOpsMenu === item.id" class="ops-list">
+                        <button
+                          v-if="item.state !== 'running'"
+                          type="button"
+                          :disabled="containerOpBusy !== ''"
+                          @click="operateContainer(item, 'start')"
+                        >
+                          启动
+                        </button>
+                        <button
+                          v-if="item.state === 'running'"
+                          type="button"
+                          :disabled="containerOpBusy !== ''"
+                          @click="operateContainer(item, 'restart')"
+                        >
+                          重启
+                        </button>
+                        <button
+                          v-if="item.state === 'running'"
+                          type="button"
+                          class="danger"
+                          :disabled="containerOpBusy !== ''"
+                          @click="operateContainer(item, 'stop')"
+                        >
+                          停止
+                        </button>
+                      </div>
+                    </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="table-foot">
+          <span class="muted-cell">共 {{ theFilteredContainers.length }} 条</span>
+          <div class="pager">
+            <button type="button" class="pager-step" :disabled="containerPage <= 1" @click="containerPage -= 1">‹</button>
+            <button
+              v-for="p in pageOf(containerPage, containerPageCount)"
+              :key="p"
+              type="button"
+              class="pager-page"
+              :class="{ active: p === containerPage }"
+              :aria-pressed="p === containerPage"
+              @click="containerPage = p"
             >
-              {{ logBusy ? '打开中…' : '打开日志' }}
-            </NButton>
-            <NButton v-else   quaternary type="primary" @click="closeLogs">
-              关闭日志
-            </NButton>
-            <span v-if="logOpen" class="state state--online">正在跟随 {{ theLogContainerName }}</span>
+              {{ p }}
+            </button>
+            <button type="button" class="pager-step" :disabled="containerPage >= containerPageCount" @click="containerPage += 1">›</button>
+            <select v-model.number="containerPageSize" class="select" name="container-page-size" aria-label="每页条数">
+              <option :value="10">10 条/页</option>
+              <option :value="20">20 条/页</option>
+              <option :value="50">50 条/页</option>
+            </select>
           </div>
+        </div>
+      </section>
 
-          <p v-if="logError" class="alert" role="alert">{{ logError }}</p>
-          <p v-if="logNotice" class="notice">{{ logNotice }}</p>
+      <!-- Services -->
+      <section v-else-if="tab === 'services'" class="rounded-xl border border-[#e6ecf7] bg-white p-6 shadow-sm">
+        <h2 class="panel__title">服务</h2>
+        <p class="muted">
+          {{ app.mode === 'swarm' ? 'Swarm 服务与它们的副本。' : 'Compose 服务与它们的容器。' }}
+        </p>
 
-          <LogViewer :lines="shownLogLines" :truncated="logTruncated" />
-        </template>
+        <div v-if="theServices.length === 0" class="empty">
+          <p>这个站点还没有可展示的服务。部署之后服务会出现在这里。</p>
+        </div>
+
+        <div v-else class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">服务</th>
+                <th scope="col">容器数</th>
+                <th scope="col">运行数</th>
+                <th scope="col">状态</th>
+                <th scope="col">镜像</th>
+                <th scope="col">端口</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="service in theServices" :key="service.service">
+                <td class="name-cell">
+                  <strong>{{ service.service }}</strong>
+                </td>
+                <td class="mono">{{ service.containers }}</td>
+                <td class="mono">{{ service.running }}</td>
+                <td>
+                  <span class="pill" :class="service.state === 'running' ? 'ok' : service.state === 'partial' ? 'warn' : 'off'">
+                    <i aria-hidden="true"></i>
+                    {{ service.state === 'running' ? '运行中' : service.state === 'partial' ? '部分运行' : '已停止' }}
+                  </span>
+                </td>
+                <td class="image-cell" :title="service.image">{{ service.image || '—' }}</td>
+                <td class="ports-cell">
+                  <span v-if="!service.ports?.length" class="muted">—</span>
+                  <span v-else>{{ service.ports.map((port) => `${port.public_port}:${port.private_port}`).join(', ') }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Events -->
+      <section v-else-if="tab === 'events'" class="rounded-xl border border-[#e6ecf7] bg-white p-6 shadow-sm">
+        <h2 class="panel__title">事件日志</h2>
+        <p class="muted">这个站点的容器最近发生的事件，每 15 秒刷新一次。</p>
+
+        <p v-if="eventsError" class="alert" role="alert">{{ eventsError }}</p>
+
+        <div v-else-if="events.length === 0" class="empty">
+          <p>还没有事件。容器启动、退出或被操作时，事件会出现在这里。</p>
+        </div>
+
+        <div v-else class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">时间</th>
+                <th scope="col">容器</th>
+                <th scope="col">动作</th>
+                <th scope="col">服务</th>
+                <th scope="col">退出码</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(event, index) in events" :key="event.container_id + '-' + index">
+                <td class="mono">{{ formatTimestamp(event.occurred_at) }}</td>
+                <td class="mono">{{ event.container_id.slice(0, 12) }}</td>
+                <td>
+                  <span class="pill" :class="eventTone(event.action)">
+                    <i aria-hidden="true"></i>{{ event.action }}
+                  </span>
+                </td>
+                <td>{{ event.service || '—' }}</td>
+                <td class="mono">{{ event.exit_code ?? '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </section>
 
       <section v-else-if="tab === 'logs'" class="rounded-xl border border-[#e6ecf7] bg-white p-6 shadow-sm">
@@ -1245,11 +1529,84 @@ onBeforeUnmount(() => {
       </section>
 
       <section v-else-if="tab === 'config'" class="rounded-xl border border-[#e6ecf7] bg-white p-6 shadow-sm">
-        <h2 class="panel__title">站点配置</h2>
-        <p class="muted">
-          配置是站点级的：这一份 YAML 声明站点的全部服务，每个服务部署为多少个容器由它决定。单个容器的启停等运维操作在「容器」页签，不改这份配置。
-        </p>
+        <div class="config-head">
+          <h2 class="panel__title config-title">
+            <span class="config-title__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <path d="M7 4h7l4 4v12H7V4Z" />
+                <path d="M14 4v4h4M10 12h5M10 16h5" />
+              </svg>
+            </span>
+            YAML 配置
+          </h2>
+          <div class="config-head__actions">
+            <template v-if="!configEditing">
+              <button type="button" class="edit-link" @click="startConfigEditing">
+                <span>编辑配置</span>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="m14.5 5.5 4 4L9 19H5v-4L14.5 5.5Z" />
+                </svg>
+              </button>
+            </template>
+            <template v-else>
+              <button type="button" class="edit-link" :disabled="!yamlFacts.valid" @click="formatConfig">格式化</button>
+              <button type="button" class="edit-link" @click="configEditing = false">完成编辑</button>
+            </template>
+          </div>
+        </div>
+        <div class="config-grid">
+          <div class="config-editor">
+            <button type="button" class="copy-float" @click="copyConfig">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="8" y="8" width="11" height="12" rx="2" />
+                <path d="M5 16V6a2 2 0 0 1 2-2h8" />
+              </svg>
+              复制
+            </button>
+            <YamlEditor v-model="yaml" :read-only="configReadOnly" />
+            <p v-if="configNotice" class="config-notice">{{ configNotice }}</p>
+          </div>
+          <aside class="config-facts">
+            <div class="config-facts__head">
+              <span class="config-facts__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8" />
+                  <path d="M12 8v4.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+                  <circle cx="12" cy="15.8" r="1" fill="currentColor" />
+                </svg>
+              </span>
+              <div>
+                <h3>配置说明</h3>
+                <p>这是当前站点的 Compose 配置，支持在线编辑并保存。</p>
+              </div>
+            </div>
 
+            <h4 class="config-facts__subtitle">基本信息</h4>
+            <dl class="config-facts__list">
+              <div><dt>部署类型</dt><dd>{{ app.mode === 'swarm' ? 'Swarm' : 'Compose' }}</dd></div>
+              <div><dt>服务数量</dt><dd>{{ yamlFacts.valid ? yamlFacts.services : '—' }}</dd></div>
+              <div><dt>网络数量</dt><dd>{{ yamlFacts.valid ? yamlFacts.networks : '—' }}</dd></div>
+            </dl>
+
+            <div class="config-facts__divider"></div>
+
+            <dl class="config-facts__list">
+              <div><dt>更新时间</dt><dd>{{ versionTime(app.latest_version_id) }}</dd></div>
+              <div><dt>修改人</dt><dd>admin</dd></div>
+            </dl>
+          </aside>
+        </div>
+
+        <div class="config-banner">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8" />
+            <path d="M12 8v4.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+            <circle cx="12" cy="15.8" r="1" fill="currentColor" />
+          </svg>
+          修改配置后，点击头部「更新配置」将会重新部署站点
+        </div>
+
+        <template v-if="configEditing || preview !== null">
         <div v-if="serverChanged" class="notice">
           <p>服务端的配置与本页面的编辑不同。本页面的编辑一直保留着。</p>
           <div class="resolve__actions">
@@ -1261,8 +1618,6 @@ onBeforeUnmount(() => {
             </NButton>
           </div>
         </div>
-
-        <YamlEditor v-model="yaml" />
 
         <h3 class="panel__title">变量</h3>
         <p class="muted">变量的值不会显示在页面上，输入新的值会覆盖旧的值。</p>
@@ -1380,6 +1735,7 @@ onBeforeUnmount(() => {
             {{ submitting ? '提交中…' : '保存并部署' }}
           </NButton>
         </div>
+        </template>
       </section>
 
       <section v-else class="rounded-xl border border-[#e6ecf7] bg-white p-6 shadow-sm">
@@ -1393,6 +1749,8 @@ onBeforeUnmount(() => {
         />
       </section>
     </template>
+
+    <!-- The detail of a container opens in the page of the site -->
   </AppShell>
 </template>
 
@@ -1721,5 +2079,918 @@ select.field__input {
 
 .detail__head .text-xl {
   margin-bottom: 0;
+}
+
+/* The head of the YAML tab: the actions at the right of the title. */
+.config-head {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  margin-bottom: 10px;
+}
+
+.config-head__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.edit-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: none;
+  padding: 0;
+  color: #2f6fe4;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.edit-link:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.edit-link:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.edit-link svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.config-notice {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #2f6fe4;
+}
+
+.config-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 11px 16px;
+  border-radius: 10px;
+  background: #f0f5ff;
+  color: #1d4fd8;
+  font-size: 12.5px;
+}
+
+.config-banner svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+}
+
+.config-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(240px, 0.9fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.config-editor {
+  position: relative;
+  min-width: 0;
+}
+
+.copy-float {
+  position: absolute;
+  right: 14px;
+  top: 14px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid #d3dcec;
+  border-radius: 8px;
+  background: #fff;
+  color: #132a56;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 6px 16px -10px rgb(20 52 110 / 45%);
+}
+
+.copy-float:hover {
+  border-color: #9dbdf5;
+  color: #0255f0;
+}
+
+.copy-float svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+@media (max-width: 980px) {
+  .config-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* The tabs carry a line icon beside the label, the way the prototype
+   draws them. */
+.tabs__tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.tabs__icon {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.85;
+}
+
+/* The head of a site: the identity on the left, the actions on the right. */
+.head-copy {
+  min-width: 0;
+}
+
+.title-line {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.head-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  color: #667085;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 8px;
+  padding: 2px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.chip.compose {
+  background: #f0f5ff;
+  color: #1d4fd8;
+}
+
+.chip.swarm {
+  background: #f3ecff;
+  color: #6d28d9;
+}
+
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.confirm-inline {
+  color: #b42318;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.ghost-button {
+  height: 34px;
+  padding: 0 14px;
+  border: 1px solid #d3dcec;
+  border-radius: 9px;
+  background: #fff;
+  color: #344054;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ghost-button:hover:not(:disabled) {
+  border-color: #9dbdf5;
+  color: #0255f0;
+}
+
+.ghost-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* The four readings of the containers tab. */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 18px;
+  margin-bottom: 18px;
+}
+
+.stat-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+  padding: 20px 22px;
+  border: 1px solid #e9eff9;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 10px 24px -26px rgb(20 52 110 / 45%);
+}
+
+.stat-icon {
+  width: 56px;
+  height: 56px;
+  display: grid;
+  place-items: center;
+  flex: none;
+  border-radius: 50%;
+  background: #e9f2ff;
+  color: #146ef5;
+}
+
+.stat-icon svg {
+  width: 26px;
+  height: 26px;
+}
+
+.stat-icon.run {
+  background: #e5f9ef;
+  color: #0bbf7a;
+}
+
+.stat-icon.stop {
+  background: #feeceb;
+  color: #f04438;
+}
+
+.stat-icon.bad {
+  background: #eef4ff;
+  color: #2f6fe4;
+}
+
+.stat-copy {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.stat-copy strong {
+  color: #132a56;
+  font-size: 30px;
+  font-weight: 800;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-copy small {
+  color: #6e80a0;
+  font-size: 13.5px;
+  white-space: nowrap;
+}
+
+/* The toolbar of the container list. */
+.list-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.toolbar-fields {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.search {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.search svg {
+  position: absolute;
+  left: 11px;
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: #98a2b3;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  pointer-events: none;
+}
+
+.search input {
+  height: 38px;
+  width: 280px;
+  border: 1px solid #d3dcec;
+  border-radius: 10px;
+  background: #fff;
+  padding: 0 12px 0 32px;
+  font-size: 13px;
+  color: #132a56;
+  outline: none;
+}
+
+.search input:focus {
+  border-color: #0255f0;
+}
+
+.filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #475467;
+}
+
+.select {
+  height: 38px;
+  border: 1px solid #d3dcec;
+  border-radius: 10px;
+  background: #fff;
+  padding: 0 10px;
+  font-size: 13px;
+  color: #132a56;
+  outline: none;
+}
+
+.select:focus {
+  border-color: #0255f0;
+}
+
+.toolbar-note {
+  color: #8ba0bf;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+/* The table of the containers: the header of the list sits on a light
+   band, the rows are white and hover. */
+.table-scroll {
+  overflow-x: auto;
+  border: 1px solid #eef2fa;
+  border-radius: 12px;
+}
+
+.table-scroll table {
+  width: 100%;
+  margin: 0;
+  border-collapse: collapse;
+}
+
+.table-scroll thead th {
+  background: #f8f9fc;
+  border-bottom: 1px solid #e6ecf7;
+  padding: 12px 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #475467;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.table-scroll tbody td {
+  padding: 14px;
+  border-bottom: 1px solid #eef2fa;
+  font-size: 13px;
+  color: #132a56;
+  vertical-align: middle;
+}
+
+.table-scroll tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.table-scroll tbody tr:hover {
+  background: #f8fbff;
+}
+
+.name-cell strong {
+  font-size: 13px;
+}
+
+.container-link {
+  color: #2f6fe4;
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.container-link:hover {
+  text-decoration: underline;
+}
+
+.service-link {
+  color: #2f6fe4;
+}
+
+.row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  white-space: nowrap;
+}
+
+.text-button {
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: #2f6fe4;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.text-button:hover {
+  text-decoration: underline;
+}
+
+.actions-col {
+  width: 1%;
+  text-align: right;
+}
+
+.table-scroll td.actions-col {
+  text-align: right;
+}
+
+.mono {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.image-cell {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+}
+
+.ports-cell {
+  max-width: 200px;
+  font-family: var(--font-mono, monospace);
+  font-size: 11.5px;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.pill i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentcolor;
+}
+
+.pill.ok {
+  background: #ecfdf3;
+  color: #067647;
+}
+
+.pill.warn {
+  background: #fffaeb;
+  color: #b54708;
+}
+
+.pill.off {
+  background: #f2f4f7;
+  color: #475467;
+}
+
+.pill.bad {
+  background: #fef3f2;
+  color: #b42318;
+}
+
+/* The foot of the table. */
+.table-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+.muted-cell {
+  color: #8ba0bf;
+  font-size: 12.5px;
+}
+
+.pager {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pager-step,
+.pager-page {
+  appearance: none;
+  min-width: 30px;
+  height: 30px;
+  border: 1px solid #d8e2f5;
+  border-radius: 8px;
+  background: #fff;
+  color: #344054;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 0 6px;
+}
+
+.pager-step:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.pager-page.active {
+  border-color: #0255f0;
+  color: #0255f0;
+  font-weight: 700;
+}
+
+@media (max-width: 1100px) {
+  .stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* The title of the YAML panel carries the icon of the prototype. */
+.config-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.config-title__icon {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  flex: none;
+  border-radius: 50%;
+  background: #e9f2ff;
+  color: #2f6fe4;
+}
+
+.config-title__icon svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.config-head {
+  justify-content: space-between;
+}
+
+/* The facts panel: the tinted head with the icon, the basic facts, the
+   divider and the facts of the update. */
+.config-facts {
+  border: 1px solid #e9eff9;
+  border-radius: 14px;
+  background: #fff;
+  padding: 18px;
+}
+
+.config-facts__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: #f0f5ff;
+}
+
+.config-facts__icon {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  flex: none;
+  border-radius: 50%;
+  background: #fff;
+  color: #2f6fe4;
+}
+
+.config-facts__icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.config-facts__head h3 {
+  margin: 0 0 4px;
+  color: #132a56;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.config-facts__head p {
+  margin: 0;
+  color: #475467;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.config-facts__subtitle {
+  margin: 0 0 10px;
+  color: #132a56;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.config-facts__divider {
+  height: 1px;
+  margin: 14px 0;
+  background: #eef2fa;
+}
+
+.config-facts__list div {
+  grid-template-columns: 96px 1fr;
+}
+
+/* The menu of the further operations of one container. */
+.ops-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.ops-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.ops-toggle svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.ops-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 5;
+  min-width: 104px;
+  display: grid;
+  padding: 6px;
+  border: 1px solid #e6ecf7;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 12px 28px -14px rgb(20 52 110 / 45%);
+}
+
+.ops-list button {
+  appearance: none;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  padding: 7px 12px;
+  text-align: left;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: #344054;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ops-list button:hover:not(:disabled) {
+  background: #f2f7ff;
+  color: #0255f0;
+}
+
+.ops-list button.danger {
+  color: #d92d20;
+}
+
+.ops-list button.danger:hover:not(:disabled) {
+  background: #fef3f2;
+  color: #b42318;
+}
+
+.ops-list button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* The tabs of the prototype: a wide row with a line icon, the active label
+   in ink, a blue icon and a blue underline that sits on the border. */
+nav.tabs {
+  gap: 32px;
+  margin: 22px 0 24px;
+  padding: 0;
+}
+
+nav.tabs .tabs__tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 42px;
+  margin-bottom: -1px;
+  padding: 0 2px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #667085;
+  border-bottom: 2px solid transparent;
+}
+
+nav.tabs .tabs__tab:hover {
+  color: #132a56;
+}
+
+nav.tabs .tabs__tab--active {
+  color: #132a56;
+  font-weight: 600;
+  border-bottom-color: #2f6ef0;
+}
+
+nav.tabs .tabs__icon {
+  width: 16px;
+  height: 16px;
+  color: #98a2b3;
+}
+
+nav.tabs .tabs__tab--active .tabs__icon {
+  color: #2f6ef0;
+}
+
+/* The rows of the facts are a label column and a value column. */
+.config-facts__list div {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.config-facts__list dt {
+  font-size: 12.5px;
+  color: #667085;
+}
+
+.config-facts__list dd {
+  margin: 0;
+  font-size: 13px;
+  color: #132a56;
+  overflow-wrap: anywhere;
+}
+
+.ops-head-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ops-head-toggle svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* The facts panel of the prototype reads a little larger than the rest of
+   the page. */
+.config-facts__head h3 {
+  font-size: 16px;
+}
+
+.config-facts__subtitle {
+  font-size: 14.5px;
+}
+
+
+.config-editor :deep(.cm-editor) {
+  min-height: 24rem;
+}
+
+.config-facts__list div {
+  grid-template-columns: 110px 1fr;
+}
+
+/* The dialog of a container: the tabs of its two views and the facts of
+   the container above the logs. */
+.container-dialog {
+  display: grid;
+  gap: 14px;
+}
+
+.detail-tabs {
+  display: inline-flex;
+  gap: 20px;
+  border-bottom: 1px solid #e6ecf7;
+}
+
+.detail-tabs button {
+  appearance: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  margin-bottom: -1px;
+  padding: 0 2px 10px;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: #667085;
+  cursor: pointer;
+}
+
+.detail-tabs button.active {
+  border-bottom-color: #2f6ef0;
+  color: #132a56;
+  font-weight: 600;
+}
+
+.dialog-state {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.dialog-logbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* The back button of the dialog returns to the list the way the
+   administrator came in. */
+.dialog-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  background: none;
+  padding: 0;
+  color: #667085;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.dialog-back:hover {
+  color: #0255f0;
+}
+
+.dialog-back svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 </style>

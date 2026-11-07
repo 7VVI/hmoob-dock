@@ -27,6 +27,8 @@ import type {
 // the resources of the namespace that the platform does not manage itself.
 export interface CreateApplicationInput {
   name: string
+  // description is the sentence the administrator wrote for the site.
+  description: string
   mode: AppMode
   target_id: string
   namespace: string

@@ -170,6 +170,17 @@ export interface NodeVolume {
   used: boolean
 }
 
+// NodeEvent is one container event of a node, for the event log of a site.
+export interface NodeEvent {
+  container_id: string
+  service: string
+  // action is what happened to the container: start, die, stop, kill...
+  action: string
+  exit_code: number | null
+  occurred_at: string
+  namespace: string
+}
+
 // NodeSwarmNode is one node of the Swarm cluster a node belongs to.
 export interface NodeSwarmNode {
   // id is the ID of the node inside of its Swarm cluster.
@@ -258,6 +269,8 @@ export interface AppConfig {
 export interface AppSummary {
   id: string
   name: string
+  // description is the sentence the administrator wrote for the site.
+  description: string
   mode: AppMode
   target_id: string
   namespace: string
@@ -266,6 +279,8 @@ export interface AppSummary {
   // successful_version_id is the version that was deployed successfully
   // last.
   successful_version_id: string
+  // created_at is the time the site was created.
+  created_at: string
 }
 
 // ApplicationPayload is an application with the configuration of its latest

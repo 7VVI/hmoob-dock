@@ -173,6 +173,7 @@ func (s *Server) registerContainerRoutes() {
 	s.mux.HandleFunc("/api/v1/nodes/{id}/images", s.handleNodeImages)
 	s.mux.HandleFunc("/api/v1/nodes/{id}/volumes", s.handleNodeVolumes)
 	s.mux.HandleFunc("/api/v1/nodes/{id}/swarm", s.handleNodeSwarm)
+	s.mux.HandleFunc("/api/v1/nodes/{id}/events", s.handleNodeEvents)
 }
 
 // handleNodeContainers answers with the containers of one node.

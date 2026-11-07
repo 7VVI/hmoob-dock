@@ -124,11 +124,12 @@ func (s *Server) createApplication(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Name      string `json:"name"`
-		Mode      string `json:"mode"`
-		TargetID  string `json:"target_id"`
-		Namespace string `json:"namespace"`
-		Adopt     bool   `json:"adopt"`
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Mode        string `json:"mode"`
+		TargetID    string `json:"target_id"`
+		Namespace   string `json:"namespace"`
+		Adopt       bool   `json:"adopt"`
 	}
 	if err := decodeDeploymentRequest(w, r, &body); err != nil {
 		writeDeploymentRequestError(w, err)
@@ -136,10 +137,11 @@ func (s *Server) createApplication(w http.ResponseWriter, r *http.Request) {
 	}
 
 	app, err := s.apps.CreateApp(r.Context(), model.App{
-		Name:      body.Name,
-		Mode:      body.Mode,
-		TargetID:  body.TargetID,
-		Namespace: body.Namespace,
+		Name:        body.Name,
+		Description: body.Description,
+		Mode:        body.Mode,
+		TargetID:    body.TargetID,
+		Namespace:   body.Namespace,
 	}, body.Adopt)
 	if err != nil {
 		writeDeployError(w, err)

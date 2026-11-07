@@ -19,6 +19,7 @@ import type {
   NodeListPayload,
   NodeImage,
   NodeNetwork,
+  NodeEvent,
   NodeService,
   NodeSummary,
   NodeSwarmNode,
@@ -92,6 +93,16 @@ export async function listNodeImages(nodeID: string): Promise<NodeImage[]> {
     `/api/v1/nodes/${encodeURIComponent(nodeID)}/images`,
   )
   return payload.images ?? []
+}
+
+// listNodeEvents reads the recent container events of one node. A
+// namespace keeps the events of the containers that belong to it.
+export async function listNodeEvents(nodeID: string, namespace = ''): Promise<NodeEvent[]> {
+  const query = namespace === '' ? '' : `?namespace=${encodeURIComponent(namespace)}`
+  const payload = await api<{ events: NodeEvent[] }>(
+    `/api/v1/nodes/${encodeURIComponent(nodeID)}/events${query}`,
+  )
+  return payload.events ?? []
 }
 
 // listNodeVolumes reads the named volumes in the local store of one node.

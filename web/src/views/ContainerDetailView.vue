@@ -11,6 +11,7 @@ import {
   getNodeContainer,
   type ContainerDetail,
 } from '../api/nodes'
+import { getApplication } from '../api/deployments'
 import {
   getMetrics,
   isStale,
@@ -49,6 +50,9 @@ const router = useRouter()
 
 const node = ref<NodeSummary | null>(null)
 const container = ref<ContainerDetail | null>(null)
+// site is the application the page was opened from, when it was opened
+// from a site of the platform.
+const site = ref<Awaited<ReturnType<typeof getApplication>> | null>(null)
 const loading = ref(true)
 const error = ref('')
 const refreshing = ref(false)
@@ -88,7 +92,18 @@ const curveLoading = ref(false)
 const curveError = ref('')
 const curveLoaded = ref(false)
 
-const nodeID = computed(() => String(route.params.id ?? ''))
+// isSite reports whether the page was opened from a site of the platform:
+// the route names the application that owns the container, so the
+// breadcrumb and the way back lead to the site and not to the node.
+const isSite = computed(() => route.params.appId !== undefined)
+const appID = computed(() => String(route.params.appId ?? ''))
+
+const nodeID = computed(() => {
+  if (isSite.value) {
+    return site.value?.target_id ?? ''
+  }
+  return String(route.params.id ?? '')
+})
 const containerID = computed(() => String(route.params.cid ?? ''))
 const theNodeIsConnected = computed(() => node.value?.connected === true)
 
@@ -142,6 +157,9 @@ async function load(silent = false) {
   }
   error.value = ''
   try {
+    if (isSite.value) {
+      site.value = await getApplication(appID.value)
+    }
     const [nodeRecord, detail] = await Promise.all([getNode(nodeID.value), readContainer()])
     node.value = nodeRecord
     container.value = detail
@@ -176,7 +194,11 @@ async function operate(action: 'start' | 'stop' | 'restart' | 'remove') {
     await containerOp(nodeID.value, container.value.id, action)
     confirmingRemove.value = false
     if (action === 'remove') {
-      await router.push(`/nodes/${encodeURIComponent(nodeID.value)}`)
+      await router.push(
+        isSite.value
+          ? `/applications/${encodeURIComponent(appID.value)}`
+          : `/nodes/${encodeURIComponent(nodeID.value)}`,
+      )
       return
     }
     opNotice.value = '操作已完成。健康状态以节点下一次上报为准。'
@@ -422,14 +444,26 @@ watch(theNodeIsConnected, (connected) => {
 
     <div v-else-if="error || !container || !node" class="state error">
       <p>{{ error || '未找到该容器。' }}</p>
-      <RouterLink class="text-link" :to="`/nodes/${encodeURIComponent(nodeID)}`">返回节点</RouterLink>
+      <RouterLink
+        class="text-link"
+        :to="isSite ? `/applications/${encodeURIComponent(appID)}` : `/nodes/${encodeURIComponent(nodeID)}`"
+      >
+        {{ isSite ? '返回站点' : '返回节点' }}
+      </RouterLink>
     </div>
 
     <div v-else class="container-page">
       <nav class="crumb" aria-label="面包屑">
-        <RouterLink to="/nodes">节点管理</RouterLink>
-        <span aria-hidden="true">/</span>
-        <RouterLink :to="`/nodes/${encodeURIComponent(node.id)}`">{{ node.hostname }}</RouterLink>
+        <template v-if="isSite">
+          <RouterLink to="/applications">站点管理</RouterLink>
+          <span aria-hidden="true">/</span>
+          <RouterLink :to="`/applications/${encodeURIComponent(appID)}`">{{ site?.name ?? '' }}</RouterLink>
+        </template>
+        <template v-else>
+          <RouterLink to="/nodes">节点管理</RouterLink>
+          <span aria-hidden="true">/</span>
+          <RouterLink :to="`/nodes/${encodeURIComponent(node.id)}`">{{ node.hostname }}</RouterLink>
+        </template>
         <span aria-hidden="true">/</span>
         <span>{{ container.name }}</span>
       </nav>
