@@ -78,23 +78,9 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="enroll" aria-label="接入新节点">
-    <header class="enroll-head">
-      <span class="enroll-icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24">
-          <path d="M12 5v14M5 12h14" />
-        </svg>
-      </span>
-      <div class="enroll-copy">
-        <h2>接入新节点</h2>
-        <p>生成一次性令牌，在目标主机上启动 Agent。令牌 15 分钟内有效。</p>
-      </div>
-      <button type="button" class="icon-button" aria-label="收起接入面板" @click="emit('close')">
-        <svg viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6" /></svg>
-      </button>
-    </header>
-
-    <div class="enroll-body">
+  <div class="enroll-body">
+    <p class="enroll-intro">生成一次性令牌，在目标主机上启动 Agent。令牌 15 分钟内有效。</p>
+    <div class="enroll-body-grid">
       <div class="enroll-main">
         <template v-if="!token">
           <ol class="steps">
@@ -159,130 +145,55 @@ onBeforeUnmount(() => {
         <p v-if="error" class="enroll-error">{{ error }}</p>
       </div>
 
-      <aside class="enroll-aside">
-        <div class="aside-item">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M12 3 5 5.8v5.4c0 4.2 2.9 7.6 7 9.8 4.1-2.2 7-5.6 7-9.8V5.8L12 3Z" />
-            <path d="m8.8 11.6 2.2 2.2 4.2-4.4" />
-          </svg>
-          <div>
-            <strong>无需开放入站端口</strong>
-            <small>Agent 主动向控制端发起连接，节点侧不用放通端口。</small>
+        <aside class="enroll-aside">
+          <div class="aside-item">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3 5 5.8v5.4c0 4.2 2.9 7.6 7 9.8 4.1-2.2 7-5.6 7-9.8V5.8L12 3Z" />
+              <path d="m8.8 11.6 2.2 2.2 4.2-4.4" />
+            </svg>
+            <div>
+              <strong>无需开放入站端口</strong>
+              <small>Agent 主动向控制端发起连接，节点侧不用放通端口。</small>
+            </div>
           </div>
-        </div>
-        <div class="aside-item">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="12" cy="12" r="8.5" />
-            <path d="M12 7.5V12l3 1.8" />
-          </svg>
-          <div>
-            <strong>令牌只显示一次</strong>
-            <small>15 分钟内有效，页面关闭后需要重新生成。</small>
+          <div class="aside-item">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="8.5" />
+              <path d="M12 7.5V12l3 1.8" />
+            </svg>
+            <div>
+              <strong>令牌只显示一次</strong>
+              <small>15 分钟内有效，页面关闭后需要重新生成。</small>
+            </div>
           </div>
-        </div>
-        <div class="aside-item">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M4 12a8 8 0 0 0 14 6" />
-          </svg>
-          <div>
-            <strong>自动出现在列表</strong>
-            <small>连接成功后本页每 15 秒同步一次，无需手动刷新。</small>
+          <div class="aside-item">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M4 12a8 8 0 0 0 14 6" />
+            </svg>
+            <div>
+              <strong>自动出现在列表</strong>
+              <small>连接成功后本页每 15 秒同步一次，无需手动刷新。</small>
+            </div>
           </div>
-        </div>
-      </aside>
-    </div>
+        </aside>
+      </div>
 
-    <p v-if="error" class="enroll-error">{{ error }}</p>
-  </section>
+      <p v-if="error" class="enroll-error">{{ error }}</p>
+  </div>
 </template>
 
 <style scoped>
-.enroll {
-  padding: 22px 24px;
-  border: 1px solid #dce8fb;
-  border-radius: 18px;
-  background:
-    radial-gradient(480px 260px at 100% 0%, rgb(226 237 255 / 70%) 0%, rgb(226 237 255 / 0) 62%),
-    #fff;
-  box-shadow: 0 18px 38px -36px rgb(20 52 110 / 50%);
-}
-
-.enroll-head {
-  display: flex;
-  align-items: flex-start;
-  gap: 13px;
-}
-
-.enroll-icon {
-  width: 40px;
-  height: 40px;
-  display: grid;
-  place-items: center;
-  flex: none;
-  border-radius: 50%;
-  background: #e8f1ff;
-  color: #2f6fe4;
-}
-
-.enroll-icon svg {
-  width: 19px;
-  height: 19px;
-  fill: none;
-  stroke: currentcolor;
-  stroke-width: 1.9;
-  stroke-linecap: round;
-}
-
-.enroll-copy {
-  min-width: 0;
-  flex: 1;
-}
-
-.enroll-copy h2 {
-  color: #16264a;
-  font-size: 16px;
-  font-weight: 700;
-}
-
-.enroll-copy p {
-  margin-top: 2px;
+.enroll-intro {
+  margin: 0 0 16px;
   color: #6b7d9c;
   font-size: 12.5px;
   line-height: 1.7;
 }
 
-.icon-button {
-  width: 28px;
-  height: 28px;
-  display: grid;
-  place-items: center;
-  flex: none;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: #8595b2;
-  cursor: pointer;
-}
-
-.icon-button:hover {
-  background: #eef4ff;
-  color: #2f6fe4;
-}
-
-.icon-button svg {
-  width: 15px;
-  height: 15px;
-  fill: none;
-  stroke: currentcolor;
-  stroke-width: 1.9;
-  stroke-linecap: round;
-}
-
-.enroll-body {
+.enroll-body-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.55fr) minmax(240px, 0.9fr);
   gap: 26px;
-  margin-top: 18px;
 }
 
 .enroll-main {
@@ -519,7 +430,7 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 980px) {
-  .enroll-body {
+  .enroll-body-grid {
     grid-template-columns: minmax(0, 1fr);
     gap: 18px;
   }
@@ -530,10 +441,6 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 640px) {
-  .enroll {
-    padding: 18px;
-  }
-
   .enroll-aside {
     grid-template-columns: minmax(0, 1fr);
   }

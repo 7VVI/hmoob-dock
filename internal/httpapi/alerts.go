@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"hmoob-dock/internal/alerts"
 	"hmoob-dock/internal/auth"
@@ -17,36 +18,64 @@ const maxAlertRequestBody = 8 * 1024
 
 // ruleRequest is the body of the endpoints that write a rule.
 type ruleRequest struct {
+	// Name is the title the administrator reads.
+	Name string `json:"name"`
+	// Description is the sentence the administrator wrote for the rule.
+	Description string `json:"description"`
 	// Kind is the kind of the observation the rule watches.
 	Kind string `json:"kind"`
+	// Severity is the weight of the rule. An empty severity saves a
+	// warning, so an old caller keeps the behaviour it had.
+	Severity string `json:"severity"`
+	// ScopeKind names the breadth the rule watches. An empty scope saves
+	// the one object of the rule.
+	ScopeKind string `json:"scope_kind"`
 	// ScopeID is the object the rule watches.
 	ScopeID string `json:"scope_id"`
 	// Metric is the value of a resource rule.
 	Metric string `json:"metric"`
+	// Operator compares the observed value with the threshold. An empty
+	// operator saves a comparison above the threshold.
+	Operator string `json:"operator"`
 	// Threshold is the limit of a resource rule.
 	Threshold float64 `json:"threshold"`
 	// ForSeconds is the time the condition has to hold, in seconds.
 	ForSeconds int `json:"for_seconds"`
 	// Enabled reports whether the rule is evaluated.
 	Enabled *bool `json:"enabled"`
+	// RecoverNotify reports whether the recovery of the rule speaks. An
+	// empty field saves a recovery that speaks.
+	RecoverNotify *bool `json:"recover_notify"`
 }
 
 // rulePayload is the answer of the endpoints of the rules.
 type rulePayload struct {
 	// ID identifies the rule.
 	ID string `json:"id"`
+	// Name is the title the administrator reads.
+	Name string `json:"name"`
+	// Description is the sentence the administrator wrote for the rule.
+	Description string `json:"description"`
 	// Kind is the kind of the observation the rule watches.
 	Kind string `json:"kind"`
+	// Severity is the weight of the rule.
+	Severity string `json:"severity"`
+	// ScopeKind names the breadth the rule watches.
+	ScopeKind string `json:"scope_kind"`
 	// ScopeID is the object the rule watches.
 	ScopeID string `json:"scope_id"`
 	// Metric is the value of a resource rule.
 	Metric string `json:"metric"`
+	// Operator compares the observed value with the threshold.
+	Operator string `json:"operator"`
 	// Threshold is the limit of a resource rule.
 	Threshold float64 `json:"threshold"`
 	// ForSeconds is the time the condition has to hold, in seconds.
 	ForSeconds int `json:"for_seconds"`
 	// Enabled reports whether the rule is evaluated.
 	Enabled bool `json:"enabled"`
+	// RecoverNotify reports whether the recovery of the rule speaks.
+	RecoverNotify bool `json:"recover_notify"`
 }
 
 // eventPayload is the answer of the endpoints of the events.
@@ -224,16 +253,25 @@ func (s *Server) createAlertRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rule := alerts.Rule{
-		ID:        alerts.NewRuleID(),
-		Kind:      body.Kind,
-		ScopeID:   body.ScopeID,
-		Metric:    body.Metric,
-		Threshold: body.Threshold,
-		For:       time.Duration(body.ForSeconds) * time.Second,
-		Enabled:   true,
+		ID:           alerts.NewRuleID(),
+		Name:         strings.TrimSpace(body.Name),
+		Description:  strings.TrimSpace(body.Description),
+		Kind:         body.Kind,
+		Severity:     severityOf(body.Severity),
+		ScopeKind:    scopeKindOf(body.ScopeKind),
+		ScopeID:      strings.TrimSpace(body.ScopeID),
+		Metric:       body.Metric,
+		Operator:     operatorOf(body.Operator),
+		Threshold:    body.Threshold,
+		For:          time.Duration(body.ForSeconds) * time.Second,
+		Enabled:      true,
+		RecoverQuiet: false,
 	}
 	if body.Enabled != nil {
 		rule.Enabled = *body.Enabled
+	}
+	if body.RecoverNotify != nil {
+		rule.RecoverQuiet = !*body.RecoverNotify
 	}
 	if err := s.alerts.PutRule(r.Context(), rule); err != nil {
 		s.writeAlertError(w, err)
@@ -257,16 +295,25 @@ func (s *Server) updateAlertRule(w http.ResponseWriter, r *http.Request, ruleID 
 		return
 	}
 	rule := alerts.Rule{
-		ID:        ruleID,
-		Kind:      body.Kind,
-		ScopeID:   body.ScopeID,
-		Metric:    body.Metric,
-		Threshold: body.Threshold,
-		For:       time.Duration(body.ForSeconds) * time.Second,
-		Enabled:   true,
+		ID:           ruleID,
+		Name:         strings.TrimSpace(body.Name),
+		Description:  strings.TrimSpace(body.Description),
+		Kind:         body.Kind,
+		Severity:     severityOf(body.Severity),
+		ScopeKind:    scopeKindOf(body.ScopeKind),
+		ScopeID:      strings.TrimSpace(body.ScopeID),
+		Metric:       body.Metric,
+		Operator:     operatorOf(body.Operator),
+		Threshold:    body.Threshold,
+		For:          time.Duration(body.ForSeconds) * time.Second,
+		Enabled:      true,
+		RecoverQuiet: false,
 	}
 	if body.Enabled != nil {
 		rule.Enabled = *body.Enabled
+	}
+	if body.RecoverNotify != nil {
+		rule.RecoverQuiet = !*body.RecoverNotify
 	}
 	if err := s.alerts.PutRule(r.Context(), rule); err != nil {
 		s.writeAlertError(w, err)
@@ -301,9 +348,51 @@ func (s *Server) readAlertBody(w http.ResponseWriter, r *http.Request, target an
 	return true
 }
 
+// maxRuleNameLength bounds the name of a rule. The name is a title, not a
+// description.
+const maxRuleNameLength = 64
+
+// maxRuleDescriptionLength bounds the description of a rule.
+const maxRuleDescriptionLength = 200
+
 // validateRule checks the body of a rule.
 func validateRule(body ruleRequest) map[string]string {
 	fields := map[string]string{}
+	if strings.TrimSpace(body.Name) == "" {
+		fields["name"] = "这条规则需要一个名称"
+	}
+	if utf8.RuneCountInString(strings.TrimSpace(body.Name)) > maxRuleNameLength {
+		fields["name"] = "名称不能超过 64 个字符"
+	}
+	if utf8.RuneCountInString(strings.TrimSpace(body.Description)) > maxRuleDescriptionLength {
+		fields["description"] = "描述不能超过 200 个字符"
+	}
+	switch body.Severity {
+	case "", alerts.SeverityInfo, alerts.SeverityWarning, alerts.SeverityCritical:
+	default:
+		fields["severity"] = "这个级别无法识别"
+	}
+	switch body.ScopeKind {
+	case "", alerts.ScopeAll, alerts.ScopeContainer, alerts.ScopeNamespace:
+	default:
+		fields["scope_kind"] = "这个监控范围无法识别"
+	}
+	switch body.Operator {
+	case "", alerts.OperatorGreaterThan, alerts.OperatorGreaterOrEqual,
+		alerts.OperatorLessThan, alerts.OperatorLessOrEqual:
+	default:
+		fields["operator"] = "这个触发条件无法识别"
+	}
+
+	// The breadth of the rule decides the object it names. A rule of all
+	// watches every container and names no object; the other scopes name
+	// one. A rule of a lost agent always names its node.
+	scopeKind := scopeKindOf(body.ScopeKind)
+	needsObject := scopeKind != alerts.ScopeAll || body.Kind == alerts.KindAgentOffline
+	if needsObject && strings.TrimSpace(body.ScopeID) == "" {
+		fields["scope_id"] = "这条规则必须指定它监视的对象"
+	}
+
 	switch body.Kind {
 	case alerts.KindResource:
 		if strings.TrimSpace(body.Metric) == "" {
@@ -313,9 +402,6 @@ func validateRule(body ruleRequest) map[string]string {
 			fields["threshold"] = "资源告警必须指定一个大于零的阈值"
 		}
 	case alerts.KindContainerExit, alerts.KindAgentOffline:
-		if strings.TrimSpace(body.ScopeID) == "" {
-			fields["scope_id"] = "这条规则必须指定它监视的对象"
-		}
 	default:
 		fields["kind"] = "这条规则的类型无法识别"
 	}
@@ -325,16 +411,51 @@ func validateRule(body ruleRequest) map[string]string {
 	return fields
 }
 
+// severityOf turns the severity of a request into the severity of a rule.
+// An empty severity is a warning, so an old caller keeps its behaviour.
+func severityOf(severity string) string {
+	if strings.TrimSpace(severity) == "" {
+		return alerts.SeverityWarning
+	}
+	return severity
+}
+
+// scopeKindOf turns the scope of a request into the scope of a rule.
+// An empty scope watches the one object of the rule, so an old caller keeps
+// its behaviour.
+func scopeKindOf(scopeKind string) string {
+	if strings.TrimSpace(scopeKind) == "" {
+		return alerts.ScopeContainer
+	}
+	return scopeKind
+}
+
+// operatorOf turns the operator of a request into the operator of a rule.
+// An empty operator compares above the threshold, so an old caller keeps
+// its behaviour.
+func operatorOf(operator string) string {
+	if strings.TrimSpace(operator) == "" {
+		return alerts.OperatorGreaterThan
+	}
+	return operator
+}
+
 // newRulePayload builds the answer of a rule.
 func newRulePayload(rule alerts.Rule) rulePayload {
 	return rulePayload{
-		ID:         rule.ID,
-		Kind:       rule.Kind,
-		ScopeID:    rule.ScopeID,
-		Metric:     rule.Metric,
-		Threshold:  rule.Threshold,
-		ForSeconds: rule.ForSeconds,
-		Enabled:    rule.Enabled,
+		ID:            rule.ID,
+		Name:          rule.Name,
+		Description:   rule.Description,
+		Kind:          rule.Kind,
+		Severity:      rule.Severity,
+		ScopeKind:     rule.ScopeKind,
+		ScopeID:       rule.ScopeID,
+		Metric:        rule.Metric,
+		Operator:      rule.Operator,
+		Threshold:     rule.Threshold,
+		ForSeconds:    rule.ForSeconds,
+		Enabled:       rule.Enabled,
+		RecoverNotify: !rule.RecoverQuiet,
 	}
 }
 

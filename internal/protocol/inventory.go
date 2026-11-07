@@ -124,6 +124,14 @@ type SwarmNode struct {
 	// Status is the state of the node as the manager sees it, for example
 	// ready or down.
 	Status string `json:"status,omitempty"`
+	// Addr is the address the node reports to the cluster.
+	Addr string `json:"addr,omitempty"`
+	// CPUs is the number of the cores the node offers the cluster.
+	CPUs float64 `json:"cpus"`
+	// MemoryBytes is the memory the node offers the cluster, in bytes.
+	MemoryBytes int64 `json:"memory_bytes,omitempty"`
+	// EngineVersion is the version of the Docker engine of the node.
+	EngineVersion string `json:"engine_version,omitempty"`
 }
 
 // SwarmService is a service of a Swarm stack.
@@ -173,6 +181,57 @@ type Network struct {
 	Created string `json:"created,omitempty"`
 	// Containers is the number of the containers attached to the network.
 	Containers int `json:"containers"`
+	// Labels are the labels of the network. The label of a Compose project
+	// or a Swarm stack names the stack the network belongs to.
+	Labels map[string]string `json:"labels,omitempty"`
+	// IPAMDriver is the driver of the address management of the network.
+	IPAMDriver string `json:"ipam_driver,omitempty"`
+	// IPAMSubnet is the IPv4 subnet the network serves.
+	IPAMSubnet string `json:"ipam_subnet,omitempty"`
+	// IPAMGateway is the IPv4 gateway of the network.
+	IPAMGateway string `json:"ipam_gateway,omitempty"`
+	// IPAMIPv6Subnet is the IPv6 subnet the network serves.
+	IPAMIPv6Subnet string `json:"ipam_ipv6_subnet,omitempty"`
+	// IPAMIPv6Gateway is the IPv6 gateway of the network.
+	IPAMIPv6Gateway string `json:"ipam_ipv6_gateway,omitempty"`
+}
+
+// Image is an image in the local store of a node.
+//
+// The fields are the ones the platform shows. The history and the build
+// steps of the image stay on the node.
+type Image struct {
+	// ID is the ID of the image, for example sha256:....
+	ID string `json:"id"`
+	// Tags are the references the image carries, for example nginx:alpine.
+	// An image that no reference names carries none.
+	Tags []string `json:"tags,omitempty"`
+	// Size is the size of the image on the disk of the node, in bytes.
+	Size int64 `json:"size"`
+	// Created is the time the image was built or pulled.
+	Created string `json:"created,omitempty"`
+	// Labels are the labels of the image.
+	Labels map[string]string `json:"labels,omitempty"`
+}
+
+// Volume is a named volume in the local store of a node.
+//
+// The fields are the ones the platform shows. The content of the volume
+// stays on the node.
+type Volume struct {
+	// Name is the name of the volume.
+	Name string `json:"name"`
+	// Driver is the driver of the volume, for example local.
+	Driver string `json:"driver,omitempty"`
+	// Mountpoint is the path on the node the volume lives at.
+	Mountpoint string `json:"mountpoint,omitempty"`
+	// Scope is the scope of the volume, for example local.
+	Scope string `json:"scope,omitempty"`
+	// Created is the time the volume was created.
+	Created string `json:"created,omitempty"`
+	// Labels are the labels of the volume. The label of a Compose project
+	// or a Swarm stack names the stack the volume belongs to.
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // SwarmTask is a task of a Swarm service.
@@ -212,6 +271,10 @@ type Inventory struct {
 	SwarmTasks []SwarmTask `json:"swarm_tasks,omitempty"`
 	// Networks are the networks of the Docker engine of the node.
 	Networks []Network `json:"networks,omitempty"`
+	// Images are the images in the local store of the node.
+	Images []Image `json:"images,omitempty"`
+	// Volumes are the named volumes in the local store of the node.
+	Volumes []Volume `json:"volumes,omitempty"`
 	// CollectedAt is the time the inventory was collected.
 	CollectedAt time.Time `json:"collected_at"`
 }
@@ -263,6 +326,12 @@ type InventoryBatch struct {
 	// Networks are the networks of the engine. They travel in the first
 	// batch of the snapshot.
 	Networks []Network `json:"networks,omitempty"`
+	// Images are the images of the engine. They travel in the first batch
+	// of the snapshot.
+	Images []Image `json:"images,omitempty"`
+	// Volumes are the named volumes of the engine. They travel in the
+	// first batch of the snapshot.
+	Volumes []Volume `json:"volumes,omitempty"`
 	// CollectedAt is the time the snapshot was collected.
 	CollectedAt time.Time `json:"collected_at"`
 }

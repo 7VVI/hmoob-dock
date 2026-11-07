@@ -116,12 +116,80 @@ export interface NodeService {
 export interface NodeNetwork {
   id: string
   name: string
+  // stack is the Compose project or the Swarm stack the network belongs
+  // to, when its labels name one.
+  stack: string
   driver: string
   scope: string
   internal: boolean
   attachable: boolean
   created: string
   containers: number
+  // The address management of the network: the driver and one subnet and
+  // one gateway per address family. A network that Docker manages by
+  // itself carries none of them.
+  ipam_driver: string
+  ipam_subnet: string
+  ipam_gateway: string
+  ipam_ipv6_subnet: string
+  ipam_ipv6_gateway: string
+}
+
+// NodeImage is one image in the local store of a node.
+export interface NodeImage {
+  // id is the ID of the image, for example sha256:....
+  id: string
+  // tags are the references the image carries. An image that no reference
+  // names carries none.
+  tags: string[]
+  // size is the size of the image on the disk of the node, in bytes.
+  size: number
+  created: string
+  // containers is the number of the containers of the node that run the
+  // image.
+  containers: number
+  // used reports whether a container of the node runs the image.
+  used: boolean
+}
+
+// NodeVolume is one named volume in the local store of a node.
+export interface NodeVolume {
+  name: string
+  // stack is the Compose project or the Swarm stack the volume belongs
+  // to, when its labels name one.
+  stack: string
+  driver: string
+  scope: string
+  // mountpoint is the path on the node the volume lives at.
+  mountpoint: string
+  created: string
+  // containers is the number of the containers of the node that mount the
+  // volume.
+  containers: number
+  // used reports whether a container of the node mounts the volume.
+  used: boolean
+}
+
+// NodeSwarmNode is one node of the Swarm cluster a node belongs to.
+export interface NodeSwarmNode {
+  // id is the ID of the node inside of its Swarm cluster.
+  id: string
+  hostname: string
+  // role is the role of the node inside of the cluster: manager or worker.
+  role: string
+  // availability is the state of the scheduler for the node: active,
+  // pause or drain.
+  availability: string
+  // status is the state of the node as the manager sees it: ready or down.
+  status: string
+  // addr is the address the node reports to the cluster.
+  addr: string
+  // cpus is the number of the cores the node offers the cluster.
+  cpus: number
+  // memory_bytes is the memory the node offers the cluster, in bytes.
+  memory_bytes: number
+  // engine_version is the version of the Docker engine of the node.
+  engine_version: string
 }
 
 // NodeDetailPayload is the answer of the detail of a node.
@@ -372,20 +440,42 @@ export interface MetricPoint {
 // AlertRuleKind is the kind of the observation a rule watches.
 export type AlertRuleKind = 'resource' | 'container_exit' | 'agent_offline'
 
+// AlertSeverity is the weight the administrator gives a rule.
+export type AlertSeverity = 'info' | 'warning' | 'critical'
+
+// AlertScopeKind is the breadth a rule watches.
+export type AlertScopeKind = 'all' | 'container' | 'namespace'
+
+// AlertOperator compares the observed value with the threshold of a rule.
+export type AlertOperator = '>' | '>=' | '<' | '<='
+
 // AlertRule is a rule of the alerts.
 export interface AlertRule {
   id: string
+  // name is the title the administrator reads. A rule without a name falls
+  // back to the label of its kind in the console.
+  name: string
+  // description is the sentence the administrator wrote for the rule.
+  description: string
   kind: AlertRuleKind
-  // scope_id is the object the rule watches: a container for a resource
-  // rule, a node for a rule of a lost agent.
+  // severity is the weight of the rule.
+  severity: AlertSeverity
+  // scope_kind names the breadth the rule watches.
+  scope_kind: AlertScopeKind
+  // scope_id is the object the rule watches: a container, a namespace or
+  // a node. It is empty for a rule of all containers.
   scope_id: string
   // metric is the value a resource rule watches.
   metric: string
+  // operator compares the observed value with the threshold.
+  operator: AlertOperator
   // threshold is the limit of a resource rule.
   threshold: number
   // for_seconds is the time the condition has to hold, in seconds.
   for_seconds: number
   enabled: boolean
+  // recover_notify reports whether the recovery of the rule speaks.
+  recover_notify: boolean
 }
 
 // AlertEventState is the state of an event of the alerts.

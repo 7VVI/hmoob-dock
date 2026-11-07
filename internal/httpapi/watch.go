@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"hmoob-dock/internal/alerts"
+	"hmoob-dock/internal/dockerops"
 	"hmoob-dock/internal/metrics"
 	"hmoob-dock/internal/protocol"
 )
@@ -79,7 +80,7 @@ func (s *Server) watchMetrics(point metrics.Point) {
 		if rule.Kind != alerts.KindResource || !rule.Enabled {
 			continue
 		}
-		if rule.ScopeID != point.ContainerID {
+		if !s.resourceRuleMatches(rule, point) {
 			continue
 		}
 		value, ok := metricValue(point.Values, rule.Metric)
@@ -97,6 +98,49 @@ func (s *Server) watchMetrics(point metrics.Point) {
 			log.Printf("control: evaluate the rule %s: %v", rule.ID, err)
 		}
 	}
+}
+
+// resourceRuleMatches reports whether a sample of a container falls into
+// the scope of the rule.
+//
+// A rule of all watches every container the platform sees, a rule of one
+// container watches the object of its scope, and a rule of a namespace
+// watches the containers of the namespace the rule names. A container whose
+// namespace was unknown never falls into the scope of a namespace rule,
+// because the platform cannot tell what the container belonged to.
+func (s *Server) resourceRuleMatches(rule alerts.Rule, point metrics.Point) bool {
+	switch rule.ScopeKind {
+	case alerts.ScopeAll:
+		return true
+	case alerts.ScopeNamespace:
+		namespace := s.containerNamespace(point.NodeID, point.ContainerID)
+		return namespace != "" && rule.ScopeID == namespace
+	default:
+		return rule.ScopeID != "" && rule.ScopeID == point.ContainerID
+	}
+}
+
+// containerNamespace names the Compose project or Swarm stack a container
+// belongs to, from the last inventory of its node.
+//
+// The inventory is the memory of the node: the read never reaches the agent
+// and an agent that is away still answers with the inventory it reported
+// last. An empty name means the inventory does not know the container.
+func (s *Server) containerNamespace(nodeID, containerID string) string {
+	inventory, err := s.hub.ReadInventory(s.ctx, "compose", nodeID)
+	if err != nil {
+		return ""
+	}
+	for _, container := range inventory.Containers {
+		if container.ID != containerID {
+			continue
+		}
+		if namespace := container.Labels[composeProjectLabel]; namespace != "" {
+			return namespace
+		}
+		return container.Labels[dockerops.StackNamespaceLabel]
+	}
+	return ""
 }
 
 // watchHeartbeats looks at the heartbeats of the nodes.
@@ -170,10 +214,11 @@ func (s *Server) handleContainerEvent(ctx context.Context, nodeID string, envelo
 		expected = s.expectedExit(ctx, nodeID, event)
 	}
 	sample := alerts.ExitSample{
-		NodeID:   nodeID,
-		ObjectID: objectID,
-		At:       event.OccurredAt,
-		Expected: expected,
+		NodeID:    nodeID,
+		ObjectID:  objectID,
+		Namespace: s.containerNamespace(nodeID, event.ContainerID),
+		At:        event.OccurredAt,
+		Expected:  expected,
 	}
 	if event.ExitCode != nil {
 		sample.ExitCode = *event.ExitCode

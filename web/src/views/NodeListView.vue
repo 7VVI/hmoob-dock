@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import AppShell from '../components/AppShell.vue'
 import BrandMark from '../components/BrandMark.vue'
+import AppModal from '../components/AppModal.vue'
 import NodeEnrollment from '../components/NodeEnrollment.vue'
 import { listNodes, roleLabel } from '../api/nodes'
 import { listApplications } from '../api/deployments'
@@ -178,13 +179,15 @@ onBeforeUnmount(() => {
         <button type="button" class="ghost-button" :disabled="refreshing" @click="load()">
           {{ refreshing ? '刷新中…' : '刷新' }}
         </button>
-        <button type="button" class="primary-button" @click="enrolling = !enrolling">
-          {{ enrolling ? '收起接入' : '接入节点' }}
+        <button type="button" class="primary-button" @click="enrolling = true">
+          接入节点
         </button>
       </div>
     </div>
 
-    <NodeEnrollment v-if="enrolling" class="enroll-block" @close="enrolling = false" />
+    <AppModal :open="enrolling" title="接入新节点" wide @close="enrolling = false">
+      <NodeEnrollment @close="enrolling = false" />
+    </AppModal>
 
     <p v-if="notice" class="banner success">
       {{ notice }}
@@ -360,10 +363,6 @@ onBeforeUnmount(() => {
 
 .primary-button:hover {
   background: #0755d8;
-}
-
-.enroll-block {
-  margin-bottom: 18px;
 }
 
 .banner {

@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { NAlert, NButton, NCard, NCheckbox } from 'naive-ui'
+import AppModal from '../components/AppModal.vue'
 import AppShell from '../components/AppShell.vue'
 import { api } from '../api/client'
 import { createApplication, listApplications } from '../api/deployments'
@@ -175,13 +176,8 @@ const inputClass =
       </NCard>
     </section>
 
-    <section v-if="creating">
-      <NCard title="新建应用">
-        <template #header-extra>
-          <NButton quaternary @click="closeForm">关闭</NButton>
-        </template>
-
-        <form class="grid max-w-2xl gap-4" novalidate @submit.prevent="create">
+    <AppModal :open="creating" title="新建应用" @close="closeForm">
+      <form class="grid gap-4" novalidate @submit.prevent="create">
           <div class="grid gap-1">
             <label class="text-xs font-medium text-[#344054]" for="application-name">名称</label>
             <input
@@ -259,11 +255,11 @@ const inputClass =
 
           <NAlert v-if="formError" type="error" :show-icon="false">{{ formError }}</NAlert>
 
-          <NButton class="self-start" type="primary" attr-type="submit" :loading="busy">
-            创建应用
-          </NButton>
+          <div class="flex flex-wrap justify-end gap-3 border-t border-[#eef2fa] pt-4">
+            <NButton quaternary @click="closeForm">取消</NButton>
+            <NButton type="primary" attr-type="submit" :loading="busy">创建应用</NButton>
+          </div>
         </form>
-      </NCard>
-    </section>
+      </AppModal>
   </AppShell>
 </template>

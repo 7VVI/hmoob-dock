@@ -55,7 +55,6 @@ async function signOut() {
 const icons = {
   home: 'M4 10.4 12 4l8 6.4V20a1 1 0 0 1-1 1h-4.2v-6H9.2v6H5a1 1 0 0 1-1-1v-9.6Z',
   sites: 'M4 4h16v6H4V4Zm0 10h16v6H4v-6ZM7.5 7h.01M7.5 17h.01',
-  services: 'M4 4h6v6H4V4Zm10 0h6v6h-6V4ZM4 14h6v6H4v-6Zm10 0h6v6h-6v-6Z',
   nodes: 'M12 3 3 8v8l9 5 9-5V8L12 3ZM3 8l9 5 9-5M12 13v8',
   alerts: 'M18 8a6 6 0 0 0-12 0c0 6-3 8-3 8h18s-3-2-3-8M10 21h4',
   settings: 'M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4Zm7.4-3.2c0 .5-.05 1-.14 1.47l2.06 1.6-2 3.46-2.42-.98c-.75.62-1.6 1.12-2.54 1.45L14 22h-4l-.36-2.6c-.94-.33-1.79-.83-2.54-1.45l-2.42.98-2-3.46 2.06-1.6A8.6 8.6 0 0 1 4.6 12c0-.5.05-1 .14-1.47l-2.06-1.6 2-3.46 2.42.98c.75-.62 1.6-1.12 2.54-1.45L10 2h4l.36 2.6c.94.33 1.79.83 2.54 1.45l2.42-.98 2 3.46-2.06 1.6c.09.47.14.97.14 1.47Z',
@@ -63,12 +62,11 @@ const icons = {
 }
 
 // The menu follows the design of the platform: the overview first, then
-// the sites and their services, the nodes that run them, the alerts and the
-// settings of the deployment.
+// the sites, the nodes that run them, the alerts and the settings of the
+// deployment. The services live on the page of their node.
 const navigation = [
   { label: '概览', to: '/', icon: icons.home, section: '/' },
   { label: '站点管理', to: '/applications', icon: icons.sites, section: '/applications' },
-  { label: '服务管理', to: '/services', icon: icons.services, section: '/services' },
   { label: '节点管理', to: '/nodes', icon: icons.nodes, section: '/nodes' },
   { label: '告警管理', to: '/alerts', icon: icons.alerts, section: '/alerts' },
   { label: '系统设置', to: '/settings', icon: icons.settings, section: '/settings' },
@@ -88,7 +86,6 @@ const crumb = computed(() => {
   const path = route.path
   if (path === '/') return '概览'
   if (path.startsWith('/applications')) return '站点管理'
-  if (path.startsWith('/services')) return '服务管理'
   if (path.startsWith('/nodes')) return '节点管理'
   if (path.startsWith('/alerts')) return '告警管理'
   if (path.startsWith('/settings')) return '系统设置'

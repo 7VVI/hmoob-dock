@@ -4,16 +4,22 @@ import { useRoute, useRouter } from 'vue-router'
 import AppShell from '../components/AppShell.vue'
 import {
   getNode,
+  listNodeImages,
   listNodeNetworks,
   listNodeServices,
+  listNodeSwarm,
+  listNodeVolumes,
   roleLabel,
 } from '../api/nodes'
 import { listContainers, type ContainerSummary } from '../api/metrics'
 import {
   describeError,
   formatTimestamp,
+  type NodeImage,
   type NodeNetwork,
   type NodeService,
+  type NodeSwarmNode,
+  type NodeVolume,
   type NodeSummary,
   type PortMapping,
 } from '../api/types'
@@ -22,7 +28,7 @@ import {
 // header, the readings of the node and one list for every kind of object
 // the node holds. A container opens its own page, so the list stays a
 // list.
-type Tab = 'containers' | 'services' | 'networks'
+type Tab = 'containers' | 'services' | 'images' | 'volumes' | 'networks' | 'swarm'
 
 const route = useRoute()
 const router = useRouter()
@@ -30,7 +36,10 @@ const router = useRouter()
 const node = ref<NodeSummary | null>(null)
 const containers = ref<ContainerSummary[]>([])
 const services = ref<NodeService[]>([])
+const images = ref<NodeImage[]>([])
+const volumes = ref<NodeVolume[]>([])
 const networks = ref<NodeNetwork[]>([])
+const swarmNodes = ref<NodeSwarmNode[]>([])
 const loading = ref(true)
 const initialLoaded = ref(false)
 const refreshing = ref(false)
@@ -38,9 +47,16 @@ const error = ref('')
 const containersError = ref('')
 const servicesError = ref('')
 const servicesFallback = ref(false)
+const imagesError = ref('')
+const volumesError = ref('')
 const networksError = ref('')
+const swarmError = ref('')
 const tab = ref<Tab>('containers')
 const filter = ref('')
+const imageFilter = ref('')
+const volumeFilter = ref('')
+const networkFilter = ref('')
+const swarmFilter = ref('')
 
 const nodeID = computed(() => String(route.params.id ?? ''))
 
@@ -56,7 +72,10 @@ async function load(silent = false) {
   error.value = ''
   containersError.value = ''
   servicesError.value = ''
+  imagesError.value = ''
+  volumesError.value = ''
   networksError.value = ''
+  swarmError.value = ''
 
   try {
     node.value = await getNode(nodeID.value)
@@ -69,7 +88,7 @@ async function load(silent = false) {
     return
   }
 
-  const [containerResult, serviceResult, networkResult] = await Promise.all([
+  const [containerResult, serviceResult, imageResult, volumeResult, swarmResult, networkResult] = await Promise.all([
     listContainers(nodeID.value).then(
       (items) => ({ items, error: '' }),
       (failure) => ({ items: [] as ContainerSummary[], error: describeError(failure) }),
@@ -78,12 +97,30 @@ async function load(silent = false) {
       (items) => ({ items, error: '' }),
       (failure) => ({ items: [] as NodeService[], error: describeError(failure) }),
     ),
+    listNodeImages(nodeID.value).then(
+      (items) => ({ items, error: '' }),
+      (failure) => ({ items: [] as NodeImage[], error: describeError(failure) }),
+    ),
+    listNodeVolumes(nodeID.value).then(
+      (items) => ({ items, error: '' }),
+      (failure) => ({ items: [] as NodeVolume[], error: describeError(failure) }),
+    ),
+    listNodeSwarm(nodeID.value).then(
+      (items) => ({ items, error: '' }),
+      (failure) => ({ items: [] as NodeSwarmNode[], error: describeError(failure) }),
+    ),
     listNodeNetworks(nodeID.value).then(
       (items) => ({ items, error: '' }),
       (failure) => ({ items: [] as NodeNetwork[], error: describeError(failure) }),
     ),
   ])
   containers.value = containerResult.items
+  images.value = imageResult.items
+  volumes.value = volumeResult.items
+  swarmNodes.value = swarmResult.items
+  imagesError.value = imageResult.error
+  volumesError.value = volumeResult.error
+  swarmError.value = swarmResult.error
   networks.value = networkResult.items
   containersError.value = containerResult.error
   networksError.value = networkResult.error
@@ -111,6 +148,140 @@ const theRunning = computed(
 const theRunningServices = computed(
   () => services.value.filter((item) => item.running >= item.desired && item.desired > 0).length,
 )
+
+// serviceFilter narrows the services by name, stack or image.
+const serviceFilter = ref('')
+
+// theFilteredServices applies the search of the service list.
+const theFilteredServices = computed(() => {
+  const needle = serviceFilter.value.trim().toLowerCase()
+  if (needle === '') {
+    return services.value
+  }
+  return services.value.filter((service) =>
+    `${service.name} ${service.stack} ${service.image}`.toLowerCase().includes(needle),
+  )
+})
+
+// theFilteredImages applies the search of the image list.
+const theFilteredImages = computed(() => {
+  const needle = imageFilter.value.trim().toLowerCase()
+  if (needle === '') {
+    return images.value
+  }
+  return images.value.filter((image) =>
+    `${image.id} ${image.tags.join(' ')}`.toLowerCase().includes(needle),
+  )
+})
+
+// theFilteredVolumes applies the search of the volume list.
+const theFilteredVolumes = computed(() => {
+  const needle = volumeFilter.value.trim().toLowerCase()
+  if (needle === '') {
+    return volumes.value
+  }
+  return volumes.value.filter((volume) =>
+    `${volume.name} ${volume.stack} ${volume.driver}`.toLowerCase().includes(needle),
+  )
+})
+
+// theFilteredNetworks applies the search of the network list.
+const theFilteredNetworks = computed(() => {
+  const needle = networkFilter.value.trim().toLowerCase()
+  if (needle === '') {
+    return networks.value
+  }
+  return networks.value.filter((network) =>
+    `${network.name} ${network.stack} ${network.driver} ${network.ipam_subnet}`.toLowerCase().includes(needle),
+  )
+})
+
+// theFilteredSwarmNodes applies the search of the cluster node list.
+const theFilteredSwarmNodes = computed(() => {
+  const needle = swarmFilter.value.trim().toLowerCase()
+  if (needle === '') {
+    return swarmNodes.value
+  }
+  return swarmNodes.value.filter((node) =>
+    `${node.hostname} ${node.role} ${node.addr} ${node.engine_version}`.toLowerCase().includes(needle),
+  )
+})
+
+// theClusterCPUs sums the cores the cluster nodes offer.
+const theClusterCPUs = computed(() =>
+  Math.round(swarmNodes.value.reduce((sum, node) => sum + node.cpus, 0)),
+)
+
+// theClusterMemory sums the memory the cluster nodes offer.
+const theClusterMemory = computed(() =>
+  swarmNodes.value.reduce((sum, node) => sum + node.memory_bytes, 0),
+)
+
+// theClusterManagers counts the managers of the cluster.
+const theClusterManagers = computed(
+  () => swarmNodes.value.filter((node) => node.role === 'manager').length,
+)
+
+// swarmRoleTone colors the role of a cluster node.
+function swarmRoleTone(role: string): 'ok' | 'off' {
+  return role === 'manager' ? 'ok' : 'off'
+}
+
+// swarmStatusTone colors the reachability of a cluster node.
+function swarmStatusTone(status: string): 'ok' | 'bad' | 'warn' | 'off' {
+  if (status === 'ready') return 'ok'
+  if (status === 'down') return 'bad'
+  return 'warn'
+}
+
+// swarmAvailabilityTone colors the scheduling state of a cluster node.
+function swarmAvailabilityTone(availability: string): 'ok' | 'warn' | 'off' {
+  if (availability === 'active') return 'ok'
+  if (availability === 'pause') return 'warn'
+  return 'off'
+}
+
+// formatBytes writes a size in bytes the way a list of images reads it.
+function formatBytes(size: number): string {
+  if (size <= 0) {
+    return '0 B'
+  }
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const exponent = Math.min(Math.floor(Math.log(size) / Math.log(1024)), units.length - 1)
+  const scaled = size / 1024 ** exponent
+  const text = scaled >= 100 ? String(Math.round(scaled)) : scaled.toFixed(1)
+  return `${text} ${units[exponent]}`
+}
+
+// imageIdShort writes the ID of an image the way a list reads it: the
+// algorithm and the first twelve digits of the digest.
+function imageIdShort(id: string): string {
+  return id.startsWith('sha256:') ? `sha256:${id.slice(7, 19)}` : id.slice(0, 20)
+}
+
+// imageTagOf names the reference the list shows for an image. A reference
+// that a digest pins is the second choice, because a tag reads better. An
+// image that no reference names hangs in the store without a name.
+function imageTagOf(tags: string[]): string {
+  if (tags.length === 0) {
+    return '<none>:<none>'
+  }
+  return tags.find((tag) => !tag.includes('@')) ?? tags[0]
+}
+
+// addressPair joins a subnet and its gateway for one cell of the list. An
+// address family the network does not serve reads as a dash.
+function addressPair(subnet: string | undefined, gateway: string | undefined): string {
+  const sub = subnet ?? ''
+  const gw = gateway ?? ''
+  if (sub === '' && gw === '') {
+    return '—'
+  }
+  if (gw === '') {
+    return sub
+  }
+  return `${sub} · ${gw}`
+}
 
 // theFilteredContainers applies the search of the container list.
 const theFilteredContainers = computed(() => {
@@ -169,7 +340,9 @@ function serviceTone(service: NodeService): 'ok' | 'bad' | 'warn' | 'off' {
   return service.running >= service.desired ? 'ok' : 'bad'
 }
 
-function serviceStateLabel(service: NodeService): string {
+// updateStateLabel names the state of the update of a service, for the
+// small badge beside the scheduling mode.
+function updateStateLabel(service: NodeService): string {
   switch (service.update_state) {
     case 'updating':
       return '更新中'
@@ -179,16 +352,11 @@ function serviceStateLabel(service: NodeService): string {
       return '已回滚'
     case 'rollback_started':
       return '回滚中'
+    case 'completed':
+      return '更新完成'
     default:
-      break
+      return service.update_state
   }
-  if (service.desired === 0) return '已停止'
-  if (service.source === 'compose') {
-    if (service.running === 0) return '未运行'
-    if (service.running < service.desired) return '部分运行'
-    return '运行中'
-  }
-  return service.running >= service.desired ? '运行中' : '副本不足'
 }
 
 // portText writes one port the way the list shows it.
@@ -369,6 +537,16 @@ watch(nodeID, async (current, previous) => {
           <small>{{ theRunningServices }} 个达到目标</small>
         </div>
         <div class="reading">
+          <span>镜像</span>
+          <strong>{{ images.length }}</strong>
+          <small>Docker 镜像</small>
+        </div>
+        <div class="reading">
+          <span>数据卷</span>
+          <strong>{{ volumes.length }}</strong>
+          <small>Docker 卷</small>
+        </div>
+        <div class="reading">
           <span>网络</span>
           <strong>{{ networks.length }}</strong>
           <small>Docker 网络</small>
@@ -397,6 +575,30 @@ watch(nodeID, async (current, previous) => {
             @click="tab = 'services'"
           >
             服务 <span>{{ services.length }}</span>
+          </button>
+          <button
+            type="button"
+            :class="{ active: tab === 'images' }"
+            :aria-selected="tab === 'images'"
+            @click="tab = 'images'"
+          >
+            镜像 <span>{{ images.length }}</span>
+          </button>
+          <button
+            type="button"
+            :class="{ active: tab === 'volumes' }"
+            :aria-selected="tab === 'volumes'"
+            @click="tab = 'volumes'"
+          >
+            数据卷 <span>{{ volumes.length }}</span>
+          </button>
+          <button
+            type="button"
+            :class="{ active: tab === 'swarm' }"
+            :aria-selected="tab === 'swarm'"
+            @click="tab = 'swarm'"
+          >
+            Swarm <span>{{ swarmNodes.length }}</span>
           </button>
           <button
             type="button"
@@ -438,7 +640,6 @@ watch(nodeID, async (current, previous) => {
                   <th scope="col">创建</th>
                   <th scope="col">IP</th>
                   <th scope="col">端口</th>
-                  <th scope="col" class="actions-col"><span class="sr-only">操作</span></th>
                 </tr>
               </thead>
               <tbody>
@@ -472,15 +673,7 @@ watch(nodeID, async (current, previous) => {
                   <td class="mono">{{ formatDate(item.created) }}</td>
                   <td class="mono">{{ item.ip || '—' }}</td>
                   <td class="ports-cell">{{ portsText(item.ports) }}</td>
-                  <td class="actions-col">
-                    <RouterLink
-                      class="detail-link"
-                      :to="`/nodes/${encodeURIComponent(node.id)}/containers/${encodeURIComponent(item.id)}`"
-                      @click.stop
-                    >
-                      详情
-                    </RouterLink>
-                  </td>
+
                 </tr>
               </tbody>
             </table>
@@ -489,13 +682,25 @@ watch(nodeID, async (current, previous) => {
 
         <!-- Services -->
         <div v-else-if="tab === 'services'" class="tab-body">
+          <div class="list-toolbar">
+            <label class="search">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" />
+                <path d="m16 16 4 4" />
+              </svg>
+              <input v-model="serviceFilter" type="search" placeholder="按名称、堆栈或镜像搜索服务" />
+            </label>
+            <span class="toolbar-note">{{ theFilteredServices.length }} / {{ services.length }} 个服务</span>
+          </div>
+
           <p v-if="servicesFallback" class="banner warn">
             控制端或 Agent 还是旧版本，以下服务由容器标签推导；重启后可获得完整的 Swarm 服务清单。
           </p>
           <p v-if="servicesError" class="banner error">{{ servicesError }}</p>
 
-          <div v-else-if="services.length === 0" class="empty">
-            <p>这个节点没有可展示的服务。Swarm 服务需要节点加入集群；Compose 服务需要容器带有服务标签。</p>
+          <div v-else-if="theFilteredServices.length === 0" class="empty">
+            <p v-if="services.length > 0">没有符合搜索条件的服务。</p>
+            <p v-else>这个节点没有可展示的服务。Swarm 服务需要节点加入集群；Compose 服务需要容器带有服务标签。</p>
           </div>
 
           <div v-else class="table-scroll">
@@ -505,28 +710,38 @@ watch(nodeID, async (current, previous) => {
                   <th scope="col">名称</th>
                   <th scope="col">堆栈</th>
                   <th scope="col">镜像</th>
-                  <th scope="col">模式</th>
-                  <th scope="col">副本 / 容器</th>
-                  <th scope="col">端口</th>
-                  <th scope="col">状态</th>
+                  <th scope="col">调度模式</th>
+                  <th scope="col">发布端口</th>
                   <th scope="col">更新时间</th>
                   <th scope="col" class="actions-col"><span class="sr-only">操作</span></th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="service in services" :key="service.id">
+                <tr v-for="service in theFilteredServices" :key="service.id">
                   <td class="name-cell">
                     <strong>{{ service.name }}</strong>
                     <small>{{ service.source === 'swarm' ? 'Swarm 服务' : 'Compose 服务' }}</small>
                   </td>
                   <td><code class="stack">{{ service.stack || '—' }}</code></td>
                   <td class="image-cell" :title="service.image">{{ service.image || '—' }}</td>
-                  <td>{{ service.mode || '—' }}</td>
-                  <td class="mono">{{ service.running }} / {{ service.desired }}</td>
-                  <td class="ports-cell">{{ portsText(service.ports) }}</td>
                   <td>
-                    <span class="pill" :class="serviceTone(service)">
-                      <i aria-hidden="true"></i>{{ serviceStateLabel(service) }}
+                    <span class="mode-copy">{{ service.mode || '—' }}</span>
+                    <span class="replicas mono" :class="serviceTone(service)">
+                      {{ service.running }} / {{ service.desired }}
+                    </span>
+                    <span v-if="service.update_state" class="pill warn small-pill">
+                      <i aria-hidden="true"></i>{{ updateStateLabel(service) }}
+                    </span>
+                  </td>
+                  <td class="ports-cell">
+                    <span v-if="!service.ports?.length" class="muted">—</span>
+                    <span v-else class="port-chips">
+                      <span v-for="(port, index) in service.ports" :key="index" class="port-chip">
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                          <path d="M10 14 14 10M9 15l-2.5 2.5a2.8 2.8 0 0 1-4-4L5 11l2.5-2.5M15 9l2.5-2.5a2.8 2.8 0 0 1 4 4L19 13l-2.5 2.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
+                        </svg>
+                        {{ port.public_port ? `${port.public_port}:${port.private_port}` : port.private_port }}<small>/{{ port.type || 'tcp' }}</small>
+                      </span>
                     </span>
                   </td>
                   <td class="mono">{{ formatDate(service.updated_at) }}</td>
@@ -541,12 +756,79 @@ watch(nodeID, async (current, previous) => {
           </div>
         </div>
 
-        <!-- Networks -->
-        <div v-else class="tab-body">
-          <p v-if="networksError" class="banner error">{{ networksError }}</p>
+        <!-- Images -->
+        <div v-else-if="tab === 'images'" class="tab-body">
+          <div class="list-toolbar">
+            <label class="search">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" />
+                <path d="m16 16 4 4" />
+              </svg>
+              <input v-model="imageFilter" type="search" placeholder="按 ID 或标签搜索镜像" />
+            </label>
+            <span class="toolbar-note">{{ theFilteredImages.length }} / {{ images.length }} 个镜像</span>
+          </div>
 
-          <div v-else-if="networks.length === 0" class="empty">
-            <p>这个节点还没有上报网络。</p>
+          <p v-if="imagesError" class="banner error">{{ imagesError }}</p>
+
+          <div v-else-if="theFilteredImages.length === 0" class="empty">
+            <p v-if="images.length > 0">没有符合搜索条件的镜像。</p>
+            <p v-else>这个节点还没有上报镜像清单。确认 Agent 已升级到最新版本后等待一次同步。</p>
+          </div>
+
+          <div v-else class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">ID</th>
+                  <th scope="col">标签</th>
+                  <th scope="col">大小</th>
+                  <th scope="col">使用状态</th>
+                  <th scope="col">创建时间</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="image in theFilteredImages" :key="image.id">
+                  <td class="mono" :title="image.id">{{ imageIdShort(image.id) }}</td>
+                  <td>
+                    <span v-if="image.tags.length > 0" class="image-tag">{{ imageTagOf(image.tags) }}</span>
+                    <span v-else class="image-tag none">{{ imageTagOf(image.tags) }}</span>
+                    <small v-if="image.tags.length > 1" class="muted">共 {{ image.tags.length }} 个标签</small>
+                  </td>
+                  <td class="mono">{{ formatBytes(image.size) }}</td>
+                  <td>
+                    <span v-if="image.used" class="pill ok">
+                      <i aria-hidden="true"></i>使用中 {{ image.containers }} 容器
+                    </span>
+                    <span v-else class="pill warn">
+                      <i aria-hidden="true"></i>未使用
+                    </span>
+                  </td>
+                  <td class="mono">{{ formatDate(image.created) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Volumes -->
+        <div v-else-if="tab === 'volumes'" class="tab-body">
+          <div class="list-toolbar">
+            <label class="search">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" />
+                <path d="m16 16 4 4" />
+              </svg>
+              <input v-model="volumeFilter" type="search" placeholder="按名称、堆栈或驱动搜索数据卷" />
+            </label>
+            <span class="toolbar-note">{{ theFilteredVolumes.length }} / {{ volumes.length }} 个数据卷</span>
+          </div>
+
+          <p v-if="volumesError" class="banner error">{{ volumesError }}</p>
+
+          <div v-else-if="theFilteredVolumes.length === 0" class="empty">
+            <p v-if="volumes.length > 0">没有符合搜索条件的数据卷。</p>
+            <p v-else>这个节点还没有上报数据卷。确认 Agent 已升级到最新版本后等待一次同步。</p>
           </div>
 
           <div v-else class="table-scroll">
@@ -554,22 +836,183 @@ watch(nodeID, async (current, previous) => {
               <thead>
                 <tr>
                   <th scope="col">名称</th>
+                  <th scope="col">堆栈</th>
+                  <th scope="col">驱动</th>
+                  <th scope="col">挂载点</th>
+                  <th scope="col">使用状态</th>
+                  <th scope="col">创建时间</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="volume in theFilteredVolumes" :key="volume.name">
+                  <td class="name-cell">
+                    <strong>{{ volume.name }}</strong>
+                    <small>{{ volume.scope || 'local' }}</small>
+                  </td>
+                  <td>
+                    <code v-if="volume.stack" class="stack">{{ volume.stack }}</code>
+                    <span v-else class="muted">—</span>
+                  </td>
+                  <td>{{ volume.driver || '—' }}</td>
+                  <td class="mountpoint" :title="volume.mountpoint">{{ volume.mountpoint || '—' }}</td>
+                  <td>
+                    <span v-if="volume.used" class="pill ok">
+                      <i aria-hidden="true"></i>使用中 {{ volume.containers }} 容器
+                    </span>
+                    <span v-else class="pill warn">
+                      <i aria-hidden="true"></i>未使用
+                    </span>
+                  </td>
+                  <td class="mono">{{ formatDate(volume.created) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Swarm -->
+        <div v-else-if="tab === 'swarm'" class="tab-body">
+          <p v-if="swarmError" class="banner error">{{ swarmError }}</p>
+
+          <div v-else-if="swarmNodes.length === 0" class="empty">
+            <p>这个节点不在 Swarm 集群中。节点加入集群后，这里显示集群概况与全部节点的注册情况。</p>
+          </div>
+
+          <template v-else>
+            <div class="cluster-grid">
+              <div class="cluster-fact">
+                <span>集群节点</span>
+                <strong>{{ swarmNodes.length }}</strong>
+                <small>{{ theClusterManagers }} 个管理节点</small>
+              </div>
+              <div class="cluster-fact">
+                <span>总 CPU</span>
+                <strong>{{ theClusterCPUs }} 核</strong>
+                <small>全部节点合计</small>
+              </div>
+              <div class="cluster-fact">
+                <span>总内存</span>
+                <strong>{{ formatBytes(theClusterMemory) }}</strong>
+                <small>全部节点合计</small>
+              </div>
+              <div class="cluster-fact">
+                <span>引擎版本</span>
+                <strong class="mono">{{ swarmNodes[0]?.engine_version || node?.docker_version || '—' }}</strong>
+                <small>集群运行时</small>
+              </div>
+            </div>
+
+            <div class="list-toolbar">
+              <label class="search">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="11" cy="11" r="7" />
+                  <path d="m16 16 4 4" />
+                </svg>
+                <input v-model="swarmFilter" type="search" placeholder="按主机名、角色或地址搜索集群节点" />
+              </label>
+              <span class="toolbar-note">{{ theFilteredSwarmNodes.length }} / {{ swarmNodes.length }} 个节点</span>
+            </div>
+
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">主机名</th>
+                    <th scope="col">角色</th>
+                    <th scope="col">CPU</th>
+                    <th scope="col">内存</th>
+                    <th scope="col">引擎版本</th>
+                    <th scope="col">IP 地址</th>
+                    <th scope="col">状态</th>
+                    <th scope="col">可达性</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="clusterNode in theFilteredSwarmNodes" :key="clusterNode.id">
+                    <td class="name-cell">
+                      <strong>{{ clusterNode.hostname || clusterNode.id.slice(0, 12) }}</strong>
+                      <small class="mono">{{ clusterNode.id.slice(0, 12) }}</small>
+                    </td>
+                    <td>
+                      <span class="pill" :class="swarmRoleTone(clusterNode.role)">
+                        <i aria-hidden="true"></i>{{ clusterNode.role || '—' }}
+                      </span>
+                    </td>
+                    <td class="mono">{{ clusterNode.cpus }} 核</td>
+                    <td class="mono">{{ formatBytes(clusterNode.memory_bytes) }}</td>
+                    <td class="mono">{{ clusterNode.engine_version || '—' }}</td>
+                    <td class="mono">{{ clusterNode.addr || '—' }}</td>
+                    <td>
+                      <span class="pill" :class="swarmStatusTone(clusterNode.status)">
+                        <i aria-hidden="true"></i>{{ clusterNode.status || '—' }}
+                      </span>
+                    </td>
+                    <td>
+                      <span class="pill" :class="swarmAvailabilityTone(clusterNode.availability)">
+                        <i aria-hidden="true"></i>{{ clusterNode.availability || '—' }}
+                      </span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </template>
+        </div>
+
+        <!-- Networks -->
+        <div v-else class="tab-body">
+          <div class="list-toolbar">
+            <label class="search">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" />
+                <path d="m16 16 4 4" />
+              </svg>
+              <input v-model="networkFilter" type="search" placeholder="按名称、堆栈、驱动或子网搜索网络" />
+            </label>
+            <span class="toolbar-note">{{ theFilteredNetworks.length }} / {{ networks.length }} 个网络</span>
+          </div>
+
+          <p v-if="networksError" class="banner error">{{ networksError }}</p>
+
+          <div v-else-if="theFilteredNetworks.length === 0" class="empty">
+            <p v-if="networks.length > 0">没有符合搜索条件的网络。</p>
+            <p v-else>这个节点还没有上报网络。</p>
+          </div>
+
+          <div v-else class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">名称</th>
+                  <th scope="col">堆栈</th>
                   <th scope="col">驱动</th>
                   <th scope="col">范围</th>
+                  <th scope="col">可接入</th>
                   <th scope="col">内部</th>
+                  <th scope="col">IPAM 驱动</th>
+                  <th scope="col">IPv4 子网 · 网关</th>
+                  <th scope="col">IPv6 子网 · 网关</th>
                   <th scope="col">容器</th>
                   <th scope="col">创建时间</th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="network in networks" :key="network.id">
+                <tr v-for="network in theFilteredNetworks" :key="network.id">
                   <td class="name-cell">
                     <strong>{{ network.name }}</strong>
                     <small class="mono">{{ network.id.slice(0, 12) }}</small>
                   </td>
+                  <td>
+                    <code v-if="network.stack" class="stack">{{ network.stack }}</code>
+                    <span v-else class="muted">—</span>
+                  </td>
                   <td>{{ network.driver || '—' }}</td>
                   <td>{{ network.scope || '—' }}</td>
+                  <td>{{ network.attachable ? '是' : '否' }}</td>
                   <td>{{ network.internal ? '是' : '否' }}</td>
+                  <td>{{ network.ipam_driver || '—' }}</td>
+                  <td class="mono">{{ addressPair(network.ipam_subnet, network.ipam_gateway) }}</td>
+                  <td class="mono">{{ addressPair(network.ipam_ipv6_subnet, network.ipam_ipv6_gateway) }}</td>
                   <td class="mono">{{ network.containers }}</td>
                   <td class="mono">{{ formatDate(network.created) }}</td>
                 </tr>
@@ -760,7 +1203,7 @@ watch(nodeID, async (current, previous) => {
 
 .readings {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 14px;
 }
 
@@ -1020,6 +1463,70 @@ tbody tr:hover {
   color: #94a3bd;
 }
 
+/* The reference an image carries. A dangling image hangs in the store
+   without a name, so its reference reads in the words of Docker. */
+.image-tag {
+  display: inline-block;
+  border-radius: 7px;
+  background: #f0f5ff;
+  color: #1d4fd8;
+  padding: 2px 9px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.image-tag.none {
+  background: #f2f4f7;
+  color: #667085;
+  font-weight: 400;
+}
+
+.mountpoint {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+/* The overview of the cluster: one fact beside the other, the way the
+   console reads the registration of a Swarm cluster. */
+.cluster-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.cluster-fact {
+  display: grid;
+  gap: 4px;
+  padding: 16px 18px;
+  border: 1px solid #e9eff9;
+  border-radius: 14px;
+  background: #f7faff;
+}
+
+.cluster-fact span {
+  font-size: 12px;
+  color: #667085;
+}
+
+.cluster-fact strong {
+  color: #132a56;
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.cluster-fact small {
+  font-size: 11.5px;
+  color: #8ba0bf;
+}
+
 .image-cell {
   max-width: 240px;
   overflow: hidden;
@@ -1036,16 +1543,75 @@ tbody tr:hover {
 
 .ports-cell {
   max-width: 220px;
-  overflow: hidden;
-  text-overflow: ellipsis;
   font-family: var(--font-mono);
   font-size: 11px;
 }
 
-.actions-col {
-  width: 1%;
-  text-align: right;
+/* The scheduling mode of a service: the mode word, the replicas and the
+   badge of an update that runs. */
+.mode-copy {
+  color: #475467;
+  font-size: 12px;
 }
+
+.replicas {
+  margin-left: 7px;
+  font-weight: 600;
+}
+
+.replicas.ok {
+  color: #0bbf7a;
+}
+
+.replicas.bad {
+  color: #f04438;
+}
+
+.replicas.warn {
+  color: #f79009;
+}
+
+.replicas.off {
+  color: #98a2b3;
+}
+
+.small-pill {
+  margin-left: 7px;
+  padding: 0 7px;
+  font-size: 10.5px;
+}
+
+/* The chips of the published ports of a service. */
+.port-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.port-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid #d8e2f5;
+  border-radius: 7px;
+  background: #f7faff;
+  color: #1d4fd8;
+  padding: 2px 8px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.port-chip svg {
+  width: 11px;
+  height: 11px;
+  flex: none;
+}
+
+.port-chip small {
+  color: #8ba0bf;
+}
+
+
 
 .detail-link {
   border: 0;

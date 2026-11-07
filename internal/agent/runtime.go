@@ -1164,6 +1164,8 @@ func splitInventory(inventory protocol.Inventory) ([]protocol.InventoryBatch, er
 		batches[0].SwarmServices = inventory.SwarmServices
 		batches[0].SwarmTasks = inventory.SwarmTasks
 		batches[0].Networks = inventory.Networks
+		batches[0].Images = inventory.Images
+		batches[0].Volumes = inventory.Volumes
 	}
 	for index, batch := range batches {
 		data, err := json.Marshal(batch)

@@ -16,9 +16,11 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/image"
 	networkapi "github.com/docker/docker/api/types/network"
 	swarmapi "github.com/docker/docker/api/types/swarm"
 	"github.com/docker/docker/api/types/system"
+	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
 
@@ -154,6 +156,22 @@ func (l *Local) Inventory(ctx context.Context) (protocol.Inventory, error) {
 	}
 	inventory.Networks = networks
 
+	// The images live in the local store of the node, so they are read for
+	// every node as well.
+	images, err := l.Images(ctx)
+	if err != nil {
+		return protocol.Inventory{}, err
+	}
+	inventory.Images = images
+
+	// The volumes live in the local store of the node, so they are read
+	// for every node as well.
+	volumes, err := l.Volumes(ctx)
+	if err != nil {
+		return protocol.Inventory{}, err
+	}
+	inventory.Volumes = volumes
+
 	if info.Swarm.NodeID == "" {
 		// The node does not belong to a cluster, so it has no swarm facts.
 		return inventory, nil
@@ -200,21 +218,130 @@ func (l *Local) Networks(ctx context.Context) ([]protocol.Network, error) {
 	}
 	networks := make([]protocol.Network, 0, len(listed))
 	for _, network := range listed {
-		networks = append(networks, protocol.Network{
-			ID:         network.ID,
-			Name:       network.Name,
-			Driver:     network.Driver,
-			Scope:      network.Scope,
-			Internal:   network.Internal,
-			Attachable: network.Attachable,
-			Created:    network.Created.Format(time.RFC3339Nano),
-			Containers: len(network.Containers),
-		})
+		networks = append(networks, networkOf(network))
 	}
 	sort.SliceStable(networks, func(i, j int) bool {
 		return networks[i].Name < networks[j].Name
 	})
 	return networks, nil
+}
+
+// Images returns the images in the local store of the engine.
+//
+// The platform reads them to show the administrator what the node holds and
+// which of its images the containers still use.
+func (l *Local) Images(ctx context.Context) ([]protocol.Image, error) {
+	listed, err := l.client.ImageList(ctx, image.ListOptions{All: true})
+	if err != nil {
+		return nil, fmt.Errorf("dockerops: list the images of the engine: %w", err)
+	}
+	images := imagesOf(listed)
+	sort.SliceStable(images, func(i, j int) bool {
+		return images[i].Created > images[j].Created
+	})
+	return images, nil
+}
+
+// networkOf projects one network of the Docker SDK into the network of the
+// protocol.
+//
+// The address management of the network travels with the list of the
+// networks: the driver of the address management and one subnet and one
+// gateway per address family are the facts the console shows.
+func networkOf(network networkapi.Summary) protocol.Network {
+	projected := protocol.Network{
+		ID:         network.ID,
+		Name:       network.Name,
+		Driver:     network.Driver,
+		Scope:      network.Scope,
+		Internal:   network.Internal,
+		Attachable: network.Attachable,
+		Created:    network.Created.Format(time.RFC3339Nano),
+		Containers: len(network.Containers),
+		Labels:     network.Labels,
+		IPAMDriver: network.IPAM.Driver,
+	}
+	for _, config := range network.IPAM.Config {
+		if strings.Contains(config.Subnet, ":") {
+			if projected.IPAMIPv6Subnet == "" {
+				projected.IPAMIPv6Subnet = config.Subnet
+			}
+			if projected.IPAMIPv6Gateway == "" {
+				projected.IPAMIPv6Gateway = config.Gateway
+			}
+			continue
+		}
+		if projected.IPAMSubnet == "" {
+			projected.IPAMSubnet = config.Subnet
+		}
+		if projected.IPAMGateway == "" {
+			projected.IPAMGateway = config.Gateway
+		}
+	}
+	return projected
+}
+
+// imagesOf projects the images of the Docker SDK into the images of the
+// protocol.
+func imagesOf(listed []image.Summary) []protocol.Image {
+	images := make([]protocol.Image, 0, len(listed))
+	for _, summary := range listed {
+		created := ""
+		if summary.Created != 0 {
+			created = time.Unix(summary.Created, 0).UTC().Format(time.RFC3339Nano)
+		}
+		images = append(images, protocol.Image{
+			ID:      summary.ID,
+			Tags:    summary.RepoTags,
+			Size:    summary.Size,
+			Created: created,
+			Labels:  summary.Labels,
+		})
+	}
+	return images
+}
+
+// Volumes returns the named volumes in the local store of the engine.
+//
+// The platform reads them to show the administrator what the node holds and
+// which of its volumes the containers still use.
+func (l *Local) Volumes(ctx context.Context) ([]protocol.Volume, error) {
+	listed, err := l.client.VolumeList(ctx, volume.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("dockerops: list the volumes of the engine: %w", err)
+	}
+	volumes := volumesOf(listed.Volumes)
+	sort.SliceStable(volumes, func(i, j int) bool {
+		return volumes[i].Name < volumes[j].Name
+	})
+	return volumes, nil
+}
+
+// volumesOf projects the volumes of the Docker SDK into the volumes of the
+// protocol.
+func volumesOf(listed []*volume.Volume) []protocol.Volume {
+	volumes := make([]protocol.Volume, 0, len(listed))
+	for _, summary := range listed {
+		if summary == nil {
+			continue
+		}
+		// The build time of a volume arrives as the text Docker wrote it,
+		// so the projection reads it back and writes it in the time of the
+		// protocol. A time that does not read stays as it arrived.
+		created := summary.CreatedAt
+		if parsed, err := time.Parse(time.RFC3339Nano, summary.CreatedAt); err == nil {
+			created = parsed.UTC().Format(time.RFC3339Nano)
+		}
+		volumes = append(volumes, protocol.Volume{
+			Name:       summary.Name,
+			Driver:     summary.Driver,
+			Mountpoint: summary.Mountpoint,
+			Scope:      summary.Scope,
+			Created:    created,
+			Labels:     summary.Labels,
+		})
+	}
+	return volumes
 }
 
 // SwarmServices returns the services of the Swarm cluster of the local engine.
@@ -258,12 +385,24 @@ func (l *Local) SwarmTasks(ctx context.Context, namespace string) ([]swarmapi.Ta
 func swarmNodesOf(nodes []swarmapi.Node) []protocol.SwarmNode {
 	projected := make([]protocol.SwarmNode, 0, len(nodes))
 	for _, node := range nodes {
+		cpus := 0.0
+		memory := int64(0)
+		engine := ""
+		if node.Description.Resources.NanoCPUs > 0 {
+			cpus = float64(node.Description.Resources.NanoCPUs) / 1e9
+		}
+		memory = node.Description.Resources.MemoryBytes
+		engine = node.Description.Engine.EngineVersion
 		projected = append(projected, protocol.SwarmNode{
-			ID:           node.ID,
-			Hostname:     node.Description.Hostname,
-			Role:         string(node.Spec.Role),
-			Availability: string(node.Spec.Availability),
-			Status:       string(node.Status.State),
+			ID:            node.ID,
+			Hostname:      node.Description.Hostname,
+			Role:          string(node.Spec.Role),
+			Availability:  string(node.Spec.Availability),
+			Status:        string(node.Status.State),
+			Addr:          node.Status.Addr,
+			CPUs:          cpus,
+			MemoryBytes:   memory,
+			EngineVersion: engine,
 		})
 	}
 	return projected

@@ -758,6 +758,8 @@ func (c *connection) acceptInventory(envelope protocol.Envelope) error {
 
 	containers := make([]protocol.Container, 0, len(pending.batches))
 	var networks []protocol.Network
+	var images []protocol.Image
+	var volumes []protocol.Volume
 	var swarmNodes []protocol.SwarmNode
 	var swarmServices []protocol.SwarmService
 	var swarmTasks []protocol.SwarmTask
@@ -767,6 +769,12 @@ func (c *connection) acceptInventory(envelope protocol.Envelope) error {
 		containers = append(containers, part.Containers...)
 		if len(part.Networks) > 0 {
 			networks = part.Networks
+		}
+		if len(part.Images) > 0 {
+			images = part.Images
+		}
+		if len(part.Volumes) > 0 {
+			volumes = part.Volumes
 		}
 		if len(part.SwarmNodes) > 0 {
 			swarmNodes = part.SwarmNodes
@@ -788,6 +796,8 @@ func (c *connection) acceptInventory(envelope protocol.Envelope) error {
 		SwarmServices: swarmServices,
 		SwarmTasks:    swarmTasks,
 		Networks:      networks,
+		Images:        images,
+		Volumes:       volumes,
 		CollectedAt:   collectedAt,
 	}
 	c.inventoryAt = now

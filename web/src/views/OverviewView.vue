@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { RouterLink, useRouter } from 'vue-router'
 import AppShell from '../components/AppShell.vue'
 import DockerHeroArt from '../components/DockerHeroArt.vue'
 import { listNodes } from '../api/nodes'
@@ -447,18 +447,20 @@ onBeforeUnmount(() => {
   }
 })
 
-// The readings of the hero: each one is a card with an icon, a number and
-// the way to the page that explains it.
+// The readings of the hero: each one is a card with an icon, a number and,
+// when a page of the platform explains it, the way to that page. A reading
+// without a way is a number that only reads, like the services that live
+// on the pages of their nodes.
 type ReadingIcon = 'sites' | 'services' | 'containers' | 'health'
 
 const readings = computed<{
   label: string
   value: string
   icon: ReadingIcon
-  to: string
+  to?: string
 }[]>(() => [
   { label: '站点总数', value: String(apps.value.length), icon: 'sites', to: '/applications' },
-  { label: '服务总数', value: String(theServiceCount.value), icon: 'services', to: '/services' },
+  { label: '服务总数', value: String(theServiceCount.value), icon: 'services' },
   { label: '容器总数', value: String(allContainers.value.length), icon: 'containers', to: '/nodes' },
   { label: '服务健康率', value: theHealthText.value, icon: 'health', to: '/alerts' },
 ])
@@ -494,11 +496,13 @@ function goTo(path: string): void {
 
       <!-- The four readings -->
       <section class="stats" aria-label="平台统计">
-        <RouterLink
+        <component
+          :is="reading.to ? RouterLink : 'div'"
           v-for="reading in readings"
           :key="reading.label"
           :to="reading.to"
           class="stat-card"
+          :class="{ plain: !reading.to }"
         >
           <span class="stat-icon" :class="reading.icon">
             <svg v-if="reading.icon === 'sites'" viewBox="0 0 24 24" aria-hidden="true">
@@ -541,10 +545,10 @@ function goTo(path: string): void {
             <strong>{{ reading.value }}</strong>
             <small>{{ reading.label }}</small>
           </span>
-          <span class="stat-chevron" aria-hidden="true">
+          <span v-if="reading.to" class="stat-chevron" aria-hidden="true">
             <svg viewBox="0 0 24 24"><path d="m9 5 7 7-7 7" /></svg>
           </span>
-        </RouterLink>
+        </component>
       </section>
 
       <div class="main-grid">
@@ -866,6 +870,18 @@ function goTo(path: string): void {
   border-color: #d8e6fb;
   box-shadow: 0 18px 34px -28px rgb(20 52 110 / 45%);
   text-decoration: none;
+}
+
+/* A reading without a page of its own only reads: it does not lift and it
+   does not offer a hand the page cannot follow. */
+.stat-card.plain {
+  cursor: default;
+}
+
+.stat-card.plain:hover {
+  transform: none;
+  border-color: #e9eff9;
+  box-shadow: 0 14px 30px -32px rgb(20 52 110 / 50%);
 }
 
 .stat-icon {

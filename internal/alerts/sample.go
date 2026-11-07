@@ -115,6 +115,10 @@ type ExitSample struct {
 	NodeID string
 	// ObjectID is the object the container belongs to.
 	ObjectID string
+	// Namespace is the Compose project or Swarm stack the container
+	// belonged to, when the platform could tell. It is empty when the
+	// namespace of the container was unknown.
+	Namespace string
 	// At is the time Docker reported the end.
 	At time.Time
 	// ExitCode is the exit code of the container.
@@ -139,7 +143,7 @@ func (e *Engine) ObserveExit(ctx context.Context, sample ExitSample) ([]Event, e
 		if rule.Kind != KindContainerExit || !rule.Enabled {
 			continue
 		}
-		if rule.ScopeID != "" && rule.ScopeID != sample.ObjectID {
+		if !exitRuleMatches(rule, sample) {
 			continue
 		}
 		value := 1.0
@@ -161,6 +165,25 @@ func (e *Engine) ObserveExit(ctx context.Context, sample ExitSample) ([]Event, e
 		}
 	}
 	return opened, nil
+}
+
+// exitRuleMatches reports whether an end of a container falls into the
+// scope of the rule.
+//
+// A rule of all watches every container, a rule of one container watches
+// the object of its scope, and a rule of a namespace watches the containers
+// of the namespace the sample names. A sample whose namespace was unknown
+// never falls into the scope of a namespace rule, because the platform
+// cannot tell what the container belonged to.
+func exitRuleMatches(rule Rule, sample ExitSample) bool {
+	switch rule.ScopeKind {
+	case ScopeAll:
+		return true
+	case ScopeNamespace:
+		return sample.Namespace != "" && rule.ScopeID == sample.Namespace
+	default:
+		return rule.ScopeID != "" && rule.ScopeID == sample.ObjectID
+	}
 }
 
 // NotificationOf reads the notification of one transition of an event.

@@ -59,7 +59,12 @@ const opError = ref('')
 const opNotice = ref('')
 const confirmingRemove = ref(false)
 
-const tab = ref<'logs' | 'metrics'>('logs')
+// The tab the page opens into follows the address: a quick action of the
+// list of a node names the tab in the query, so 日志 and 监控 are one tap
+// away.
+const tab = ref<'logs' | 'metrics'>(
+  route.query.tab === 'metrics' ? 'metrics' : 'logs',
+)
 
 // The logs of the container.
 const logLines = ref<string[]>([])
@@ -448,36 +453,50 @@ watch(theNodeIsConnected, (connected) => {
           </div>
         </div>
 
-        <div class="head-actions">
-          <template v-if="confirmingRemove">
-            <span class="confirm">确认删除？不可恢复，数据卷保留。</span>
-            <button type="button" class="danger" :disabled="operating !== ''" @click="operate('remove')">
-              {{ operating === 'remove' ? '删除中…' : '确认删除' }}
-            </button>
-            <button type="button" class="quiet" @click="confirmingRemove = false">取消</button>
-          </template>
-          <template v-else>
-            <button type="button" class="action" :disabled="!canStart || operating !== ''" @click="operate('start')">
-              {{ operating === 'start' ? '启动中…' : '启动' }}
-            </button>
-            <button type="button" class="action" :disabled="!canStop || operating !== ''" @click="operate('stop')">
-              {{ operating === 'stop' ? '停止中…' : '停止' }}
-            </button>
-            <button type="button" class="action" :disabled="!canStop || operating !== ''" @click="operate('restart')">
-              {{ operating === 'restart' ? '重启中…' : '重启' }}
-            </button>
-            <button
-              v-if="canRemove"
-              type="button"
-              class="danger-quiet"
-              :disabled="operating !== ''"
-              @click="confirmingRemove = true"
-            >
-              删除
-            </button>
-          </template>
-        </div>
       </header>
+
+      <section class="panel actions-panel" aria-label="容器操作">
+        <div class="actions-row">
+          <span class="actions-label">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="3.2" />
+              <path d="M12 2.8v3M12 18.2v3M2.8 12h3M18.2 12h3M5.5 5.5l2.1 2.1M16.4 16.4l2.1 2.1M18.5 5.5l-2.1 2.1M7.6 16.4l-2.1 2.1" />
+            </svg>
+            快捷操作
+          </span>
+          <div class="actions-buttons">
+            <template v-if="confirmingRemove">
+              <span class="confirm">确认删除？不可恢复，数据卷保留。</span>
+              <button type="button" class="danger" :disabled="operating !== ''" @click="operate('remove')">
+                {{ operating === 'remove' ? '删除中…' : '确认删除' }}
+              </button>
+              <button type="button" class="quiet" @click="confirmingRemove = false">取消</button>
+            </template>
+            <template v-else>
+              <button type="button" class="action" :disabled="!canStart || operating !== ''" @click="operate('start')">
+                {{ operating === 'start' ? '启动中…' : '启动' }}
+              </button>
+              <button type="button" class="action" :disabled="!canStop || operating !== ''" @click="operate('stop')">
+                {{ operating === 'stop' ? '停止中…' : '停止' }}
+              </button>
+              <button type="button" class="action" :disabled="!canStop || operating !== ''" @click="operate('restart')">
+                {{ operating === 'restart' ? '重启中…' : '重启' }}
+              </button>
+              <button
+                v-if="canRemove"
+                type="button"
+                class="danger-quiet"
+                :disabled="operating !== ''"
+                @click="confirmingRemove = true"
+              >
+                删除
+              </button>
+            </template>
+          </div>
+          <p v-if="opNotice" class="op-notice">{{ opNotice }}</p>
+          <p v-if="opError" class="op-error">{{ opError }}</p>
+        </div>
+      </section>
 
       <p v-if="!theNodeIsConnected" class="banner warn">
         节点的连接已中断，容器操作与实时日志暂不可用。下面显示的是节点最后一次上报。
@@ -485,9 +504,6 @@ watch(theNodeIsConnected, (connected) => {
       <p v-if="partial" class="banner warn">
         控制端或 Agent 还是旧版本，容器的挂载与标签暂不可用；重启控制端与 Agent 后可看到完整信息。
       </p>
-      <p v-if="opNotice" class="banner success">{{ opNotice }}</p>
-      <p v-if="opError" class="banner error" role="alert">{{ opError }}</p>
-
       <section class="facts panel">
         <header class="panel-head">
           <h2>容器信息</h2>
@@ -729,11 +745,64 @@ watch(theNodeIsConnected, (connected) => {
   font-size: 11.5px;
 }
 
-.head-actions {
+/* The panel of the operations: the verbs of the protocol in one row, the
+   way Portainer lines them up above the facts of a container. */
+.actions-panel {
+  padding: 14px 18px;
+  margin-bottom: 14px;
+}
+
+.actions-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.actions-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  color: #34446b;
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.actions-label svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: #2f6fe4;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+
+.actions-buttons {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.confirm {
+  color: #b42318;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.op-notice {
+  margin: 0;
+  color: #067647;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.op-error {
+  margin: 0;
+  color: #d92d20;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .action,

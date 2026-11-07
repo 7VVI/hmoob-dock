@@ -26,6 +26,52 @@ const (
 	KindResource = "resource"
 )
 
+// The scopes of a rule.
+//
+// The scope names the breadth a rule watches. A rule of one container
+// watches the object of its scope, a rule of a namespace watches the
+// containers of one Compose project or Swarm stack, and a rule of all
+// watches every container the platform sees.
+const (
+	// ScopeAll reports every container of the platform.
+	ScopeAll = "all"
+	// ScopeContainer reports the one object of the rule.
+	ScopeContainer = "container"
+	// ScopeNamespace reports the containers of one namespace.
+	ScopeNamespace = "namespace"
+)
+
+// The operators of a resource rule.
+//
+// The operator compares the observed value with the threshold of the rule,
+// so a rule may fire above or below a limit.
+const (
+	// OperatorGreaterThan fires when the value stays above the threshold.
+	OperatorGreaterThan = ">"
+	// OperatorGreaterOrEqual fires when the value stays at or above the
+	// threshold.
+	OperatorGreaterOrEqual = ">="
+	// OperatorLessThan fires when the value stays below the threshold.
+	OperatorLessThan = "<"
+	// OperatorLessOrEqual fires when the value stays at or below the
+	// threshold.
+	OperatorLessOrEqual = "<="
+)
+
+// The severities of a rule.
+//
+// The severity is the weight the administrator gives the rule. The engine
+// does not evaluate it differently, the console reads it to color the rules
+// and the events.
+const (
+	// SeverityInfo reports an alert that the administrator wants to see.
+	SeverityInfo = "info"
+	// SeverityWarning reports an alert that deserves attention.
+	SeverityWarning = "warning"
+	// SeverityCritical reports an alert that should not wait.
+	SeverityCritical = "critical"
+)
+
 // The states of an event.
 const (
 	// StateActive reports an anomaly that is still present.
@@ -54,12 +100,25 @@ const DefaultSampleInterval = 10 * time.Second
 type Rule struct {
 	// ID is the identifier of the rule.
 	ID string `json:"id"`
+	// Name is the title the administrator reads. A rule without a name
+	// falls back to the label of its kind in the console.
+	Name string `json:"name"`
+	// Description is the sentence the administrator wrote for the rule.
+	// It is empty when the administrator wrote none.
+	Description string `json:"description"`
 	// Kind is the kind of the observation.
 	Kind string `json:"kind"`
-	// ScopeID is the object the rule watches.
+	// Severity is the weight of the rule.
+	Severity string `json:"severity"`
+	// ScopeKind names the breadth the rule watches.
+	ScopeKind string `json:"scope_kind"`
+	// ScopeID is the object the rule watches: a container, a namespace or
+	// a node. It is empty for a rule of all containers.
 	ScopeID string `json:"scope_id"`
 	// Metric is the value of a resource rule.
 	Metric string `json:"metric"`
+	// Operator compares the observed value with the threshold.
+	Operator string `json:"operator"`
 	// Threshold is the limit of a resource rule.
 	Threshold float64 `json:"threshold"`
 	// For is the time the condition has to hold.
@@ -68,6 +127,11 @@ type Rule struct {
 	ForSeconds int `json:"for_seconds"`
 	// Enabled reports whether the rule is evaluated.
 	Enabled bool `json:"enabled"`
+	// RecoverQuiet silences the recovery of the rule. The opening of an
+	// event always notifies; a rule whose recovery is quiet only resolves
+	// its event without a word. The field is an opt in to the silence, so
+	// a rule that nobody configured keeps a recovery that speaks.
+	RecoverQuiet bool `json:"-"`
 }
 
 // Observation is one sample of the object a rule watches.
@@ -199,24 +263,53 @@ func (e *Engine) PutRule(ctx context.Context, rule Rule) error {
 	if !knownKind(rule.Kind) {
 		return fmt.Errorf("alerts: the rule %s has an unknown kind %q", rule.ID, rule.Kind)
 	}
+	if rule.Severity == "" {
+		rule.Severity = SeverityWarning
+	}
+	if !knownSeverity(rule.Severity) {
+		return fmt.Errorf("alerts: the rule %s has an unknown severity %q", rule.ID, rule.Severity)
+	}
+	if rule.ScopeKind == "" {
+		rule.ScopeKind = ScopeContainer
+	}
+	if !knownScopeKind(rule.ScopeKind) {
+		return fmt.Errorf("alerts: the rule %s has an unknown scope %q", rule.ID, rule.ScopeKind)
+	}
+	if rule.Operator == "" {
+		rule.Operator = OperatorGreaterThan
+	}
+	if !knownOperator(rule.Operator) {
+		return fmt.Errorf("alerts: the rule %s has an unknown operator %q", rule.ID, rule.Operator)
+	}
 	now := store.TimeToMillis(e.now())
 	enabled := 0
 	if rule.Enabled {
 		enabled = 1
 	}
+	recoverNotify := 1
+	if rule.RecoverQuiet {
+		recoverNotify = 0
+	}
 	if _, err := e.db.ExecContext(ctx, `
-		INSERT INTO alert_rules (id, kind, scope_id, metric, threshold, for_ms, enabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO alert_rules (id, name, description, kind, severity, scope_kind, scope_id, metric, operator, threshold, for_ms, enabled, recover_notify, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (id) DO UPDATE SET
+		    name = excluded.name,
+		    description = excluded.description,
 		    kind = excluded.kind,
+		    severity = excluded.severity,
+		    scope_kind = excluded.scope_kind,
 		    scope_id = excluded.scope_id,
 		    metric = excluded.metric,
+		    operator = excluded.operator,
 		    threshold = excluded.threshold,
 		    for_ms = excluded.for_ms,
 		    enabled = excluded.enabled,
+		    recover_notify = excluded.recover_notify,
 		    updated_at = excluded.updated_at`,
-		rule.ID, rule.Kind, rule.ScopeID, rule.Metric, rule.Threshold,
-		rule.For.Milliseconds(), enabled, now, now); err != nil {
+		rule.ID, rule.Name, rule.Description, rule.Kind, rule.Severity, rule.ScopeKind,
+		rule.ScopeID, rule.Metric, rule.Operator, rule.Threshold, rule.For.Milliseconds(),
+		enabled, recoverNotify, now, now); err != nil {
 		return fmt.Errorf("alerts: write the rule %s: %w", rule.ID, err)
 	}
 	return nil
@@ -226,6 +319,33 @@ func (e *Engine) PutRule(ctx context.Context, rule Rule) error {
 func knownKind(kind string) bool {
 	switch kind {
 	case KindContainerExit, KindAgentOffline, KindResource:
+		return true
+	}
+	return false
+}
+
+// knownSeverity reports whether the severity is one the console understands.
+func knownSeverity(severity string) bool {
+	switch severity {
+	case SeverityInfo, SeverityWarning, SeverityCritical:
+		return true
+	}
+	return false
+}
+
+// knownScopeKind reports whether the scope is one the engine matches.
+func knownScopeKind(scopeKind string) bool {
+	switch scopeKind {
+	case ScopeAll, ScopeContainer, ScopeNamespace:
+		return true
+	}
+	return false
+}
+
+// knownOperator reports whether the operator is one the engine compares with.
+func knownOperator(operator string) bool {
+	switch operator {
+	case OperatorGreaterThan, OperatorGreaterOrEqual, OperatorLessThan, OperatorLessOrEqual:
 		return true
 	}
 	return false
@@ -248,7 +368,7 @@ func (e *Engine) DeleteRule(ctx context.Context, ruleID string) error {
 // Rules lists the rules.
 func (e *Engine) Rules(ctx context.Context) ([]Rule, error) {
 	rows, err := e.db.QueryContext(ctx, `
-		SELECT id, kind, scope_id, metric, threshold, for_ms, enabled
+		SELECT id, name, description, kind, severity, scope_kind, scope_id, metric, operator, threshold, for_ms, enabled, recover_notify
 		  FROM alert_rules
 		 ORDER BY created_at, id`)
 	if err != nil {
@@ -260,14 +380,16 @@ func (e *Engine) Rules(ctx context.Context) ([]Rule, error) {
 	for rows.Next() {
 		var rule Rule
 		var forMS int64
-		var enabled int
-		if err := rows.Scan(&rule.ID, &rule.Kind, &rule.ScopeID, &rule.Metric,
-			&rule.Threshold, &forMS, &enabled); err != nil {
+		var enabled, recoverNotify int
+		if err := rows.Scan(&rule.ID, &rule.Name, &rule.Description, &rule.Kind, &rule.Severity,
+			&rule.ScopeKind, &rule.ScopeID, &rule.Metric, &rule.Operator, &rule.Threshold,
+			&forMS, &enabled, &recoverNotify); err != nil {
 			return nil, fmt.Errorf("alerts: read a rule: %w", err)
 		}
 		rule.For = time.Duration(forMS) * time.Millisecond
 		rule.ForSeconds = int(rule.For / time.Second)
 		rule.Enabled = enabled != 0
+		rule.RecoverQuiet = recoverNotify == 0
 		rules = append(rules, rule)
 	}
 	if err := rows.Err(); err != nil {

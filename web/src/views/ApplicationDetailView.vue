@@ -1363,6 +1363,9 @@ onBeforeUnmount(() => {
         <p v-if="isDeployBlocked(deployment?.state ?? null)" class="muted">
           这个应用有一个还没有结束的部署，结束后才能再次提交。
         </p>
+        <p v-else-if="!preview" class="muted">
+          请先点击「预览影响」确认这次改动，然后才能保存并部署。
+        </p>
         <p v-else-if="contentChanged" class="muted">
           配置在预览之后发生了变化，请重新预览。
         </p>

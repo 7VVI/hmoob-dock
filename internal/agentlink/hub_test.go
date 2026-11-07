@@ -799,3 +799,109 @@ func TestTheHubRefusesAControlFrameWhenTheControlQueueIsFull(t *testing.T) {
 
 	expectClosed(t, conn)
 }
+
+// TestHubCarriesTheNetworksAndTheImagesOfAnInventory proves that the
+// networks and the images of a snapshot reach the inventory of the node,
+// although they travel only in the first batch of it.
+func TestHubCarriesTheNetworksAndTheImagesOfAnInventory(t *testing.T) {
+	h := newTestHub(t)
+	identity := protocol.NodeIdentity{EngineID: "engine-a", Hostname: "worker-1"}
+	credential := h.enroll(t, identity)
+
+	conn := h.connect(t, credential)
+	send(t, conn, hello(t, identity))
+	waitFor(t, "the node to be connected", func() bool {
+		return h.hub.Connected(credential.NodeID)
+	})
+
+	batch := protocol.InventoryBatch{
+		SnapshotID:  "snapshot-1",
+		BatchIndex:  0,
+		BatchCount:  1,
+		Complete:    true,
+		Identity:    identity,
+		Containers:  []protocol.Container{{ID: "c1", Name: "web", Image: "nginx:alpine", State: "running"}},
+		Networks:    []protocol.Network{{ID: "net-1", Name: "bridge", IPAMSubnet: "172.17.0.0/16", IPAMGateway: "172.17.0.1"}},
+		Images:      []protocol.Image{{ID: "sha256:aaa111", Tags: []string{"nginx:alpine"}, Size: 73400320}},
+		CollectedAt: time.Now().UTC(),
+	}
+	payload, err := json.Marshal(batch)
+	if err != nil {
+		t.Fatalf("encode the inventory batch: %v", err)
+	}
+	send(t, conn, protocol.Envelope{
+		Version: protocol.WireVersion,
+		Type:    protocol.TypeInventory,
+		Seq:     3,
+		Payload: payload,
+	})
+
+	var inventory protocol.Inventory
+	waitFor(t, "the inventory to be complete", func() bool {
+		var err error
+		inventory, err = h.hub.ReadInventory(context.Background(), "compose", credential.NodeID)
+		return err == nil
+	})
+
+	if len(inventory.Networks) != 1 || inventory.Networks[0].Name != "bridge" {
+		t.Fatalf("networks = %+v, want the network of the snapshot", inventory.Networks)
+	}
+	if inventory.Networks[0].IPAMSubnet != "172.17.0.0/16" {
+		t.Fatalf("subnet = %q, want the subnet of the network", inventory.Networks[0].IPAMSubnet)
+	}
+	if len(inventory.Images) != 1 || inventory.Images[0].ID != "sha256:aaa111" {
+		t.Fatalf("images = %+v, want the image of the snapshot", inventory.Images)
+	}
+	if inventory.Images[0].Tags[0] != "nginx:alpine" {
+		t.Fatalf("tags = %v, want the reference of the image", inventory.Images[0].Tags)
+	}
+}
+
+// TestHubCarriesTheVolumesOfAnInventory proves that the named volumes of a
+// snapshot reach the inventory of the node.
+func TestHubCarriesTheVolumesOfAnInventory(t *testing.T) {
+	h := newTestHub(t)
+	identity := protocol.NodeIdentity{EngineID: "engine-a", Hostname: "worker-1"}
+	credential := h.enroll(t, identity)
+
+	conn := h.connect(t, credential)
+	send(t, conn, hello(t, identity))
+	waitFor(t, "the node to be connected", func() bool {
+		return h.hub.Connected(credential.NodeID)
+	})
+
+	batch := protocol.InventoryBatch{
+		SnapshotID:  "snapshot-1",
+		BatchIndex:  0,
+		BatchCount:  1,
+		Complete:    true,
+		Identity:    identity,
+		Containers:  []protocol.Container{{ID: "c1", Name: "web", Image: "nginx:alpine", State: "running", Mounts: []protocol.Mount{{Type: "volume", Source: "web-data", Destination: "/data"}}}},
+		Volumes:     []protocol.Volume{{Name: "web-data", Driver: "local", Mountpoint: "/var/lib/docker/volumes/web-data/_data"}},
+		CollectedAt: time.Now().UTC(),
+	}
+	payload, err := json.Marshal(batch)
+	if err != nil {
+		t.Fatalf("encode the inventory batch: %v", err)
+	}
+	send(t, conn, protocol.Envelope{
+		Version: protocol.WireVersion,
+		Type:    protocol.TypeInventory,
+		Seq:     3,
+		Payload: payload,
+	})
+
+	var inventory protocol.Inventory
+	waitFor(t, "the inventory to be complete", func() bool {
+		var err error
+		inventory, err = h.hub.ReadInventory(context.Background(), "compose", credential.NodeID)
+		return err == nil
+	})
+
+	if len(inventory.Volumes) != 1 || inventory.Volumes[0].Name != "web-data" {
+		t.Fatalf("volumes = %+v, want the volume of the snapshot", inventory.Volumes)
+	}
+	if inventory.Volumes[0].Mountpoint != "/var/lib/docker/volumes/web-data/_data" {
+		t.Fatalf("mountpoint = %q, want the path of the volume", inventory.Volumes[0].Mountpoint)
+	}
+}

@@ -86,14 +86,61 @@ type serviceSummary struct {
 
 // networkSummary is one network of a node in the API.
 type networkSummary struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Driver     string `json:"driver"`
-	Scope      string `json:"scope"`
-	Internal   bool   `json:"internal"`
-	Attachable bool   `json:"attachable"`
-	Created    string `json:"created"`
-	Containers int    `json:"containers"`
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	Stack           string `json:"stack,omitempty"`
+	Driver          string `json:"driver"`
+	Scope           string `json:"scope"`
+	Internal        bool   `json:"internal"`
+	Attachable      bool   `json:"attachable"`
+	Created         string `json:"created"`
+	Containers      int    `json:"containers"`
+	IPAMDriver      string `json:"ipam_driver,omitempty"`
+	IPAMSubnet      string `json:"ipam_subnet,omitempty"`
+	IPAMGateway     string `json:"ipam_gateway,omitempty"`
+	IPAMIPv6Subnet  string `json:"ipam_ipv6_subnet,omitempty"`
+	IPAMIPv6Gateway string `json:"ipam_ipv6_gateway,omitempty"`
+}
+
+// imageSummary is one image of a node in the API.
+type imageSummary struct {
+	// ID is the ID of the image, for example sha256:....
+	ID string `json:"id"`
+	// Tags are the references the image carries.
+	Tags []string `json:"tags,omitempty"`
+	// Size is the size of the image on the disk of the node, in bytes.
+	Size int64 `json:"size"`
+	// Created is the time the image was built or pulled.
+	Created string `json:"created,omitempty"`
+	// Labels are the labels of the image.
+	Labels map[string]string `json:"labels,omitempty"`
+	// Containers is the number of the containers of the node that run the
+	// image.
+	Containers int `json:"containers"`
+	// Used reports whether a container of the node runs the image.
+	Used bool `json:"used"`
+}
+
+// volumeSummary is one named volume of a node in the API.
+type volumeSummary struct {
+	// Name is the name of the volume.
+	Name string `json:"name"`
+	// Stack is the Compose project or the Swarm stack the volume belongs
+	// to, when its labels name one.
+	Stack string `json:"stack,omitempty"`
+	// Driver is the driver of the volume, for example local.
+	Driver string `json:"driver,omitempty"`
+	// Scope is the scope of the volume, for example local.
+	Scope string `json:"scope,omitempty"`
+	// Mountpoint is the path on the node the volume lives at.
+	Mountpoint string `json:"mountpoint,omitempty"`
+	// Created is the time the volume was created.
+	Created string `json:"created,omitempty"`
+	// Containers is the number of the containers of the node that mount
+	// the volume.
+	Containers int `json:"containers"`
+	// Used reports whether a container of the node mounts the volume.
+	Used bool `json:"used"`
 }
 
 // stackNamespaceLabel names the Swarm stack of a container.
@@ -123,6 +170,9 @@ func (s *Server) registerContainerRoutes() {
 	s.mux.HandleFunc("/api/v1/nodes/{id}/containers/{cid}/op", s.handleContainerOp)
 	s.mux.HandleFunc("/api/v1/nodes/{id}/services", s.handleNodeServices)
 	s.mux.HandleFunc("/api/v1/nodes/{id}/networks", s.handleNodeNetworks)
+	s.mux.HandleFunc("/api/v1/nodes/{id}/images", s.handleNodeImages)
+	s.mux.HandleFunc("/api/v1/nodes/{id}/volumes", s.handleNodeVolumes)
+	s.mux.HandleFunc("/api/v1/nodes/{id}/swarm", s.handleNodeSwarm)
 }
 
 // handleNodeContainers answers with the containers of one node.
@@ -394,14 +444,20 @@ func (s *Server) handleNodeNetworks(w http.ResponseWriter, r *http.Request) {
 	networks := make([]networkSummary, 0, len(inventory.Networks))
 	for _, network := range inventory.Networks {
 		networks = append(networks, networkSummary{
-			ID:         network.ID,
-			Name:       network.Name,
-			Driver:     network.Driver,
-			Scope:      network.Scope,
-			Internal:   network.Internal,
-			Attachable: network.Attachable,
-			Created:    network.Created,
-			Containers: network.Containers,
+			ID:              network.ID,
+			Name:            network.Name,
+			Stack:           network.Labels[composeProjectLabel],
+			Driver:          network.Driver,
+			Scope:           network.Scope,
+			Internal:        network.Internal,
+			Attachable:      network.Attachable,
+			Created:         network.Created,
+			Containers:      network.Containers,
+			IPAMDriver:      network.IPAMDriver,
+			IPAMSubnet:      network.IPAMSubnet,
+			IPAMGateway:     network.IPAMGateway,
+			IPAMIPv6Subnet:  network.IPAMIPv6Subnet,
+			IPAMIPv6Gateway: network.IPAMIPv6Gateway,
 		})
 	}
 	sort.SliceStable(networks, func(i, j int) bool {
@@ -413,6 +469,212 @@ func (s *Server) handleNodeNetworks(w http.ResponseWriter, r *http.Request) {
 		"networks":     networks,
 		"collected_at": inventory.CollectedAt.UTC().Format(time.RFC3339Nano),
 	})
+}
+
+// handleNodeImages answers with the images in the local store of one node.
+func (s *Server) handleNodeImages(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "该端点只接受 GET 请求")
+		return
+	}
+	if _, ok := s.requireSession(w, r); !ok {
+		return
+	}
+
+	nodeID := strings.TrimSpace(r.PathValue("id"))
+	if nodeID == "" {
+		writeError(w, http.StatusBadRequest, "validation_failed", "必须指定节点")
+		return
+	}
+
+	inventory, err := s.hub.ReadInventory(r.Context(), "compose", nodeID)
+	if err != nil {
+		writeError(w, http.StatusConflict, "target_unavailable", "这个节点当前的清单不可用，请稍后重试")
+		return
+	}
+
+	images := make([]imageSummary, 0, len(inventory.Images))
+	for _, image := range inventory.Images {
+		images = append(images, imageSummaryOf(image, inventory.Containers))
+	}
+	// The newest image comes first, an image without a build time last.
+	sort.SliceStable(images, func(i, j int) bool {
+		return images[i].Created > images[j].Created
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"node_id":      nodeID,
+		"images":       images,
+		"collected_at": inventory.CollectedAt.UTC().Format(time.RFC3339Nano),
+	})
+}
+
+// imageSummaryOf projects one image of the inventory and counts the
+// containers of the same inventory that run it.
+//
+// The count is a correspondence of the reference a container was created
+// with and the references the image carries: a container that runs an image
+// by an ID the inventory does not carry is not counted.
+func imageSummaryOf(image protocol.Image, containers []protocol.Container) imageSummary {
+	running := 0
+	for _, container := range containers {
+		if imageInUseBy(container.Image, image) {
+			running++
+		}
+	}
+	// An image nobody runs is unused, whether it carries a tag or not.
+	used := running > 0
+	return imageSummary{
+		ID:         image.ID,
+		Tags:       image.Tags,
+		Size:       image.Size,
+		Created:    image.Created,
+		Labels:     image.Labels,
+		Containers: running,
+		Used:       used,
+	}
+}
+
+// imageInUseBy reports whether a container runs on the image.
+//
+// A container names the image it was created with, a tag or an ID. The
+// answer is a heuristic: a container that runs by a digest the local store
+// names differently is not counted.
+func imageInUseBy(reference string, image protocol.Image) bool {
+	if reference == "" {
+		return false
+	}
+	if reference == image.ID {
+		return true
+	}
+	if strings.HasPrefix(image.ID, reference) || strings.HasPrefix(reference, image.ID) {
+		return true
+	}
+	for _, tag := range image.Tags {
+		if reference == tag {
+			return true
+		}
+		// A reference without a tag, for example nginx, names the latest
+		// tag of the repository in the store.
+		if tag == reference+":latest" {
+			return true
+		}
+	}
+	return false
+}
+
+// handleNodeVolumes answers with the named volumes of one node.
+func (s *Server) handleNodeVolumes(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "该端点只接受 GET 请求")
+		return
+	}
+	if _, ok := s.requireSession(w, r); !ok {
+		return
+	}
+
+	nodeID := strings.TrimSpace(r.PathValue("id"))
+	if nodeID == "" {
+		writeError(w, http.StatusBadRequest, "validation_failed", "必须指定节点")
+		return
+	}
+
+	inventory, err := s.hub.ReadInventory(r.Context(), "compose", nodeID)
+	if err != nil {
+		writeError(w, http.StatusConflict, "target_unavailable", "这个节点当前的清单不可用，请稍后重试")
+		return
+	}
+
+	volumes := make([]volumeSummary, 0, len(inventory.Volumes))
+	for _, volume := range inventory.Volumes {
+		volumes = append(volumes, volumeSummaryOf(volume, inventory.Containers))
+	}
+	sort.SliceStable(volumes, func(i, j int) bool {
+		return volumes[i].Name < volumes[j].Name
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"node_id":      nodeID,
+		"volumes":      volumes,
+		"collected_at": inventory.CollectedAt.UTC().Format(time.RFC3339Nano),
+	})
+}
+
+// handleNodeSwarm answers with the Swarm cluster the node belongs to.
+//
+// A node that belongs to no cluster answers with an empty list, so the
+// console shows the page of a standalone node without a cluster.
+func (s *Server) handleNodeSwarm(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "该端点只接受 GET 请求")
+		return
+	}
+	if _, ok := s.requireSession(w, r); !ok {
+		return
+	}
+
+	nodeID := strings.TrimSpace(r.PathValue("id"))
+	if nodeID == "" {
+		writeError(w, http.StatusBadRequest, "validation_failed", "必须指定节点")
+		return
+	}
+
+	inventory, err := s.hub.ReadInventory(r.Context(), "compose", nodeID)
+	if err != nil {
+		writeError(w, http.StatusConflict, "target_unavailable", "这个节点当前的清单不可用，请稍后重试")
+		return
+	}
+
+	nodes := make([]protocol.SwarmNode, 0, len(inventory.SwarmNodes))
+	for _, node := range inventory.SwarmNodes {
+		nodes = append(nodes, node)
+	}
+	sort.SliceStable(nodes, func(i, j int) bool {
+		if nodes[i].Role != nodes[j].Role {
+			return nodes[i].Role > nodes[j].Role
+		}
+		return nodes[i].Hostname < nodes[j].Hostname
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"node_id":      nodeID,
+		"swarm_nodes":  nodes,
+		"collected_at": inventory.CollectedAt.UTC().Format(time.RFC3339Nano),
+	})
+}
+
+// volumeSummaryOf projects one volume of the inventory and counts the
+// containers of the same inventory that mount it.
+//
+// A container mounts a volume by its name, so the count reads the source
+// of every mount of the container.
+func volumeSummaryOf(volume protocol.Volume, containers []protocol.Container) volumeSummary {
+	mountedBy := 0
+	for _, container := range containers {
+		for _, mount := range container.Mounts {
+			if mount.Source == volume.Name && (mount.Type == "" || mount.Type == "volume") {
+				mountedBy++
+				break
+			}
+		}
+	}
+	stack := volume.Labels[composeProjectLabel]
+	if stack == "" {
+		stack = volume.Labels[stackNamespaceLabel]
+	}
+	return volumeSummary{
+		Name:       volume.Name,
+		Stack:      stack,
+		Driver:     volume.Driver,
+		Scope:      volume.Scope,
+		Mountpoint: volume.Mountpoint,
+		Created:    volume.Created,
+		Containers: mountedBy,
+		Used:       mountedBy > 0,
+	}
 }
 
 // namespaceOfContainer returns the namespace an application of the platform

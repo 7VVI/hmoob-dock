@@ -17,9 +17,12 @@ import type {
   ContainerOpResult,
   NodeDetailPayload,
   NodeListPayload,
+  NodeImage,
   NodeNetwork,
   NodeService,
   NodeSummary,
+  NodeSwarmNode,
+  NodeVolume,
 } from './types'
 
 // ContainerDetail is one container with the facts of its details.
@@ -78,6 +81,39 @@ export async function listNodeNetworks(nodeID: string): Promise<NodeNetwork[]> {
     `/api/v1/nodes/${encodeURIComponent(nodeID)}/networks`,
   )
   return payload.networks ?? []
+}
+
+// listNodeImages reads the images in the local store of one node.
+//
+// An agent of an older version reports no images, so the answer may be
+// empty until the agent was upgraded.
+export async function listNodeImages(nodeID: string): Promise<NodeImage[]> {
+  const payload = await api<{ images: NodeImage[]; collected_at?: string }>(
+    `/api/v1/nodes/${encodeURIComponent(nodeID)}/images`,
+  )
+  return payload.images ?? []
+}
+
+// listNodeVolumes reads the named volumes in the local store of one node.
+//
+// An agent of an older version reports no volumes, so the answer may be
+// empty until the agent was upgraded.
+export async function listNodeVolumes(nodeID: string): Promise<NodeVolume[]> {
+  const payload = await api<{ volumes: NodeVolume[]; collected_at?: string }>(
+    `/api/v1/nodes/${encodeURIComponent(nodeID)}/volumes`,
+  )
+  return payload.volumes ?? []
+}
+
+// listNodeSwarm reads the Swarm cluster a node belongs to.
+//
+// A node that belongs to no cluster answers with an empty list, so the
+// page can tell the two kinds of node apart.
+export async function listNodeSwarm(nodeID: string): Promise<NodeSwarmNode[]> {
+  const payload = await api<{ swarm_nodes: NodeSwarmNode[]; collected_at?: string }>(
+    `/api/v1/nodes/${encodeURIComponent(nodeID)}/swarm`,
+  )
+  return payload.swarm_nodes ?? []
 }
 
 // getNodeContainer reads one container of a node with its details.

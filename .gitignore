@@ -15,6 +15,7 @@
 *.log
 
 # Local secrets and credentials
+/secrets/
 *.key
 *.pem
 /agent-credential

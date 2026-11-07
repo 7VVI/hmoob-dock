@@ -143,10 +143,23 @@ func (e *Engine) Observe(ctx context.Context, ruleID string, value Observation) 
 	return resolved, nil
 }
 
-// isAnomaly reports whether the sample is above the condition of the rule.
+// isAnomaly reports whether the sample meets the condition of the rule.
+//
+// A resource rule compares the observed value with its threshold in the
+// direction its operator names. An exit or an offline node is a flag: any
+// non zero value reports it.
 func (e *Engine) isAnomaly(rule Rule, value Observation) bool {
 	if rule.Kind == KindResource {
-		return value.Value > rule.Threshold
+		switch rule.Operator {
+		case OperatorGreaterOrEqual:
+			return value.Value >= rule.Threshold
+		case OperatorLessThan:
+			return value.Value < rule.Threshold
+		case OperatorLessOrEqual:
+			return value.Value <= rule.Threshold
+		default:
+			return value.Value > rule.Threshold
+		}
 	}
 	// An exit or an offline node is a flag: any non zero value reports it.
 	return value.Value != 0
@@ -195,12 +208,14 @@ func (e *Engine) writeCondition(ctx context.Context, ruleID, objectID string, va
 func (e *Engine) rule(ctx context.Context, ruleID string) (Rule, error) {
 	var rule Rule
 	var forMS int64
-	var enabled int
+	var enabled, recoverNotify int
 	err := e.db.QueryRowContext(ctx, `
-		SELECT id, kind, scope_id, metric, threshold, for_ms, enabled
+		SELECT id, name, description, kind, severity, scope_kind, scope_id, metric, operator, threshold, for_ms, enabled, recover_notify
 		  FROM alert_rules
 		 WHERE id = ?`, ruleID).
-		Scan(&rule.ID, &rule.Kind, &rule.ScopeID, &rule.Metric, &rule.Threshold, &forMS, &enabled)
+		Scan(&rule.ID, &rule.Name, &rule.Description, &rule.Kind, &rule.Severity,
+			&rule.ScopeKind, &rule.ScopeID, &rule.Metric, &rule.Operator, &rule.Threshold,
+			&forMS, &enabled, &recoverNotify)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Rule{}, fmt.Errorf("%w: %s", ErrRuleNotFound, ruleID)
 	}
@@ -210,6 +225,7 @@ func (e *Engine) rule(ctx context.Context, ruleID string) (Rule, error) {
 	rule.For = time.Duration(forMS) * time.Millisecond
 	rule.ForSeconds = int(rule.For / time.Second)
 	rule.Enabled = enabled != 0
+	rule.RecoverQuiet = recoverNotify == 0
 	return rule, nil
 }
 
@@ -287,8 +303,12 @@ func (e *Engine) resolveEvent(ctx context.Context, rule Rule, active *Event, at 
 	resolved.State = StateResolved
 	resolved.ResolvedAt = &at
 	resolved.Summary = e.summary(rule, active.ObjectID, StateResolved)
-	if err := e.enqueue(ctx, tx, resolved, next, at); err != nil {
-		return nil, err
+	// A rule with a quiet recovery resolves without a word: the event of
+	// the platform records the recovery, no notification leaves.
+	if !rule.RecoverQuiet {
+		if err := e.enqueue(ctx, tx, resolved, next, at); err != nil {
+			return nil, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("alerts: commit the recovery of %s: %w", active.ID, err)
@@ -353,7 +373,11 @@ func (e *Engine) summary(rule Rule, objectID, state string) string {
 	}
 	switch rule.Kind {
 	case KindResource:
-		return fmt.Sprintf("对象 %s 的 %s 持续超过阈值 %g", objectID, rule.Metric, rule.Threshold)
+		direction := "超过"
+		if rule.Operator == OperatorLessThan || rule.Operator == OperatorLessOrEqual {
+			direction = "低于"
+		}
+		return fmt.Sprintf("对象 %s 的 %s 持续%s阈值 %g", objectID, rule.Metric, direction, rule.Threshold)
 	case KindContainerExit:
 		return fmt.Sprintf("对象 %s 意外退出", objectID)
 	case KindAgentOffline:

@@ -9,24 +9,39 @@
 import { api } from './client'
 import type {
   AlertEvent,
+  AlertOperator,
   AlertRule,
   AlertRuleKind,
+  AlertScopeKind,
+  AlertSeverity,
   WebhookBundle,
   WebhookPayload,
 } from './types'
 
 // AlertRuleInput describes the rule the administrator wants to save.
 export interface AlertRuleInput {
+  // name is the title the administrator reads in the list of the rules.
+  name: string
+  // description is the sentence the administrator wrote for the rule.
+  description: string
   kind: AlertRuleKind
+  // severity is the weight of the rule. An empty severity saves a warning.
+  severity: AlertSeverity
+  // scope_kind names the breadth the rule watches.
+  scope_kind: AlertScopeKind
   // scope_id is the object the rule watches.
   scope_id: string
   // metric is the value a resource rule watches.
   metric: string
+  // operator compares the observed value with the threshold.
+  operator: AlertOperator
   // threshold is the limit of a resource rule.
   threshold: number
   // for_seconds is the time the condition has to hold.
   for_seconds: number
   enabled: boolean
+  // recover_notify reports whether the recovery of the rule speaks.
+  recover_notify: boolean
 }
 
 // WebhookInput describes the target of the notifications.
