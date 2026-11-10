@@ -92,7 +92,17 @@ export async function listNodeImages(nodeID: string): Promise<NodeImage[]> {
   const payload = await api<{ images: NodeImage[]; collected_at?: string }>(
     `/api/v1/nodes/${encodeURIComponent(nodeID)}/images`,
   )
-  return payload.images ?? []
+  // An image without a reference carries no tags, and an older control端
+  // leaves the field out of the answer instead of sending an empty array.
+  // The page reads the length of the tags, so the client fills the gap.
+  return (payload.images ?? []).map((image) => ({
+    ...image,
+    tags: Array.isArray(image.tags) ? image.tags : [],
+    size: image.size ?? 0,
+    created: image.created ?? '',
+    containers: image.containers ?? 0,
+    used: image.used ?? false,
+  }))
 }
 
 // listNodeEvents reads the recent container events of one node. A

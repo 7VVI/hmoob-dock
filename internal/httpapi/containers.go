@@ -106,8 +106,9 @@ type networkSummary struct {
 type imageSummary struct {
 	// ID is the ID of the image, for example sha256:....
 	ID string `json:"id"`
-	// Tags are the references the image carries.
-	Tags []string `json:"tags,omitempty"`
+	// Tags are the references the image carries. The field is always an
+	// array, so a page can read its length without a special case.
+	Tags []string `json:"tags"`
 	// Size is the size of the image on the disk of the node, in bytes.
 	Size int64 `json:"size"`
 	// Created is the time the image was built or pulled.
@@ -526,9 +527,15 @@ func imageSummaryOf(image protocol.Image, containers []protocol.Container) image
 	}
 	// An image nobody runs is unused, whether it carries a tag or not.
 	used := running > 0
+	// The tags are always an array in the answer: a nil slice would become
+	// null, and the page reads the length of the field.
+	tags := image.Tags
+	if tags == nil {
+		tags = []string{}
+	}
 	return imageSummary{
 		ID:         image.ID,
-		Tags:       image.Tags,
+		Tags:       tags,
 		Size:       image.Size,
 		Created:    image.Created,
 		Labels:     image.Labels,
